@@ -1,0 +1,10 @@
+{
+  "name": "mycpu",
+  "private": true,
+  "type": "commonjs",
+  "description": "自作CPU（isa-spec.md）のアセンブラ・シミュレータ・Verilog",
+  "scripts": {
+    "gen": "node tools/gen.js",
+    "test": "node test/run.js"
+  }
+}

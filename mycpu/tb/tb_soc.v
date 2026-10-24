@@ -1,0 +1,130 @@
+// SoC 全体のテストベンチ（Icarus Verilog 用）。test/run.js から使う。
+//   コンパイル時：-Ptb.ROM_HEX="prog.hex" -Ptb.FONT_HEX="font8x16.hex"
+//   実行時：+uart=出力 +regs=出力 [+rx=入力] [+ppm=出力] [+max=クロック数]
+// 止まったら（HLT など）レジスタ一覧を lib/cpu.js の dumpRegs と同じ書式で書く。
+// +ppm があれば、止まった後の 1 フレームを表示回路から取り込んで PPM にする。
+`timescale 1ns / 1ps
+module tb;
+  parameter ROM_HEX  = "";
+  parameter FONT_HEX = "";
+  // シミュレーションを速くするため、クロック 4MHz・UART 1Mbps（1 bit = 4 クロック）とみなす
+  localparam integer CLK_HZ = 4_000_000, BAUD = 1_000_000, BIT = CLK_HZ / BAUD;
+
+  reg clk = 1'b0, vclk = 1'b0, rst = 1'b1, rxd = 1'b1;
+  always #5 clk = ~clk;
+  always #2 vclk = ~vclk;
+
+  wire        txd, halted;
+  wire [1:0]  halt_code;
+  wire [5:0]  led;
+  wire [11:0] vaddr;
+  wire [31:0] vdata;
+  mycpu_soc #(.CLK_HZ(CLK_HZ), .BAUD(BAUD), .ROM_HEX(ROM_HEX)) soc (
+    .clk(clk), .rst(rst), .uart_rxd(rxd), .uart_txd(txd), .led(led),
+    .halted(halted), .halt_code(halt_code), .vclk(vclk), .vaddr(vaddr), .vdata(vdata)
+  );
+  wire [7:0] r, g, b;
+  wire hs, vs, de;
+  mycpu_video #(.FONT_HEX(FONT_HEX)) video (
+    .pclk(vclk), .rst(rst), .vaddr(vaddr), .vdata(vdata), .r(r), .g(g), .b(b), .hs(hs), .vs(vs), .de(de)
+  );
+
+  reg [1023:0] path;
+  integer fu, fr, fx, fp, max, cycles, i, c, n;
+
+  // ---- UART 送信を読み取る ----
+  reg [7:0] ch;
+  initial begin
+    forever begin
+      @(negedge txd);
+      repeat (BIT / 2) @(posedge clk);
+      for (i = 0; i < 8; i = i + 1) begin
+        repeat (BIT) @(posedge clk);
+        ch[i] = txd;
+      end
+      repeat (BIT) @(posedge clk);
+      if (fu) $fwrite(fu, "%c", ch);
+    end
+  end
+
+  // ---- UART 受信に流し込む ----
+  task send(input [7:0] v);
+    integer j;
+    begin
+      rxd = 1'b0; repeat (BIT) @(posedge clk);
+      for (j = 0; j < 8; j = j + 1) begin rxd = v[j]; repeat (BIT) @(posedge clk); end
+      rxd = 1'b1; repeat (BIT * 40) @(posedge clk);   // 1 文字ごとに間をあける
+    end
+  endtask
+
+  // +trace：命令を実行するたびに番地を出す（lib/cpu.js の --trace と比べる用）
+  reg trace;
+  initial trace = $test$plusargs("trace");
+  reg [3:0] prev_state;
+  always @(posedge clk) begin
+    prev_state <= soc.cpu.state;
+    if (trace && soc.cpu.state == 4'd4 && prev_state != 4'd4 && prev_state != 4'd5)
+      $display("%08x %08x %08x", soc.cpu.pc, soc.cpu.ir, soc.cpu.imm);
+  end
+
+  task dump_regs;
+    begin
+      $fwrite(fr, "pc=%08x sp=%08x lr=%08x\n", soc.cpu.pc, soc.cpu.sp, soc.cpu.lr);
+      $fwrite(fr, "epc=%08x cause=%08x evec=%08x status=%08x\n", soc.cpu.epc, soc.cpu.cause, soc.cpu.evec, soc.cpu.status);
+      $fwrite(fr, "p1-p7=%b%b%b%b%b%b%b\n", soc.cpu.pr[1], soc.cpu.pr[2], soc.cpu.pr[3], soc.cpu.pr[4],
+              soc.cpu.pr[5], soc.cpu.pr[6], soc.cpu.pr[7]);
+      for (i = 0; i < 16; i = i + 4)
+        $fwrite(fr, "r%0d=%08x r%0d=%08x r%0d=%08x r%0d=%08x\n", 16 + i, soc.cpu.gpr[i], 17 + i, soc.cpu.gpr[i + 1],
+                18 + i, soc.cpu.gpr[i + 2], 19 + i, soc.cpu.gpr[i + 3]);
+    end
+  endtask
+
+  initial begin
+    fu = 0; fr = 0; fx = 0; fp = 0;
+    if ($value$plusargs("uart=%s", path)) fu = $fopen(path, "wb");
+    if ($value$plusargs("regs=%s", path)) fr = $fopen(path, "w");
+    if (!$value$plusargs("max=%d", max)) max = 20_000_000;
+    repeat (4) @(posedge clk);
+    rst = 1'b0;
+
+    if ($value$plusargs("rx=%s", path)) begin
+      fx = $fopen(path, "rb");
+      repeat (BIT * 200) @(posedge clk);
+      c = $fgetc(fx);
+      while (c >= 0 && !halted) begin
+        send(c[7:0]);
+        c = $fgetc(fx);
+      end
+    end
+  end
+
+  initial begin
+    cycles = 0;
+    @(negedge rst);
+    while (halted !== 1'b1 && cycles < max) begin
+      @(posedge clk);
+      cycles = cycles + 1;
+    end
+    repeat (BIT * 10 * 20) @(posedge clk);   // UART の送信が終わるのを待つ
+    if (!halted) $display("tb: %0d クロックで打ち切り", max);
+    else $display("tb: 停止 halt_code=%0d（%0d クロック）", halt_code, cycles);
+    if (fr) begin dump_regs; $fclose(fr); end
+    if (fu) $fclose(fu);
+
+    if ($value$plusargs("ppm=%s", path)) begin
+      fp = $fopen(path, "wb");
+      $fwrite(fp, "P6\n1280 720\n255\n");
+      @(posedge vs);                         // 垂直同期の後から 1 フレーム分
+      n = 0;
+      while (n < 1280 * 720) begin
+        @(posedge vclk);
+        if (de) begin
+          $fwrite(fp, "%c%c%c", r, g, b);
+          n = n + 1;
+        end
+      end
+      $fclose(fp);
+    end
+    $finish;
+  end
+endmodule
