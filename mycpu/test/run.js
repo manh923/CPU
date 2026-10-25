@@ -189,7 +189,7 @@ const cases = [];
       o.includes(nl('C:\\>type\nRequired parameter missing\n')) && o.includes(nl('C:\\>del nofile\nFile not found\n')) &&
       o.includes(nl('C:\\>ren renamed.txt hello.exe\nDuplicate file name or file not found\n')), '');
     check(`MyDOS（${type}）：COPY CON・COPY・リダイレクト・TOUPPER`, o.includes(nl('^Z\n        1 file(s) copied\n')) &&
-      o.includes(nl('978 bytes converted\n')) && /RENAMED  TXT +32 01-01-26  12:00a/.test(o) && o.includes(nl('fib(3) = 2\n\nC:\\>')), '');
+      o.includes(nl(`${readme.length} bytes converted\n`)) && /RENAMED  TXT +32 01-01-26  12:00a/.test(o) && o.includes(nl('fib(3) = 2\n\nC:\\>')), '');
     check(`MyDOS（${type}）：.BAT から .BAT、シャットダウン`, o.includes(nl('C:\\>FIB 10\nfib(0) = 0\n')) &&
       o.includes("safe to turn off") && r.cpu.halted.kind === 'hlt', o.slice(-300));
     if (mtoolsOk) {
@@ -248,6 +248,7 @@ const cases = [];
       input: ' hello rtl\rcopy con a.txt\rwritten by rtl\r\x1a\rtype a.txt\rren a.txt b.txt\rtype b.txt\rdel b.txt\rcrash\rshutdown\r' },
     { name: 'mydos-uart', file: 'bios.asm', input: bootInput, disk: small(), max: 60_000_000 },
     { name: 'hello', file: 'hello.asm' },
+    { name: 'sdram', file: 'sdram.asm', sdram: true },
     { name: 'selftest32', file: 'selftest32.asm' },
     { name: 'trap', file: 'trap.asm', regs: false },
     { name: 'fib', file: 'fib.asm', max: 60_000_000 },
@@ -261,12 +262,16 @@ console.log('Verilog（iverilog）');
 if (spawnSync('iverilog', ['-V']).error) {
   console.log('  --   iverilog がないので飛ばす');
 } else {
-  const rtl = ['rtl/cpu.v', 'rtl/soc.v', 'rtl/uart.v', 'rtl/video.v'].map((f) => path.join(ROOT, f));
+  const rtl = ['rtl/cpu.v', 'rtl/soc.v', 'rtl/sdram.v', 'rtl/uart.v', 'rtl/video.v'].map((f) => path.join(ROOT, f));
   const p = (f) => path.join(ROOT, f);
 
   execFileSync('iverilog', ['-g2012', '-o', path.join(TMP, 'tmds.vvp'), p('tb/tb_tmds.v'), p('rtl/tmds.v')]);
   const tm = execFileSync('vvp', ['-n', path.join(TMP, 'tmds.vvp')], { encoding: 'utf8' });
   check('TMDS 符号器：元に戻せて、直流の偏りが小さい', /tb_tmds: 0 件 NG/.test(tm), tm.trim());
+
+  execFileSync('iverilog', ['-g2012', '-o', path.join(TMP, 'sdram.vvp'), p('tb/tb_sdram.v'), p('tb/sdram_model.v'), p('rtl/sdram.v')]);
+  const sdr = execFileSync('vvp', ['-n', path.join(TMP, 'sdram.vvp')], { encoding: 'utf8' });
+  check('SDRAM の制御回路：ランダムな読み書きが合い、モデルがタイミング違反を見つけない', /tb_sdram: 0 件 NG/.test(sdr), sdr.trim());
 
   const top = spawnSync('iverilog', ['-g2012', '-I', p('rtl'), '-o', path.join(TMP, 'top.vvp'), '-s', 'top_tangnano20k',
     p('rtl/gowin/top_tangnano20k.v'), ...rtl, p('rtl/tmds.v'), p('tb/gowin_stubs.v')], { encoding: 'utf8' });
@@ -294,7 +299,7 @@ if (spawnSync('iverilog', ['-V']).error) {
     // Verilog 側
     execFileSync('iverilog', ['-g2012', '-DMYCPU_SIM', '-I', path.join(ROOT, 'rtl'), '-o', base + '.vvp',
       `-Ptb.ROM_HEX="${base}.hex"`, `-Ptb.FONT_HEX="${path.join(ROOT, 'font/font8x16.hex')}"`, ...sdArgs,
-      path.join(ROOT, 'tb/tb_soc.v'), path.join(ROOT, 'tb/sd_model.v'), ...rtl]);
+      path.join(ROOT, 'tb/tb_soc.v'), path.join(ROOT, 'tb/sd_model.v'), path.join(ROOT, 'tb/sdram_model.v'), ...rtl]);
     const args = ['-n', base + '.vvp', `+uart=${base}.uart`, `+regs=${base}.regs`, `+max=${c.max || 20_000_000}`];
     if (c.input) { fs.writeFileSync(base + '.rx', Buffer.from(c.input, 'latin1')); args.push(`+rx=${base}.rx`); }
     if (c.ppm) args.push(`+ppm=${base}.ppm`);
@@ -302,6 +307,10 @@ if (spawnSync('iverilog', ['-V']).error) {
     const halted = /停止 halt_code=1/.test(log);
     const out = fs.readFileSync(base + '.uart', 'latin1');
     check(`${c.name}：HLT で止まる`, halted, log.trim());
+    if (c.sdram) {
+      const m = /SDRAM 読み出し (\d+) 回・書き込み (\d+) 回、タイミング違反 (\d+) 件/.exec(log);
+      check(`${c.name}：SDRAM を使い、タイミング違反がない`, m && +m[1] > 0 && +m[2] > 0 && m[3] === '0', log.trim());
+    }
     check(`${c.name}：UART 出力が一致`, out === sim.out, JSON.stringify(out.slice(0, 200)) + '\n≠ ' + JSON.stringify(sim.out.slice(0, 200)));
     if (c.regs !== false) {
       const regs = fs.readFileSync(base + '.regs', 'utf8');

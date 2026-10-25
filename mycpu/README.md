@@ -64,7 +64,7 @@ msg:    .asciz "hi\n"
 
 ROM（16KB）に入っているのは BIOS（`examples/bios.asm`）だけ。MyDOS は SD カードの `MYDOS.SYS`（`disk/mydos.sys.asm`）。
 
-1. **BIOS**：見出し、メモリテスト（内蔵 RAM 48KB を 1KB ずつ書いて読み戻す）、SD カードの初期化、SYSCALL の表の初期化
+1. **BIOS**：見出し、メモリテスト（内蔵 RAM 48KB を 1KB ずつ書いて読み戻す）、SDRAM の検査（データ線とアドレス線）、SD カードの初期化、SYSCALL の表の初期化
 2. 1 秒だけ **U キー**を待つ。U なら UART から起動、ほかのキーか時間切れなら次へ
 3. **ブートローダー**：SD カードの FAT のルートから `MYDOS.SYS` を探し、`0x20000` に読み込んで飛ぶ。カードがない・`MYDOS.SYS` がないときは `Non-System disk or disk error` を出し、キーを待ってやり直す
 4. **MyDOS 3.0**：`AUTOEXEC.BAT` があれば実行して `C:\>` を出す
@@ -114,10 +114,11 @@ r23 に番号、引数は r16〜r19 に入れて `SYSCALL`。戻り値は r16（
 | `0x26000`〜`0x2AFFF` | プログラム（.EXE・.COM） |
 | `0x2B000`〜 | BIOS の変数、`0x2B100` SYSCALL の表、`0x2B200` セクタの置き場、`0x2B400` FAT の置き場、`0x2B600` .BAT の置き場 |
 | 〜`0x2BFFF` | スタック（SP の初期値 `0x2C000`） |
+| `0x1000000`〜`0x17FFFFF` | SDRAM 8MB。プログラムが自由に使ってよい（`disk/sieve.exe.asm` は 1MB のふるいに使う）。`MEM` に出る |
 
 ### SD カードの中身を作る
 
-`disk/` に入れる中身がある（`MYDOS.SYS`、`README.TXT`、`AUTOEXEC.BAT`、`DEMO.BAT`、`HELLO.EXE`、`FIB.EXE`、`MANDEL.EXE`、`TOUPPER.EXE`、`CRASH.EXE`、`KITT.COM` のもと）。`NAME.exe.asm`・`NAME.com.asm` は `.EXE`・`.COM` に（`.org 0x26000` で書く）、`NAME.sys.asm` は `.SYS` に（`.org 0x20000`）アセンブルされる。
+`disk/` に入れる中身がある（`MYDOS.SYS`、`README.TXT`、`AUTOEXEC.BAT`、`DEMO.BAT`、`HELLO.EXE`、`FIB.EXE`、`MANDEL.EXE`、`SIEVE.EXE`、`TOUPPER.EXE`、`CRASH.EXE`、`KITT.COM` のもと）。`NAME.exe.asm`・`NAME.com.asm` は `.EXE`・`.COM` に（`.org 0x26000` で書く）、`NAME.sys.asm` は `.SYS` に（`.org 0x20000`）アセンブルされる。
 
 ```sh
 node tools/mkdisk.js --files sdcard/           # ファイルを作る → FAT でフォーマットした SD カードに PC から写す
@@ -191,16 +192,16 @@ node sim/sim.js examples/bios.asm --input u --rx-file hello.boot   # シミュ�
 - 「HLT にする」とされている不正命令は、どちらも止まって理由を出す（Verilog は LED5・LED4 に出す）。つながっていない番地や ROM への書き込みも止まる
 - 1bit レジスタをアドレスに使ったときも止まる（仕様の 3.3 では決まっていない）
 - テキスト VRAM：1 行 160 文字（320 バイト）、色は CGA/VGA の標準 16 色
-- SDRAM：シミュレータにはある（8MB）。Verilog にはまだない（つながっていない番地として止まる）
+- SDRAM：`0x0100_0000`〜`0x017F_FFFF`（8MB）。シミュレータは待ち時間なし。Verilog は 1 回のアクセスに 4〜9 クロック（下の「SDRAM」）
 
 ## FPGA（Tang Nano 20K）
 
-32bit 版 CPU、ROM 16KB・内蔵 RAM 48KB・VRAM 16KB（BSRAM）、UART、タイマー、LED、microSD（SPI）、720p のテキスト画面（HDMI 端子から DVI で出す）。CPU は 27MHz で、1 命令あたり 8 クロック前後（約 3.4MIPS。パイプラインなし）。
+32bit 版 CPU、ROM 16KB・内蔵 RAM 48KB・VRAM 16KB（BSRAM）、SDRAM 8MB（チップの中のもの）、UART、タイマー、LED、microSD（SPI）、720p のテキスト画面（HDMI 端子から DVI で出す）。CPU は 27MHz で、1 命令あたり 8 クロック前後（約 3.4MIPS。パイプラインなし）。
 
 Gowin EDA での手順：
 
 1. 新しいプロジェクト。デバイスは `GW2AR-LV18QN88C8/I7`
-2. 追加するファイル：`rtl/cpu.v rtl/soc.v rtl/uart.v rtl/video.v rtl/tmds.v rtl/gowin/top_tangnano20k.v rtl/gowin/tangnano20k.cst`
+2. 追加するファイル：`rtl/cpu.v rtl/soc.v rtl/sdram.v rtl/uart.v rtl/video.v rtl/tmds.v rtl/gowin/top_tangnano20k.v rtl/gowin/tangnano20k.cst`
 3. インクルードのパスに `rtl` を追加（`opcodes.vh` のため）。トップモジュールは `top_tangnano20k`
 4. ROM の中身：`node asm/asm.js examples/bios.asm -o rom` で `rom.hex` を作る。`rom.hex` と `font/font8x16.hex` を、合成ツールが `$readmemh` で見つけられる場所（プロジェクトのフォルダ）に置く
 5. 合成・配置配線して書き込む。PC 側は 115200bps の端末ソフトでつなぐ
@@ -209,10 +210,21 @@ Gowin EDA での手順：
 **まだ実機で確かめていない。** ここ（クラウドの環境）では Gowin のツールを動かせないので、確かめたのは Icarus Verilog でのシミュレーションまで：
 
 - CPU：例題をシミュレータと同時に動かし、UART の出力と止まったときのレジスタが全部一致
+- SDRAM：制御回路を SDRAM のモデル（`tb/sdram_model.v`）につなぎ、ランダムな読み書き 2 万回が一致、タイミング違反なし。SoC 全体でも `examples/sdram.asm`（SDRAM でプログラムを実行し、スタックも SDRAM）がシミュレータと一致
 - SD カード：SPI の回路を、SD カード（SPI モード）のモデル（`tb/sd_model.v`、読み書き）につないで BIOS から `MYDOS.SYS` を起動。FAT16 のイメージで `AUTOEXEC.BAT`・`DIR`・`TYPE`・`COPY CON`・`REN`・`DEL`・ユーザーモードのプログラムと例外まで、シミュレータと一致
 - FAT：`mkfs.fat`・`mtools` で作ったイメージ（FAT16・FAT32、パーティション表なし、長い名前、サブディレクトリ）も読め、空き容量も `mdir` と一致。MyDOS で書いた後のイメージは `fsck.fat` でエラーなし、書いたファイルは `mtype` で読める
 - 表示回路：1 フレーム（1280×720）を取り込み、シミュレータの絵と 1 ドットまで一致
 - TMDS 符号器：符号化したものを元に戻せること、直流の偏りが小さいこと
 - トップ：Gowin 部品を代わりのモジュールにしてコンパイルが通ること
 
-実機で怪しいのは、PLL（`rPLL`）・分周（`CLKDIV`）・シリアライザ（`OSER10`）・差動出力（`ELVDS_OBUF`）の設定と、`.cst` のピン番号。HDMI は Sipeed の HDMI 例、microSD（CLK 83・CMD 82・DAT0 84・DAT3 81）は Sipeed の NESTang 例と同じ値にした。実物の SD カードは、モデルより応答が遅かったり、初期化のくせがあったりするので、そこはボードで試すまでわからない。
+### SDRAM
+
+GW2AR-18 のチップの中にある 64Mbit の SDRAM（2M × 32bit、4 バンク × 2048 行 × 256 列）を、`rtl/sdram.v` で CPU と同じ 27MHz で動かす。
+
+- 1 回ごとに行を開き（ACTIVE）、自動プリチャージ付きの READ / WRITE をする。バースト長 1、CAS レイテンシ 2。1 回のアクセスは読み出し 6 クロック・書き込み 4 クロックほど、リフレッシュと重なると 9 クロックくらい（内蔵 RAM は 2 クロック）。SDRAM に置いたプログラムは、内蔵 RAM の約 2 倍遅い（Verilog で測った単純なループで、1 命令あたり 7 クロックと 15 クロック）
+- リフレッシュは 7.8µs ごと。電源投入後は 200µs 待ち、プリチャージ、リフレッシュ 8 回、モード設定をしてから使えるようになる（その前のアクセスは待たされる）
+- SDRAM のクロックは CPU のクロックを反転したもの。こちらが出力を変えてから半周期後に SDRAM が読み取り、読み出しのデータは READ から 2 クロック後に取り込む
+- トップのポート名（`O_sdram_clk`・`IO_sdram_dq` など）は Gowin がチップの中の SDRAM につなぐ決まった名前なので、`.cst` にピンは書かない
+- `tb/sdram_model.v` は、初期化の手順・tRCD・tRP・tRAS・tRC・tRFC・tWR・リフレッシュの間隔・開いていないバンクへのアクセスを調べ、違反があればエラーにする。わざと壊した制御回路（リフレッシュを 16µs にする、取り込みを 1 クロック遅らせる、書き込みの後の待ちを減らす、初期化のリフレッシュを 1 回にする、DQM を戻し忘れる）は、どれもエラーになることを確かめた
+
+実機で怪しいのは、PLL（`rPLL`）・分周（`CLKDIV`）・シリアライザ（`OSER10`）・差動出力（`ELVDS_OBUF`）の設定と、`.cst` のピン番号、SDRAM のクロックの位相（反転したクロックで足りるか）。HDMI は Sipeed の HDMI 例、microSD（CLK 83・CMD 82・DAT0 84・DAT3 81）は Sipeed の NESTang 例と同じ値にした。実物の SD カードは、モデルより応答が遅かったり、初期化のくせがあったりするので、そこはボードで試すまでわからない。

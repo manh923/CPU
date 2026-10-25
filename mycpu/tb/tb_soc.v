@@ -23,9 +23,21 @@ module tb;
   wire [31:0] vdata;
   wire sd_sclk, sd_mosi, sd_miso, sd_cs_n;
   sd_model #(.DISK_HEX(SD_HEX), .SECTORS(SD_SECTORS)) sd (.sclk(sd_sclk), .mosi(sd_mosi), .cs_n(sd_cs_n), .miso(sd_miso));
-  mycpu_soc #(.CLK_HZ(CLK_HZ), .BAUD(BAUD), .ROM_HEX(ROM_HEX)) soc (
+  // SDRAM：クロック数で見たタイミングは実機（27MHz）と同じにする
+  wire dr_clk, dr_cke, dr_cs_n, dr_ras_n, dr_cas_n, dr_we_n;
+  wire [10:0] dr_a;
+  wire [1:0]  dr_ba;
+  wire [3:0]  dr_dqm;
+  wire [31:0] dr_dq;
+  sdram_model #(.SDRAM_HZ(27_000_000)) sdram (
+    .clk(dr_clk), .cke(dr_cke), .cs_n(dr_cs_n), .ras_n(dr_ras_n), .cas_n(dr_cas_n), .we_n(dr_we_n),
+    .ba(dr_ba), .a(dr_a), .dqm(dr_dqm), .dq(dr_dq)
+  );
+  mycpu_soc #(.CLK_HZ(CLK_HZ), .BAUD(BAUD), .ROM_HEX(ROM_HEX), .SDRAM_HZ(27_000_000)) soc (
     .clk(clk), .rst(rst), .uart_rxd(rxd), .uart_txd(txd), .led(led),
     .sd_sclk(sd_sclk), .sd_mosi(sd_mosi), .sd_miso(sd_miso), .sd_cs_n(sd_cs_n),
+    .sdram_clk(dr_clk), .sdram_cke(dr_cke), .sdram_cs_n(dr_cs_n), .sdram_ras_n(dr_ras_n), .sdram_cas_n(dr_cas_n),
+    .sdram_we_n(dr_we_n), .sdram_a(dr_a), .sdram_ba(dr_ba), .sdram_dqm(dr_dqm), .sdram_dq(dr_dq),
     .halted(halted), .halt_code(halt_code), .vclk(vclk), .vaddr(vaddr), .vdata(vdata)
   );
   wire [7:0] r, g, b;
@@ -115,6 +127,7 @@ module tb;
     repeat (BIT * 10 * 20) @(posedge clk);   // UART の送信が終わるのを待つ
     if (!halted) $display("tb: %0d クロックで打ち切り", max);
     else $display("tb: 停止 halt_code=%0d（%0d クロック）", halt_code, cycles);
+    $display("tb: SDRAM 読み出し %0d 回・書き込み %0d 回、タイミング違反 %0d 件", sdram.reads, sdram.writes, sdram.errors);
     if (fr) begin dump_regs; $fclose(fr); end
     if (fu) $fclose(fu);
 

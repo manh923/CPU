@@ -3,11 +3,12 @@
 //   0x0001_0000 入出力（UART・タイマー・LED。番地は README）
 //   0x0001_8000 テキスト VRAM 16KB（表示回路側にも読み出し口がある）
 //   0x0002_0000 内蔵 RAM 48KB
-//   SDRAM はまだない（つながっていない番地として扱う）
+//   0x0100_0000 SDRAM 8MB（rtl/sdram.v。1 回のアクセスに 4〜9 クロックかかる）
 module mycpu_soc #(
-  parameter integer CLK_HZ  = 27_000_000,
-  parameter integer BAUD    = 115_200,
-  parameter         ROM_HEX = "rom.hex"
+  parameter integer CLK_HZ   = 27_000_000,
+  parameter integer BAUD     = 115_200,
+  parameter         ROM_HEX  = "rom.hex",
+  parameter integer SDRAM_HZ = CLK_HZ       // SDRAM のタイミングの計算に使う実際の周波数
 ) (
   input  wire        clk,
   input  wire        rst,
@@ -19,6 +20,17 @@ module mycpu_soc #(
   output wire        sd_mosi,
   input  wire        sd_miso,
   output wire        sd_cs_n,
+  // SDRAM
+  output wire        sdram_clk,
+  output wire        sdram_cke,
+  output wire        sdram_cs_n,
+  output wire        sdram_ras_n,
+  output wire        sdram_cas_n,
+  output wire        sdram_we_n,
+  output wire [10:0] sdram_a,
+  output wire [1:0]  sdram_ba,
+  output wire [3:0]  sdram_dqm,
+  inout  wire [31:0] sdram_dq,
   output wire        halted,
   output wire [1:0]  halt_code,
   // 表示回路からの VRAM 読み出し（4 バイト単位の番地、1 クロック後にデータ）
@@ -44,7 +56,9 @@ module mycpu_soc #(
   wire sel_io   = addr[31:15] == 17'h2;          // 0x0001_0000〜0x0001_7FFF
   wire sel_vram = addr[31:14] == 18'h6;          // 0x0001_8000〜0x0001_BFFF
   wire sel_ram  = addr[31:16] == 16'h2 && addr[15:14] != 2'b11;   // 0x0002_0000〜0x0002_BFFF（48KB）
-  wire start = valid && !ready;
+  wire sel_sdram = addr[31:23] == 9'h2;          // 0x0100_0000〜0x017F_FFFF（8MB）
+  reg  sdr_busy;                                 // SDRAM の返事待ち
+  wire start = valid && !ready && !sdr_busy;
   wire wr = wstrb != 4'd0;
 
   // ---- メモリ ----
@@ -68,6 +82,17 @@ module mycpu_soc #(
       );
     end
   endgenerate
+
+  wire        sdr_ack;
+  wire [31:0] sdram_q;
+  mycpu_sdram #(.SDRAM_HZ(SDRAM_HZ)) sdram (
+    .clk(clk), .rst(rst),
+    .req(start && sel_sdram), .waddr(addr[22:2]), .wstrb(wstrb), .wdata(wdata),
+    .ack(sdr_ack), .rdata(sdram_q), .ready_init(),
+    .sdram_clk(sdram_clk), .sdram_cke(sdram_cke), .sdram_cs_n(sdram_cs_n), .sdram_ras_n(sdram_ras_n),
+    .sdram_cas_n(sdram_cas_n), .sdram_we_n(sdram_we_n), .sdram_a(sdram_a), .sdram_ba(sdram_ba),
+    .sdram_dqm(sdram_dqm), .sdram_dq(sdram_dq)
+  );
 
   // ---- 入出力（仮決め。lib/isa.js の IO と同じ） ----
   localparam [14:0] IO_UART_TX = 15'h00, IO_UART_STATUS = 15'h04, IO_UART_RX = 15'h08,
@@ -164,20 +189,23 @@ module mycpu_soc #(
     endcase
   end
 
-  // ---- バスの応答（どのアクセスも 2 クロック） ----
-  reg [1:0] which;   // 0 = ROM、1 = 入出力、2 = VRAM、3 = RAM
+  // ---- バスの応答（SDRAM は返事が来たとき、ほかは 2 クロック） ----
+  reg [2:0] which;   // 0 = ROM、1 = 入出力、2 = VRAM、3 = RAM、4 = SDRAM
   always @(posedge clk) begin
     if (rst) begin
-      ready <= 1'b0; fault <= 1'b0; which <= 2'd0;
+      ready <= 1'b0; fault <= 1'b0; which <= 3'd0; sdr_busy <= 1'b0;
     end else begin
-      ready <= start;
+      ready <= (start && !sel_sdram) || sdr_ack;
+      if (start && sel_sdram) sdr_busy <= 1'b1;
+      if (sdr_ack) sdr_busy <= 1'b0;
       if (start) begin
-        which <= sel_io ? 2'd1 : sel_vram ? 2'd2 : sel_ram ? 2'd3 : 2'd0;
-        fault <= !(sel_rom || sel_io || sel_vram || sel_ram) || (sel_rom && wr);
+        which <= sel_io ? 3'd1 : sel_vram ? 3'd2 : sel_ram ? 3'd3 : sel_sdram ? 3'd4 : 3'd0;
+        fault <= !(sel_rom || sel_io || sel_vram || sel_ram || sel_sdram) || (sel_rom && wr);
       end
     end
   end
-  assign rdata_cpu = which == 2'd0 ? rom_q : which == 2'd1 ? io_q : which == 2'd2 ? vram_q : ram_q;
+  assign rdata_cpu = which == 3'd0 ? rom_q : which == 3'd1 ? io_q : which == 3'd2 ? vram_q :
+                     which == 3'd3 ? ram_q : sdram_q;
 endmodule
 
 // 1 ポートの RAM（BSRAM になる書き方）
