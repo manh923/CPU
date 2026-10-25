@@ -264,7 +264,9 @@ const cases = [];
     r.out.split('MyCPU BIOS').length === 3 && r.out.includes("safe to turn off"), r.out.slice(-400));
 
   // Verilog 用の小さい FAT16（1 クラスタ 1 セクタ、パーティションは 32 から）
-  const small = () => makeDisk(diskSources, { type: 'fat16', spc: 1, partStart: 32, totalSectors: 4300 });
+  // Verilog 用の小さいカード（約 2MB）には、C コンパイラ一式（CC.EXE・LIBC.S など）は入れない
+  const compilerNames = new Set(require('../tools/cc.js').compilerFiles().map((f) => f.name));
+  const small = () => makeDisk(diskSources.filter((f) => !compilerNames.has(f.name)), { type: 'fat16', spc: 1, partStart: 32, totalSectors: 4300 });
   cases.push(
     { name: 'mydos-sd', file: 'bios.asm', disk: small(), max: 60_000_000,
       input: ' hello rtl\rcopy con a.txt\rwritten by rtl\r\x1a\rtype a.txt\rren a.txt b.txt\rtype b.txt\rdel b.txt\rcrash\rbig\rprimes\rshutdown\r' },

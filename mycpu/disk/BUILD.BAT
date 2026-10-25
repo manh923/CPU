@@ -1,0 +1,2 @@
+@CC %1.C
+@AS -b 0x1000000 -o %1.EXE CRT0.S %1.S LIBC.S

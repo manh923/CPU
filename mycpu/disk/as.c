@@ -100,12 +100,25 @@ static i64 lo = -1, hi;          // 1 回目：中身のある番地の範囲
 static unsigned char *image;     // 2 回目：[lo, hi) のバイト列
 static i64 base;                 // -b
 
+// s の先頭 len 文字を out（大きさ n）に、0 で終わる文字列として写す（入らない分は捨てる）
+// （1 行ごとに何度も呼ぶので snprintf は使わない。遅い）
+static void copy_str(char *out, int n, const char *s, int len) {
+  if (len > n - 1)
+    len = n - 1;
+  memcpy(out, s, len);
+  out[len] = 0;
+}
+
 // '.' で始まる名前は「持ち主.名前」に
 static void qualify(const char *name, char *out, int n) {
-  if (name[0] == '.')
-    snprintf(out, n, "%s%s", scope, name);
-  else
-    snprintf(out, n, "%s", name);
+  int k = 0;
+  if (name[0] == '.') {
+    k = strlen(scope);
+    copy_str(out, n, scope, k);
+    if (k > n - 1)
+      k = n - 1;
+  }
+  copy_str(out + k, n - k, name, strlen(name));
 }
 
 // 中身を置く（1 回目は範囲だけ、2 回目は書く）
@@ -511,15 +524,36 @@ static char *check_reg(int cls, int n, int wbits, int is_dest) {
   return b;
 }
 
+// 命令の名前 → 表の行。はじめて呼ばれたときにハッシュ表を作る（1 行ごとに 173 個と比べると遅いので）
+#define OP_SLOTS 512
+static AsOp *op_slot[OP_SLOTS];
+static int op_ready;
+
+static unsigned op_hash(const char *s) {
+  unsigned h = 2166136261u;
+  for (; *s; s++)
+    h = (h ^ (unsigned char)*s) * 16777619u;
+  return h;
+}
+
 static AsOp *find_op(const char *mn) {
+  if (!op_ready) {
+    op_ready = 1;
+    for (int i = 0; i < NUM_AS_OPS; i++) {
+      unsigned h = op_hash(as_ops[i].name) & (OP_SLOTS - 1);
+      while (op_slot[h])
+        h = (h + 1) & (OP_SLOTS - 1);
+      op_slot[h] = &as_ops[i];
+    }
+  }
   char b[32];
   int n = 0;
   for (; mn[n] && n < 31; n++)
     b[n] = toupper((unsigned char)mn[n]);
   b[n] = 0;
-  for (int i = 0; i < NUM_AS_OPS; i++)
-    if (!strcmp(as_ops[i].name, b))
-      return &as_ops[i];
+  for (unsigned h = op_hash(b) & (OP_SLOTS - 1); op_slot[h]; h = (h + 1) & (OP_SLOTS - 1))
+    if (!strcmp(op_slot[h]->name, b))
+      return op_slot[h];
   return 0;
 }
 
@@ -531,7 +565,7 @@ static int npending;
 static void flush_labels(void) {
   for (int i = 0; i < npending; i++) {
     if (pending[i][0] != '.')
-      snprintf(scope, sizeof(scope), "%s", pending[i]);
+      copy_str(scope, sizeof(scope), pending[i], strlen(pending[i]));
     if (pass == 1) {
       char q[512];
       qualify(pending[i], q, sizeof(q));
@@ -729,7 +763,7 @@ static void do_line(char *line) {
       eq++;
     if (*eq == '=') {
       char name[256];
-      snprintf(name, sizeof(name), "%.*s", (int)(p - s), s);
+      copy_str(name, sizeof(name), s, p - s);
       char *expr = trim(eq + 1);
       if (!*expr) {
         err("bad line: %s", s);
@@ -756,7 +790,7 @@ static void do_line(char *line) {
   while (is_id((unsigned char)*p))
     p++;
   char name[64];
-  snprintf(name, sizeof(name), "%.*s", (int)(p - s), s);
+  copy_str(name, sizeof(name), s, p - s);
   split_ops(p);
 
   if (name[0] == '.') {

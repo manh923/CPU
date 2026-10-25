@@ -487,6 +487,82 @@ static void builtin_alloca(void) {
   println("  STORE32_32 r16, r31, %d", current_fn->alloca_bottom->offset);
 }
 
+// 32bit の整数の定数か（usual_arith_conv が付けた型の変換もたどる）。*v にその値
+static bool is_imm32(Node *node, int32_t *v) {
+  if (node->kind == ND_CAST && is_integer(node->ty) && node->ty->size == 4)
+    node = node->lhs;
+  if (node->kind != ND_NUM || !is_integer(node->ty) || is64(node->ty))
+    return false;
+  *v = (int32_t)node->val;
+  return true;
+}
+
+// 番地を作らずに 1 命令で読めるローカル変数（4 バイトの整数・ポインタ・float）か
+static bool is_local32(Node *node) {
+  return node->kind == ND_VAR && node->var->is_local && node->var->ty->kind != TY_VLA && node->ty->size == 4 &&
+         (is_integer(node->ty) || node->ty->kind == TY_PTR || node->ty->kind == TY_FLOAT);
+}
+
+// 右が定数の演算を、即値の命令 1 つで（r16 = 左 op 定数）。できなければ false（何も出さない）
+static bool gen_binary_imm(Node *node, int32_t imm, bool emit) {
+  bool uns = node->lhs->ty->is_unsigned || node->lhs->ty->base;
+  char *op = NULL, *cmp = NULL;
+  int32_t v = imm;
+  switch (node->kind) {
+  case ND_ADD: op = "ADDI32"; break;
+  case ND_SUB:
+    if (imm == INT32_MIN)
+      return false;
+    op = "ADDI32";
+    v = -imm;
+    break;
+  case ND_MUL: op = "MULI32"; break;
+  case ND_DIV:
+    if (imm == 0)
+      return false;                    // 0 で割る例外は、今までどおり実行のときに
+    op = node->ty->is_unsigned ? "DIVUI32" : "DIVI32";
+    break;
+  case ND_MOD:
+    if (imm == 0)
+      return false;
+    op = node->ty->is_unsigned ? "REMUI32" : "REMI32";
+    break;
+  case ND_BITAND: op = "ANDI32"; break;
+  case ND_BITOR: op = "ORI32"; break;
+  case ND_BITXOR: op = "XORI32"; break;
+  case ND_SHL:
+    if (imm < 0 || imm > 31)
+      return false;
+    op = "SHLI32";
+    break;
+  case ND_SHR:
+    if (imm < 0 || imm > 31)
+      return false;
+    op = node->lhs->ty->is_unsigned ? "SHRI32" : "SARI32";
+    break;
+  case ND_EQ: cmp = "CMPEQI32"; break;
+  case ND_NE: cmp = "CMPNEI32"; break;
+  case ND_LT: cmp = uns ? "CMPLTUI32" : "CMPLTI32"; break;
+  case ND_LE:                          // a ≦ v は a < v + 1（v + 1 があふれないとき）
+    if (uns ? (uint32_t)imm == UINT32_MAX : imm == INT32_MAX)
+      return false;
+    cmp = uns ? "CMPLTUI32" : "CMPLTI32";
+    v = (int32_t)((uint32_t)imm + 1);
+    break;
+  default:
+    return false;
+  }
+  if (!emit)
+    return true;
+  if (op) {
+    println("  %s r16, r16, %d", op, v);
+  } else {
+    println("  %s p1, r16, %d", cmp, v);
+    println("  BTOI32 r16, p1");
+  }
+  return true;
+}
+
 // 2 つの値の演算：r16 = 左、r17 = 右
 static void gen_binary(Node *node) {
   bool uns = node->lhs->ty->is_unsigned || node->lhs->ty->base;
@@ -1041,6 +1117,23 @@ static void gen_expr(Node *node) {
   if (is_flonum(node->lhs->ty)) {
     gen_flonum_binary(node);
     return;
+  }
+
+  // 32bit どうしで、右が定数なら即値の命令で、4 バイトのローカル変数なら積まずに r17 へ直接読む
+  // （どちらも副作用がないので、左を先に求めても結果は同じ）
+  if (!is64(node->lhs->ty) && !is64(node->rhs->ty)) {
+    int32_t imm;
+    if (is_imm32(node->rhs, &imm) && gen_binary_imm(node, imm, false)) {
+      gen_expr(node->lhs);
+      gen_binary_imm(node, imm, true);
+      return;
+    }
+    if (is_local32(node->rhs)) {
+      gen_expr(node->lhs);
+      println("  LOAD32_32 r17, r31, %d", node->rhs->var->offset);
+      gen_binary(node);
+      return;
+    }
   }
 
   // 右を積んでから左を求める。右は 32bit なら r17、long long なら r18・r19

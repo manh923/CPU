@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <errno.h>
 
+// memcpy・memset・memchr・memcmp・strlen・strcmp・strncmp は libc/string.s（アセンブリ）
+
 int errno;
 
 char *strerror(int e) {
@@ -24,31 +26,6 @@ char *strerror(int e) {
   case ENOSYS: return "Not supported";
   }
   return "Unknown error";
-}
-
-size_t strlen(const char *s) {
-  const char *p = s;
-  while (*p)
-    p++;
-  return p - s;
-}
-
-int strcmp(const char *a, const char *b) {
-  while (*a && *a == *b) {
-    a++;
-    b++;
-  }
-  return (unsigned char)*a - (unsigned char)*b;
-}
-
-int strncmp(const char *a, const char *b, size_t n) {
-  for (; n; n--, a++, b++) {
-    if (*a != *b)
-      return (unsigned char)*a - (unsigned char)*b;
-    if (!*a)
-      return 0;
-  }
-  return 0;
 }
 
 char *strcpy(char *dst, const char *src) {
@@ -115,19 +92,6 @@ char *strdup(const char *s) {
   return p;
 }
 
-void *memcpy(void *dst, const void *src, size_t n) {
-  char *d = dst;
-  const char *s = src;
-  // どちらも 4 バイト境界なら 4 バイトずつ
-  if ((((unsigned)d | (unsigned)s) & 3) == 0) {
-    for (; n >= 4; n -= 4, d += 4, s += 4)
-      *(unsigned *)d = *(const unsigned *)s;
-  }
-  while (n--)
-    *d++ = *s++;
-  return dst;
-}
-
 void *memmove(void *dst, const void *src, size_t n) {
   char *d = dst;
   const char *s = src;
@@ -136,43 +100,6 @@ void *memmove(void *dst, const void *src, size_t n) {
   while (n--)
     d[n] = s[n];
   return dst;
-}
-
-void *memset(void *p, int c, size_t n) {
-  unsigned char *d = p;
-  // 4 バイト境界まで 1 バイトずつ、そこから 4 バイトずつ（calloc がよく使う）
-  while (n && ((unsigned)d & 3)) {
-    *d++ = c;
-    n--;
-  }
-  unsigned w = (unsigned char)c * 0x01010101u;
-  for (; n >= 16; n -= 16, d += 16) {
-    ((unsigned *)d)[0] = w;
-    ((unsigned *)d)[1] = w;
-    ((unsigned *)d)[2] = w;
-    ((unsigned *)d)[3] = w;
-  }
-  for (; n >= 4; n -= 4, d += 4)
-    *(unsigned *)d = w;
-  while (n--)
-    *d++ = c;
-  return p;
-}
-
-int memcmp(const void *a, const void *b, size_t n) {
-  const unsigned char *x = a, *y = b;
-  for (; n; n--, x++, y++)
-    if (*x != *y)
-      return *x - *y;
-  return 0;
-}
-
-void *memchr(const void *s, int c, size_t n) {
-  const unsigned char *p = s;
-  for (; n; n--, p++)
-    if (*p == (unsigned char)c)
-      return (void *)p;
-  return 0;
 }
 
 size_t strnlen(const char *s, size_t n) {

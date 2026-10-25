@@ -154,15 +154,71 @@ function keepCommon(name, parts) {
   return parts.some((p) => re.test((p.text + '\n' + p.data).replace(/;.*/g, '')));
 }
 
+// MyDOS の 8.3 の名前に縮める（libc の fopen と同じ規則：名前 8 文字・拡張子 3 文字まで）
+function dosName(name) {
+  const m = /^([^.]*)(?:\.(.*))?$/.exec(name);
+  return (m[1].slice(0, 8) + (m[2] !== undefined ? '.' + m[2].slice(0, 3) : '')).toUpperCase();
+}
+
+// MyDOS の上の C コンパイラ一式（disk/ のカードに入れる）：
+//   CC.EXE（cc/ を この CPU 向けにコンパイルしたもの。アセンブル済みのバイト列）、CRT0.S と LIBC.S（リンク用。
+//   libc をコンパイルしてつないだもの）、ヘッダ（cc/include・libc/include・libc/include/sys を 8.3 の名前で）、
+//   chibicc のソース（セルフホスト用。preprocess.c → PREPROCE.C）
+let compilerCache = null;
+function compilerFiles() {
+  const srcs = fs.readdirSync(CC_DIR).filter((f) => /\.[ch]$/.test(f)).sort();
+  const libs = fs.readdirSync(LIBC).filter((f) => /\.[cs]$/.test(f)).sort();
+  const incs = ['cc/include', 'libc/include', 'libc/include/sys'].map((d) => path.join(ROOT, d));
+  const all = [...srcs.map((f) => path.join(CC_DIR, f)), ...libs.map((f) => path.join(LIBC, f)),
+    ...incs.flatMap((d) => fs.readdirSync(d).filter((f) => f.endsWith('.h')).map((f) => path.join(d, f)))];
+  const stamp = all.map((f) => fs.statSync(f).mtimeMs).join(',');
+  if (compilerCache && compilerCache.stamp === stamp) return compilerCache.files;
+
+  const { makeFile } = require('../lib/disk.js');
+  const out = [];
+  const cc = buildAsm(srcs.filter((f) => f.endsWith('.c')).map((f) => path.join(CC_DIR, f)));
+  out.push({ name: 'CC.EXE', contents: Buffer.from(makeFile('cc.exe.asm', cc).data) });
+  out.push({ name: 'CRT0.S', contents: fs.readFileSync(path.join(LIBC, 'crt0.s')) });
+  const libc = [];
+  for (const f of libs) if (f.endsWith('.s') && f !== 'crt0.s') libc.push(fs.readFileSync(path.join(LIBC, f), 'utf8'));
+  for (const f of libs) if (f.endsWith('.c')) libc.push(compileCached(path.join(LIBC, f), []));
+  out.push({ name: 'LIBC.S', contents: Buffer.from(libc.join('\n')) });
+  const seen = new Set(out.map((f) => f.name));
+  for (const d of incs) {
+    for (const f of fs.readdirSync(d).filter((f) => f.endsWith('.h')).sort()) {
+      const n = dosName(f);
+      if (seen.has(n)) throw new Error(`カードの名前がぶつかる：${n}`);
+      seen.add(n);
+      out.push({ name: n, contents: fs.readFileSync(path.join(d, f)) });
+    }
+  }
+  for (const f of srcs) {
+    const n = dosName(f);
+    if (seen.has(n)) throw new Error(`カードの名前がぶつかる：${n}`);
+    seen.add(n);
+    out.push({ name: n, contents: fs.readFileSync(path.join(CC_DIR, f)) });
+  }
+  compilerCache = { stamp, files: out };
+  return out;
+}
+
 // SD カードの中身のもと（mkdisk・sim.js・テスト用）：フォルダのファイルを読み、
-// NAME.c があればコンパイルした NAME.exe.asm も足す（.c もそのまま入れる）。.asm は文字列、ほかはバイト列
-function diskSources(dir) {
+// NAME.c があればコンパイルした NAME.exe.asm も足す（.c もそのまま入れる）。.asm は文字列、ほかはバイト列。
+// リポジトリの disk/ なら、C コンパイラ一式（compilerFiles）も入れる（opts.compiler = false で入れない）
+function diskSources(dir, opts = {}) {
   const out = [];
   for (const name of fs.readdirSync(dir).sort()) {
     const file = path.join(dir, name);
     if (!fs.statSync(file).isFile()) continue;
     out.push({ name, contents: /\.asm$/i.test(name) ? fs.readFileSync(file, 'utf8') : fs.readFileSync(file) });
     if (/\.c$/i.test(name)) out.push({ name: name.replace(/\.c$/i, '.exe.asm'), contents: buildAsm([file]) });
+  }
+  if (opts.compiler !== false && path.resolve(dir) === path.join(ROOT, 'disk')) {
+    const names = new Set(out.map((f) => dosName(f.name.replace(/\.(exe|com|sys)\.asm$/i, '.$1'))));
+    for (const f of compilerFiles()) {
+      if (names.has(f.name)) throw new Error(`disk/ のファイルと名前がぶつかる：${f.name}`);
+      out.push(f);
+    }
   }
   return out;
 }
@@ -208,4 +264,4 @@ function usage() {
 
 if (require.main === module) main(process.argv);
 
-module.exports = { buildAsm, diskSources, compileFile, CcError };
+module.exports = { buildAsm, diskSources, compilerFiles, dosName, compileFile, CcError };
