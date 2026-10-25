@@ -1,5 +1,5 @@
 // CPU とメモリ・入出力をつないだもの（4.1 のメモリマップ）
-//   0x0000_0000 ROM 16KB（ROM_HEX で中身を決める）
+//   0x0000_0000 ROM 32KB（ROM_HEX で中身を決める）
 //   0x0001_0000 入出力（UART・タイマー・LED。番地は README）
 //   0x0001_8000 テキスト VRAM 16KB（表示回路側にも読み出し口がある）
 //   0x0002_0000 内蔵 RAM 32KB
@@ -14,6 +14,11 @@ module mycpu_soc #(
   input  wire        uart_rxd,
   output wire        uart_txd,
   output reg  [5:0]  led,
+  // SD カード（SPI モード 0）
+  output wire        sd_sclk,
+  output wire        sd_mosi,
+  input  wire        sd_miso,
+  output wire        sd_cs_n,
   output wire        halted,
   output wire [1:0]  halt_code,
   // 表示回路からの VRAM 読み出し（4 バイト単位の番地、1 クロック後にデータ）
@@ -35,7 +40,7 @@ module mycpu_soc #(
   );
 
   // ---- 番地の振り分け ----
-  wire sel_rom  = addr[31:14] == 18'h0;          // 0x0000_0000〜0x0000_3FFF
+  wire sel_rom  = addr[31:15] == 17'h0;          // 0x0000_0000〜0x0000_7FFF
   wire sel_io   = addr[31:15] == 17'h2;          // 0x0001_0000〜0x0001_7FFF
   wire sel_vram = addr[31:14] == 18'h6;          // 0x0001_8000〜0x0001_BFFF
   wire sel_ram  = addr[31:15] == 17'h4;          // 0x0002_0000〜0x0002_7FFF
@@ -43,10 +48,10 @@ module mycpu_soc #(
   wire wr = wstrb != 4'd0;
 
   // ---- メモリ ----
-  reg [31:0] rom [0:4095];
+  reg [31:0] rom [0:8191];
   initial $readmemh(ROM_HEX, rom);
   reg [31:0] rom_q;
-  always @(posedge clk) rom_q <= rom[addr[13:2]];
+  always @(posedge clk) rom_q <= rom[addr[14:2]];
 
   wire [31:0] ram_q, vram_q;
   genvar g;
@@ -67,7 +72,8 @@ module mycpu_soc #(
   // ---- 入出力（仮決め。lib/isa.js の IO と同じ） ----
   localparam [14:0] IO_UART_TX = 15'h00, IO_UART_STATUS = 15'h04, IO_UART_RX = 15'h08,
                     IO_TIMER_COUNT = 15'h10, IO_TIMER_CMP = 15'h14, IO_TIMER_CTRL = 15'h18,
-                    IO_LED = 15'h20;
+                    IO_LED = 15'h20,
+                    IO_SD_DATA = 15'h30, IO_SD_CTRL = 15'h34, IO_SD_STATUS = 15'h38;
   wire [14:0] io_off = {addr[14:2], 2'b00};
   // 書き込み：レジスタの先頭バイトを含むときだけ効く。書かないバイトは 0
   wire [31:0] wmask = {{8{wstrb[3]}}, {8{wstrb[2]}}, {8{wstrb[1]}}, {8{wstrb[0]}}};
@@ -92,6 +98,43 @@ module mycpu_soc #(
   wire t_pending = t_en && !t_diff[31];
   assign irq = {6'd0, t_pending, rx_valid};
 
+  // SPI：SD_DATA に書くと 8bit を送りながら受け取る（MSB から）。SD_CTRL の bit0 = CS、bit15〜8 = 分周
+  //   SCK の半周期 = (分周 + 1) クロック。SCK が上がるときに MISO を取り込み、下がるときに MOSI を変える
+  reg [15:0] spi_ctrl;
+  reg [7:0]  spi_sh, spi_rx;
+  reg [7:0]  spi_cnt;
+  reg [3:0]  spi_bits;
+  reg        spi_busy, spi_sck;
+  assign sd_sclk = spi_sck;
+  assign sd_mosi = spi_sh[7];
+  assign sd_cs_n = !spi_ctrl[0];
+  always @(posedge clk) begin
+    if (rst) begin
+      spi_ctrl <= 16'd0; spi_busy <= 1'b0; spi_sck <= 1'b0; spi_sh <= 8'hFF; spi_rx <= 8'hFF;
+      spi_cnt <= 8'd0; spi_bits <= 4'd0;
+    end else begin
+      if (io_we && io_off == IO_SD_CTRL) spi_ctrl <= {io_w[15:8], 7'd0, io_w[0]};
+      if (!spi_busy) begin
+        if (io_we && io_off == IO_SD_DATA) begin
+          spi_sh <= io_w[7:0];
+          spi_busy <= 1'b1;
+          spi_cnt <= 8'd0;
+          spi_bits <= 4'd0;
+        end
+      end else if (spi_cnt != spi_ctrl[15:8]) spi_cnt <= spi_cnt + 8'd1;
+      else begin
+        spi_cnt <= 8'd0;
+        spi_sck <= !spi_sck;
+        if (!spi_sck) spi_rx <= {spi_rx[6:0], sd_miso};          // 上がる
+        else begin                                                 // 下がる
+          spi_sh <= {spi_sh[6:0], 1'b1};
+          spi_bits <= spi_bits + 4'd1;
+          if (spi_bits == 4'd7) spi_busy <= 1'b0;
+        end
+      end
+    end
+  end
+
   reg [31:0] io_q;
   always @(posedge clk) begin
     if (rst) begin
@@ -114,6 +157,9 @@ module mycpu_soc #(
       IO_TIMER_CMP:   io_q <= t_cmp;
       IO_TIMER_CTRL:  io_q <= {30'd0, t_pending, t_en};
       IO_LED:         io_q <= {26'd0, led};
+      IO_SD_DATA:     io_q <= {24'd0, spi_rx};
+      IO_SD_CTRL:     io_q <= {16'd0, spi_ctrl};
+      IO_SD_STATUS:   io_q <= {31'd0, spi_busy};
       default:        io_q <= 32'd0;
     endcase
   end

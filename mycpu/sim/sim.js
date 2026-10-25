@@ -11,10 +11,12 @@
 //     --ppm 名前      同じく PPM（Verilog のテストベンチの出力と比べる用）
 //     --regs 名前     止まったときのレジスタ一覧をファイルへ（- なら標準エラー）
 //     --realtime      タイマーを実時間で進める（既定は 1 命令 = 1µs で毎回同じ結果）
+//     --sd 名前       SD カードを挿す。.img ならそのイメージ、フォルダなら中身から FAT16 のイメージを作る（tools/mkdisk.js と同じ）
 // 標準入力は UART 受信につながる。端末ならキーを押した瞬間に届く。Ctrl-] で終了。
 'use strict';
 const fs = require('fs');
 const zlib = require('zlib');
+const path = require('path');
 const CPU = require('../lib/cpu.js');
 const video = require('../lib/video.js');
 const { assemble, AsmError } = require('../lib/assembler.js');
@@ -35,6 +37,7 @@ function parseArgs(argv) {
       case '--ppm': o.ppm = val(); break;
       case '--regs': o.regs = val(); break;
       case '--realtime': o.realtime = true; break;
+      case '--sd': o.sd = val(); break;
       default:
         if (a.startsWith('--') || o.file) usage();
         o.file = a;
@@ -128,8 +131,21 @@ function drawScreen(vram) {
 function main() {
   const o = parseArgs(process.argv);
   const t0 = process.hrtime.bigint();
+  let sd = null;
+  if (o.sd) {
+    const SDCard = require('../lib/sdcard.js');
+    if (fs.statSync(o.sd).isDirectory()) {
+      const { makeDisk } = require('../lib/disk.js');
+      const sources = fs.readdirSync(o.sd).sort().filter((n) => fs.statSync(path.join(o.sd, n)).isFile())
+        .map((n) => ({ name: n, contents: /\.asm$/i.test(n) ? fs.readFileSync(path.join(o.sd, n), 'utf8') : fs.readFileSync(path.join(o.sd, n)) }));
+      sd = new SDCard(makeDisk(sources));
+    } else {
+      sd = new SDCard(require('../lib/fat.js').bufferDisk(new Uint8Array(fs.readFileSync(o.sd))));
+    }
+  }
   const cpu = new CPU({
     xlen: o.cpu,
+    sd,
     onTx: (b) => { if (!o.screen) process.stdout.write(Buffer.from([b])); },
     clock: o.realtime ? () => Number((process.hrtime.bigint() - t0) / 1000n) : null,
     trace: o.trace ? (pc, text) => process.stderr.write(pc.toString(16).padStart(8, '0') + '  ' + text + '\n') : null,

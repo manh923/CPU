@@ -98,11 +98,15 @@ function genExamplesJs() {
   const dir = path.join(ROOT, 'examples');
   const files = fs.readdirSync(dir).filter((f) => f.endsWith('.asm')).sort();
   const items = files.map((f) => ({ name: f, source: fs.readFileSync(path.join(dir, f), 'utf8') }));
-  return `// 自動生成（tools/gen.js が examples/*.asm から作る）。手で編集しない。
+  // SD カードの中身（disk/）。どれも文字のファイル
+  const ddir = path.join(ROOT, 'disk');
+  const disk = fs.readdirSync(ddir).sort().map((f) => ({ name: f, contents: fs.readFileSync(path.join(ddir, f), 'latin1') }));
+  return `// 自動生成（tools/gen.js が examples/*.asm と disk/ から作る）。手で編集しない。
 (function (root) {
   var EXAMPLES = ${JSON.stringify(items, null, 2)};
-  if (typeof module === 'object' && module.exports) module.exports = EXAMPLES;
-  else (root.MyCPU = root.MyCPU || {}).EXAMPLES = EXAMPLES;
+  var DISK = ${JSON.stringify(disk, null, 2)};
+  if (typeof module === 'object' && module.exports) module.exports = { EXAMPLES: EXAMPLES, DISK: DISK };
+  else { (root.MyCPU = root.MyCPU || {}).EXAMPLES = EXAMPLES; root.MyCPU.DISK = DISK; }
 })(typeof self !== 'undefined' ? self : this);
 `;
 }

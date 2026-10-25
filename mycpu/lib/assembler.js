@@ -4,7 +4,7 @@
 //   label:  ADDI32 r16, r0, 'A'     ; コメント
 //   .loop:                          ; '.' で始まるラベルは直前のラベルの中だけで有効
 //   NAME = 0x10000                  ; 定数（.equ NAME, 0x10000 も可）
-// 疑似命令: .org .align .space .byte .half .word .dword .ascii .asciz .equ .phase .dephase
+// 疑似命令: .org .align .space .reserve .byte .half .word .dword .ascii .asciz .equ .phase .dephase
 //   .phase 番地 〜 .dephase：中身はその場所に置くが、ラベルは「番地」に写して動かす前提で決める
 // 命令は自動で 4 バイト境界にそろえる。
 (function (root, factory) {
@@ -280,6 +280,11 @@
         var len = Number(to - pc);
         st.bytes = function () { return new Array(len).fill(0); };
         return to;
+      }
+      case '.reserve': {
+        // 場所だけ取って、中身は書かない（RAM の変数用。ROM のイメージには入らない）
+        if (ops.length !== 1) throw new Error('.reserve バイト数');
+        return pc + evalNow(ops[0]);
       }
       case '.space': {
         if (ops.length < 1 || ops.length > 2) throw new Error('.space バイト数[, 埋める値]');

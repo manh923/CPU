@@ -13,6 +13,9 @@ const isa = require('../lib/isa.js');
 const CPU = require('../lib/cpu.js');
 const video = require('../lib/video.js');
 const { assemble, toReadmemh, AsmError } = require('../lib/assembler.js');
+const SDCard = require('../lib/sdcard.js');
+const fat = require('../lib/fat.js');
+const { makeDisk, makeFile } = require('../lib/disk.js');
 
 const ROOT = path.join(__dirname, '..');
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'mycpu-test-'));
@@ -28,7 +31,7 @@ function src(name) { return fs.readFileSync(path.join(ROOT, 'examples', name), '
 // シミュレータで動かす
 function runSim(source, opts = {}) {
   let out = '';
-  const cpu = new CPU({ xlen: opts.xlen || 32, onTx: (b) => { out += String.fromCharCode(b); } });
+  const cpu = new CPU({ xlen: opts.xlen || 32, onTx: (b) => { out += String.fromCharCode(b); }, sd: opts.disk ? new SDCard(opts.disk) : null });
   cpu.load(assemble(source).image);
   if (opts.input) cpu.pushRx(Buffer.from(opts.input, 'latin1'));
   cpu.run(opts.max || 5_000_000);
@@ -130,8 +133,8 @@ const cases = [];
     const ok = c.load(assemble(fs.readFileSync(path.join(ROOT, 'examples/uartboot/hello_uart.asm'), 'utf8')).image);
     check('.org 0x20000 のプログラムも読み込める（すき間は飛ばす）。番地 0 が空なのも分かる', ok === false && c.ram[0] !== 0);
     let msg = '';
-    try { new CPU({}).load(assemble('.org 0x4000\n.word 1').image); } catch (e) { msg = e.message; }
-    check('メモリのない番地に中身があればエラー', /0x4000/.test(msg), msg);
+    try { new CPU({}).load(assemble('.org 0x8000\n.word 1').image); } catch (e) { msg = e.message; }
+    check('メモリのない番地に中身があればエラー', /0x8000/.test(msg), msg);
   }
   r = runSim('ADDI32 r16, r0, 0x10001\nLOAD32_32 r17, r16, 0\nHLT');
   check('整列していない読み出しは例外（EVEC = 0 へ）', r.cpu.cause === 1n);
@@ -140,17 +143,65 @@ const cases = [];
   check('32bit CPU で r32〜r47 をアドレスに使うと止まる（アセンブルはできる）',
     runSim('LOAD32_32 r17, r32, 0\nHLT').cpu.halted.kind === 'illegal');
 
-  // MyDOS：BIOS → ROM から写して起動 → コマンド
-  const dosInput = ' ver\rdir\rtype readme.txt\rtype nofile\rfoo\recho  Hi   there\rcolor 1e\rmem\rled 2a\rshutdown\r';
-  r = runSim(src('mydos.asm'), { input: dosInput, max: 20_000_000 });
-  const scr = video.text(r.cpu.vram);
-  check('mydos：BIOS からシャットダウンまで', r.cpu.halted && r.cpu.halted.kind === 'hlt' &&
-    r.out.includes('Memory Test : 32 KB OK') && r.out.includes('MyDOS Version 1.0 (MyCPU-32)') &&
-    r.out.includes('README   TXT') && r.out.includes('Bad command or file name') && r.out.includes('File not found') &&
-    r.out.includes('Hi   there\r\n') && r.out.includes(` ${0x27000 - Number(assemble(src('mydos.asm')).symbols.get('os_end'))} bytes free`) && r.out.includes("safe to turn off"),
-  r.out.slice(-300));
-  check('mydos：COLOR と LED', r.cpu.vram[1] === 0x0E && r.cpu.led === 0x2a, `attr=${r.cpu.vram[1]} led=${r.cpu.led}`);
-  check('mydos：画面にも出ている', scr.includes("It's now safe to turn off your computer."), scr.slice(0, 200));
+  // MyDOS：SD カードなし
+  const nl = (t) => t.replace(/\n/g, '\r\n');
+  r = runSim(src('mydos.asm'), { input: ' dir\rver\recho  Hi   there\rfoo\rcolor 1e\rled 2a\rshutdown\r', max: 20_000_000 });
+  check('mydos（カードなし）：BIOS から MyDOS、組み込みのコマンド', r.cpu.halted && r.cpu.halted.kind === 'hlt' &&
+    r.out.includes('Memory Test : 32 KB OK') && r.out.includes('SD card     : not found') &&
+    r.out.includes(nl('C:\\>dir\nNot ready reading drive C\n')) && r.out.includes('MyDOS Version 2.0 (MyCPU-32') &&
+    r.out.includes(nl('Hi   there\n')) && r.out.includes(nl('C:\\>foo\nNot ready reading drive C\n')) &&
+    r.out.includes("safe to turn off") && r.cpu.vram[1] === 0x0E && r.cpu.led === 0x2a, r.out.slice(-400));
+  check('mydos：MyDOS は 0x23000 より前に収まる', Number(assemble(src('mydos.asm')).symbols.get('os_end')) <= 0x23000);
+
+  // SD カードの中身（disk/ から）
+  const diskSources = fs.readdirSync(path.join(ROOT, 'disk')).sort().map((n) => ({
+    name: n, contents: /\.asm$/.test(n) ? fs.readFileSync(path.join(ROOT, 'disk', n), 'utf8') : fs.readFileSync(path.join(ROOT, 'disk', n)) }));
+  const readme = fs.readFileSync(path.join(ROOT, 'disk/README.TXT'), 'latin1');
+  const files = diskSources.map((x) => makeFile(x.name, x.contents));
+  check('mkdisk：NAME.exe.asm → NAME.EXE（MZ ヘッダ）、NAME.com.asm → NAME.COM',
+    files.some((f) => f.name === 'HELLO.EXE' && f.data[0] === 0x4D && f.data[1] === 0x5A) && files.some((f) => f.name === 'KITT.COM'));
+  const dosSession = ' dir\rtype readme.txt\rhello\rhello claude\rfib 12\rkitt\r type nofile.txt\rtype\rvol\rdemo\rshutdown\r';
+  for (const type of ['fat16', 'fat32']) {
+    const disk = makeDisk(diskSources, { type });
+    r = runSim(src('mydos.asm'), { input: dosSession, disk, max: 60_000_000 });
+    const free = (disk.info.clusters - disk.info.usedClusters) * disk.info.spc * 512;
+    const o = r.out;
+    check(`mydos（${type}）：AUTOEXEC.BAT・DIR・空き容量`, o.includes('SD card     : SDHC/SDXC') &&
+      o.includes(nl('Welcome to MyDOS 2.0. Drive C: is the SD card.\n')) &&
+      o.includes(nl('HELLO    EXE       202 10-25-26  12:00p\n')) && o.includes(` ${free} bytes free`) &&
+      o.includes(' file(s)') && o.includes('Volume Serial Number is 2026-1025'), o.slice(0, 1500));
+    check(`mydos（${type}）：TYPE は中身そのまま`, o.includes(nl('C:\\>type readme.txt\n' + readme)), '');
+    check(`mydos（${type}）：.EXE（引数あり・なし）と .COM`, o.includes(nl('Hello, World!\n')) && o.includes(nl('Hello, claude!\n')) &&
+      o.includes(nl('fib(12) = 144\n')) && o.includes('LED chaser') && o.includes('[.....*]'), '');
+    check(`mydos（${type}）：エラーの出し方`, o.includes(nl('C:\\>type nofile.txt\nFile not found\n')) &&
+      o.includes(nl('C:\\>type\nRequired parameter missing\n')), '');
+    check(`mydos（${type}）：.BAT から .BAT（CLS・VER・MANDEL・FIB）してシャットダウン`, o.includes(nl('C:\\>FIB 10\nfib(0) = 0\n')) &&
+      o.includes('@@') && o.includes("safe to turn off") && r.cpu.halted.kind === 'hlt', o.slice(-300));
+  }
+
+  // 本物の道具（mkfs.fat・mtools）で作った FAT も読めるか
+  if (!spawnSync('mkfs.fat', ['--help']).error && !spawnSync('mcopy', ['--version']).error) {
+    for (const F of ['16', '32']) {
+      const img = path.join(TMP, `real${F}.img`);
+      fs.writeFileSync(img, Buffer.alloc(40 * 1024 * 1024));
+      execFileSync('mkfs.fat', ['-F', F, '-n', 'REALDISK', img]);
+      const env = { ...process.env, MTOOLS_SKIP_CHECK: '1' };
+      const tmpf = path.join(TMP, 'A long file name.txt');
+      fs.writeFileSync(tmpf, 'This file has a long name.\r\n');
+      const hello = path.join(TMP, 'HELLO.EXE');
+      fs.writeFileSync(hello, files.find((f) => f.name === 'HELLO.EXE').data);
+      execFileSync('mcopy', ['-i', img, tmpf, hello, '::'], { env });
+      execFileSync('mmd', ['-i', img, '::GAMES'], { env });
+      const mfree = /([\d ]+) bytes free/.exec(execFileSync('mdir', ['-i', img, '::'], { env, encoding: 'utf8' }))[1].replace(/ /g, '');
+      r = runSim(src('mydos.asm'), { input: ' dir\rtype alongf~1.txt\rhello real\rshutdown\r',
+        disk: fat.bufferDisk(new Uint8Array(fs.readFileSync(img))), max: 40_000_000 });
+      const o = r.out;
+      check(`mkfs.fat -F ${F} で作ったカード（パーティション表なし・長い名前・サブディレクトリ）`,
+        o.includes('Volume in drive C is REALDISK') && /ALONGF~1 TXT +28 /.test(o) && /GAMES +<DIR>/.test(o) &&
+        o.includes(nl('This file has a long name.\n')) && o.includes(nl('Hello, real!\n')) && o.includes(` ${mfree} bytes free`),
+        o.slice(o.indexOf('C:\\>dir'), o.indexOf('C:\\>dir') + 900) + '\nmdir: ' + mfree);
+    }
+  } else console.log('  --   mkfs.fat・mtools がないので、本物の FAT での確認は飛ばす');
 
   // UART から起動：U → 'MC' + 長さ + プログラム → 動いて、キーで再起動 → MyDOS → シャットダウン
   const app = assemble(fs.readFileSync(path.join(ROOT, 'examples/uartboot/hello_uart.asm'), 'utf8')).image.subarray(0x20000);
@@ -161,8 +212,11 @@ const cases = [];
     r.out.includes('Loaded ' + app.length + ' bytes') && r.out.includes('1 4 9 16 25 36 49 64 81 100') &&
     r.out.split('MyCPU BIOS').length === 3 && r.out.includes("safe to turn off"), r.out.slice(-400));
 
+  // Verilog 用の小さい FAT16（1 クラスタ 1 セクタ、パーティションは 32 から）
+  const smallDisk = makeDisk(diskSources, { type: 'fat16', spc: 1, partStart: 32, totalSectors: 4300 });
   cases.push(
-    { name: 'mydos', file: 'mydos.asm', input: bootInput, max: 40_000_000 },
+    { name: 'mydos-sd', file: 'mydos.asm', input: ' hello rtl\rtype readme.txt\rdir\rshutdown\r', disk: smallDisk, max: 30_000_000 },
+    { name: 'mydos-uart', file: 'mydos.asm', input: bootInput, max: 40_000_000 },
     { name: 'hello', file: 'hello.asm' },
     { name: 'selftest32', file: 'selftest32.asm' },
     { name: 'trap', file: 'trap.asm', regs: false },
@@ -195,11 +249,22 @@ if (spawnSync('iverilog', ['-V']).error) {
     fs.writeFileSync(base + '.hex', toReadmemh(image, isa.MAP.ROM_SIZE / 4));
 
     // シミュレータ側の答え
-    const sim = runSim(source, { input: c.input, max: 20_000_000 });
+    const sim = runSim(source, { input: c.input, disk: c.disk, max: 60_000_000 });
+    const sdArgs = [];
+    if (c.disk) {
+      // 中身のあるセクタだけ書く（@番地 で飛ばす）
+      const lines = [];
+      [...c.disk.map].sort((x, y) => x[0] - y[0]).forEach(([lba, sec]) => {
+        lines.push('@' + (lba * 512).toString(16));
+        for (const b of sec) lines.push(b.toString(16).padStart(2, '0'));
+      });
+      fs.writeFileSync(base + '.sd.hex', lines.join('\n') + '\n');
+      sdArgs.push(`-Ptb.SD_HEX="${base}.sd.hex"`, `-Ptb.SD_SECTORS=${c.disk.sectors}`);
+    }
     // Verilog 側
     execFileSync('iverilog', ['-g2012', '-DMYCPU_SIM', '-I', path.join(ROOT, 'rtl'), '-o', base + '.vvp',
-      `-Ptb.ROM_HEX="${base}.hex"`, `-Ptb.FONT_HEX="${path.join(ROOT, 'font/font8x16.hex')}"`,
-      path.join(ROOT, 'tb/tb_soc.v'), ...rtl]);
+      `-Ptb.ROM_HEX="${base}.hex"`, `-Ptb.FONT_HEX="${path.join(ROOT, 'font/font8x16.hex')}"`, ...sdArgs,
+      path.join(ROOT, 'tb/tb_soc.v'), path.join(ROOT, 'tb/sd_model.v'), ...rtl]);
     const args = ['-n', base + '.vvp', `+uart=${base}.uart`, `+regs=${base}.regs`, `+max=${c.max || 20_000_000}`];
     if (c.input) { fs.writeFileSync(base + '.rx', Buffer.from(c.input, 'latin1')); args.push(`+rx=${base}.rx`); }
     if (c.ppm) args.push(`+ppm=${base}.ppm`);

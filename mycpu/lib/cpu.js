@@ -28,6 +28,7 @@
     this.XM = mask(this.xlen);
     this.onTx = opts.onTx || function () {};
     this.onLed = opts.onLed || function () {};
+    this.sd = opts.sd || null;   // SD カード（lib/sdcard.js）。なければ何も挿していない
     // 時間（µs）。既定は 1 命令 = 1µs で決定的。ブラウザでは実時間を渡す
     this.clock = opts.clock || null;
     this.trace = opts.trace || null;
@@ -54,6 +55,7 @@
     this.rx = [];
     this.timerBase = 0; this.timerCmp = 0; this.timerEn = false;
     this.led = 0;
+    this.sdCtrl = 0; this.sdRx = 0xFF;
     this.steps = 0;
     this.ticks = 0;
     this.wfi = false;
@@ -164,6 +166,9 @@
       case IO.TIMER_CMP: return this.timerCmp;
       case IO.TIMER_CTRL: return (this.timerEn ? 1 : 0) | (this.timerPending() ? 2 : 0);
       case IO.LED: return this.led;
+      case IO.SD_DATA: return this.sdRx;
+      case IO.SD_CTRL: return this.sdCtrl;
+      case IO.SD_STATUS: return 0;   // 送受信は一瞬で終わる
       default: return 0;
     }
   };
@@ -174,6 +179,14 @@
       case IO.TIMER_CMP: this.timerCmp = v >>> 0; break;
       case IO.TIMER_CTRL: this.timerEn = !!(v & 1); break;
       case IO.LED: this.led = v & 0x3f; this.onLed(this.led); break;
+      case IO.SD_DATA:
+        // CS を選んでいるときだけカードが応える。挿していなければ 0xFF が返る
+        this.sdRx = this.sd && (this.sdCtrl & 1) ? this.sd.exchange(v & 0xFF) : 0xFF;
+        break;
+      case IO.SD_CTRL:
+        if ((this.sdCtrl & 1) && !(v & 1) && this.sd) this.sd.deselect();
+        this.sdCtrl = v & 0xFF01;
+        break;
     }
   };
 
