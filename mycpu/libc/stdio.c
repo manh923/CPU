@@ -87,7 +87,7 @@ FILE *open_memstream(char **bufp, size_t *sizep) {
   fp->fd = -3;
   fp->mode = 'w';
   fp->ungot = -1;
-  fp->len = 256;
+  fp->len = 28;                          // 最初は小さく（足りなければ 2 倍ずつ）
   fp->buf = malloc(fp->len);
   fp->mbuf = bufp;
   fp->msize = sizep;
@@ -386,19 +386,17 @@ void __assert_fail(const char *expr, const char *file, int line) {
 
 // 書式の出力先：文字列（n バイトまで）か FILE
 typedef struct {
-  char *buf;      // NULL なら fp へ
+  char *buf;      // fp が NULL のとき、ここへ（NULL なら長さを数えるだけ）
   size_t n;       // buf の大きさ
   size_t len;     // 出した文字数（入りきらなかった分も数える）
   FILE *fp;
 } Out;
 
 static void out_c(Out *o, int c) {
-  if (o->buf) {
-    if (o->len + 1 < o->n)
-      o->buf[o->len] = c;
-  } else {
+  if (o->fp)
     fputc(c, o->fp);
-  }
+  else if (o->len + 1 < o->n)          // 文字列へ（vsnprintf(NULL, 0, …) で長さだけ測るときは書かない）
+    o->buf[o->len] = c;
   o->len++;
 }
 

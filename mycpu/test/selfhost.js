@@ -63,5 +63,15 @@ if (process.env.PROF) {
   }
 }
 console.log(out.slice(out.indexOf('C:\\>')));
+// 最後のプログラムが使ったヒープ（libc/stdlib.c の heap_top − ___heap_start）
+{
+  const syms = assemble(ccAsm).symbols;
+  const top = [...syms].find(([n]) => /^L[0-9a-f]{8}_heap_top$/.test(n));
+  if (top) {
+    const used = Number(cpu.read(BigInt(top[1]), 4)) - Number(syms.get('___heap_start'));
+    log.push(`CC.EXE のヒープ：${(used / 1e6).toFixed(2)}MB（最後に動いたのが CC.EXE なら）`);
+  }
+}
+if (cpu.halted) log.unshift(`CPU が止まった：${cpu.halted.kind} ${cpu.halted.message}`);
 console.log(`\n[${(cpu.steps / 1e6).toFixed(0)}M 命令, ${(Date.now() - t) / 1000} 秒]\n` + log.join('\n'));
 fs.writeFileSync(path.join(os.tmpdir(), 'selfhost.img'), disk.toBuffer().subarray(disk.info.partStart * 512));
