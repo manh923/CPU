@@ -1,5 +1,7 @@
 // SDRAM の制御回路（Tang Nano 20K の GW2AR-18 に入っている 64Mbit、2M × 32bit：4 バンク × 2048 行 × 256 列）
 //   CPU 側：req を 1 クロック立てると、終わったときに ack を 1 クロック立てる（読み出しなら rdata に値）
+//   burst を 1 にした読み出しは、waddr（16 語の境目）から 16 語を続けて読む（命令キャッシュ用）。
+//   1 語届くたびに bvalid が 1 クロック立ち（rdata に値）、最後の語で ack も立つ
 //   1 回ごとに行を開き（ACTIVE）、自動プリチャージ付きの READ / WRITE をする。バースト長 1、CAS レイテンシ 2
 //   SDRAM のクロックは clk を反転したもの。SDRAM はこちらの出力が変わってから半周期後に読み取る
 //   リフレッシュは 7.8µs ごと（64ms に 4096 回の倍の頻度）
@@ -15,7 +17,9 @@ module mycpu_sdram #(
   input  wire [20:0] waddr,        // 4 バイト単位の番地
   input  wire [3:0]  wstrb,        // 0 なら読み出し
   input  wire [31:0] wdata,
+  input  wire        burst,
   output reg         ack,
+  output reg         bvalid,
   output reg  [31:0] rdata,
   output reg         ready_init,   // 初期化が終わった
   // SDRAM 側
@@ -61,7 +65,7 @@ module mycpu_sdram #(
   assign sdram_dq = dq_oe ? dq_out : 32'bz;
 
   localparam [3:0] S_INIT = 4'd0, S_PREALL = 4'd1, S_INITREF = 4'd2, S_MRS = 4'd3, S_IDLE = 4'd4,
-                   S_RW = 4'd5, S_RDATA = 4'd6, S_WAIT = 4'd7, S_REF = 4'd8;
+                   S_RW = 4'd5, S_RDATA = 4'd6, S_WAIT = 4'd7, S_REF = 4'd8, S_BURST = 4'd9;
   reg [3:0]  state;
   reg [15:0] wait_n;           // 次の状態に進むまでのクロック数
   reg [3:0]  nref;             // 初期化のリフレッシュの回数
@@ -71,6 +75,9 @@ module mycpu_sdram #(
   reg [3:0]  r_wstrb;
   reg [31:0] r_wdata;
   reg        pend;             // 受け付けたがまだ始めていない
+  reg        r_burst;
+  reg [3:0]  bcnt;             // バースト：次に READ する列（下位 4bit）
+  reg        iss, iss_last, cap, cap_last;   // READ を出した → CL（2）クロック後に取り込む
 
   task cmd(input [3:0] c);
     {sdram_cs_n, sdram_ras_n, sdram_cas_n, sdram_we_n} <= c;
@@ -81,12 +88,18 @@ module mycpu_sdram #(
       state <= S_INIT; wait_n <= T_INIT[15:0]; nref <= 4'd0; refi <= 16'd0; ref_due <= 1'b0;
       cmd(C_NOP); sdram_a <= 11'd0; sdram_ba <= 2'd0; sdram_dqm <= 4'hF;
       dq_oe <= 1'b0; dq_out <= 32'd0; ack <= 1'b0; rdata <= 32'd0; ready_init <= 1'b0; pend <= 1'b0;
-      r_addr <= 21'd0; r_wstrb <= 4'd0; r_wdata <= 32'd0;
+      r_addr <= 21'd0; r_wstrb <= 4'd0; r_wdata <= 32'd0; r_burst <= 1'b0; bcnt <= 4'd0;
+      iss <= 1'b0; iss_last <= 1'b0; cap <= 1'b0; cap_last <= 1'b0; bvalid <= 1'b0;
     end else begin
       cmd(C_NOP);
       dq_oe <= 1'b0;
       ack <= 1'b0;
-      if (req) begin pend <= 1'b1; r_addr <= waddr; r_wstrb <= wstrb; r_wdata <= wdata; end
+      bvalid <= 1'b0;
+      iss <= 1'b0; iss_last <= 1'b0;
+      // バーストの読み出し：READ の 1 クロック後に cap、そのまた 1 クロック後（READ から CL = 2）に取り込む
+      cap <= iss; cap_last <= iss_last;
+      if (cap) begin rdata <= sdram_dq; bvalid <= 1'b1; if (cap_last) ack <= 1'b1; end
+      if (req) begin pend <= 1'b1; r_addr <= waddr; r_wstrb <= wstrb; r_wdata <= wdata; r_burst <= burst; end
       if (refi == T_REFI - 1) begin refi <= 16'd0; ref_due <= 1'b1; end
       else refi <= refi + 16'd1;
       if (wait_n != 16'd0) wait_n <= wait_n - 16'd1;
@@ -126,9 +139,26 @@ module mycpu_sdram #(
             // 次の ACTIVE まで：書き込みの回復 ＋ プリチャージ（ACTIVE からは tRAS ＋ tRP 以上）
             state <= S_WAIT;
             wait_n <= (T_WR + T_RP > T_RAS + T_RP - T_RCD ? T_WR + T_RP : T_RAS + T_RP - T_RCD) - 1;
+          end else if (r_burst) begin        // バースト：自動プリチャージなしで READ を 16 回
+            cmd(C_READ);
+            sdram_a <= {3'b000, r_addr[7:0]};
+            iss <= 1'b1;
+            bcnt <= 4'd1;
+            state <= S_BURST;
           end else begin
             cmd(C_READ);
             state <= S_RDATA; wait_n <= CL - 1;
+          end
+        end
+        S_BURST: begin
+          if (bcnt != 4'd0) begin              // 最後（16 回目）だけ A10 = 1（自動プリチャージ）
+            cmd(C_READ);
+            sdram_a <= {bcnt == 4'd15 ? 3'b100 : 3'b000, r_addr[7:4], bcnt};
+            iss <= 1'b1; iss_last <= bcnt == 4'd15;
+            bcnt <= bcnt + 4'd1;
+          end else begin                       // 出し終えた：最後の READ から 1 クロック後にプリチャージが始まる
+            state <= S_WAIT;
+            wait_n <= (T_RP > CL ? T_RP : CL) - 1;
           end
         end
         S_RDATA: begin                         // READ から CL クロック後に取り込む

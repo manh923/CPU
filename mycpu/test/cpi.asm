@@ -277,7 +277,45 @@ l12:
         CALL32 putdec
         ADDI32 r16, r0, s12
         CALL32 puts
+        ; SDRAM に置いたコード（命令キャッシュ）：ADDR32 × 8 のループを SDRAM に写して呼ぶ。最初のライン読み込みも込み
+        ADDI32 r16, r0, n13
+        CALL32 puts
+        ADDI32 r17, r0, sdcode_rom
+        ADDI32 r18, r0, 0x01000000 + 0x1000
+.cp:    LOAD32_32 r19, r17, 0
+        STORE32_32 r19, r18, 0
+        ADDI32 r17, r17, 4
+        ADDI32 r18, r18, 4
+        CMPLTUI32 p1, r17, sdcode_end
+        BR32 p1, .cp
+        CALL32 0x01000000 + 0x1000
+        CALL32 putdec
+        ADDI32 r16, r0, s13
+        CALL32 puts
         HLT
+
+        .align 16
+sdcode_rom:
+        .phase 0x01000000 + 0x1000
+sdloop: ADDI32 r25, r0, 20
+        LOAD32_32 r24, r0, TIMER_COUNT
+.l:     ADDR32 r20, r20, r21
+        ADDR32 r20, r20, r21
+        ADDR32 r20, r20, r21
+        ADDR32 r20, r20, r21
+        ADDR32 r20, r20, r21
+        ADDR32 r20, r20, r21
+        ADDR32 r20, r20, r21
+        ADDR32 r20, r20, r21
+        ADDI32 r25, r25, -1
+        CMPNEI32 p1, r25, 0
+        BR32 p1, .l
+        LOAD32_32 r16, r0, TIMER_COUNT
+        SUBR32 r16, r16, r24
+        RET32
+        .align 16
+        .dephase
+sdcode_end:
 
 ; puts(r16)。r16〜r19 を壊す
 puts:
@@ -353,3 +391,5 @@ n11: .asciz "STORE32 SDRAM: "
 s11: .asciz " [6.0]\n"
 n12: .asciz "DIVUR32: "
 s12: .asciz " [34.0]\n"
+n13: .asciz "ADDR32 in SDRAM (I-cache): "
+s13: .asciz " [1.4]\n"

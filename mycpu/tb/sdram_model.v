@@ -1,5 +1,6 @@
 // SDRAM（2M × 32bit：4 バンク × 2048 行 × 256 列）のモデル。テストベンチ用。
-//   バースト長 1 だけ。CAS レイテンシはモードレジスタのとおり（2 か 3）
+//   バースト長 1 だけ。CAS レイテンシはモードレジスタのとおり（2 か 3）。
+//   自動プリチャージなしの READ で行を開いたまま続けて読める（最後は自動プリチャージ付きの READ か PRECHARGE）
 //   タイミングを調べて、違反があれば "sdram_model: エラー（英語の理由）" を出して errors を増やす：
 //     電源投入後 200µs・プリチャージ・リフレッシュ 2 回以上の後にモード設定、モード設定の前のアクセス、
 //     開いていない行への READ / WRITE、開いている行への ACTIVE、tRCD・tRAS・tRP・tRC・tRFC・tWR・tMRD、
@@ -101,7 +102,7 @@ module sdram_model #(
             if (!dqm[3]) mem[waddr][31:24] = dq[31:24];
             if (a[10]) begin open[ba] = 1'b0; t_pre[ba] = (cyc + T_WR > t_act[ba] + T_RAS) ? cyc + T_WR : t_act[ba] + T_RAS; end
           end
-          if (!a[10]) err("READ/WRITE without auto precharge (not supported)");
+          if (!a[10] && c == 4'b0100) err("WRITE without auto precharge (not supported)");
         end
         4'b0010: begin                                     // PRECHARGE
           for (b = 0; b < 4; b = b + 1) if (a[10] || b == ba) begin

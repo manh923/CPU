@@ -169,7 +169,7 @@ const cases = [];
   check('BIOS：MYDOS.SYS のないカードも Non-System disk', r.out.includes('SD card     : SDHC/SDXC') && r.out.includes('Non-System disk'), r.out.slice(-200));
 
   const readme = fs.readFileSync(path.join(ROOT, 'disk/README.TXT'), 'latin1');
-  const session = ' dir\rtype readme.txt\rhello\rhello claude\rfib 12\rkitt\r crash\rtype nofile.txt\rtype\rver\rcolor 1e\rled 2a\r' +
+  const session = ' dir\rtype readme.txt\rhello\rhello claude\rfib 12\rkitt\r crash\rbig\rtype nofile.txt\rtype\rver\rcolor 1e\rled 2a\r' +
     'copy con note.txt\rHello from MyDOS!\rSecond lline\b\b\b\b\bline\r\x1a\rcopy note.txt copy.txt\rren copy.txt renamed.txt\r' +
     'dir > list.txt\rfib 3 >> list.txt\rtoupper readme.txt up.txt\rdel note.txt\rdel nofile\rren renamed.txt hello.exe\r' +
     'type list.txt\rdemo\rshutdown\r';
@@ -185,6 +185,8 @@ const cases = [];
       o.includes(nl('C:\\>type readme.txt\n' + readme)), o.slice(o.indexOf('C:\\>dir'), o.indexOf('C:\\>dir') + 900));
     check(`MyDOS（${type}）：ユーザーモードのプログラム（SYSCALL）`, o.includes(nl('Hello, World!\n')) && o.includes(nl('Hello, claude!\n')) &&
       o.includes(nl('fib(12) = 144\n')) && o.includes('LED chaser'), '');
+    check(`MyDOS（${type}）：SDRAM に読み込む .EXE（スタックも SDRAM）`,
+      o.includes(nl('Hello from SDRAM! PC = 01000024, SP = 017FFFF8\nRecursion depth: 10000\n')), '');
     check(`MyDOS（${type}）：0 で割るプログラムは止めて C:\\> に戻る`,
       o.includes(nl('Dividing by zero...\n\nProgram terminated: divide by zero at ')) && !o.includes('never printed'), '');
     check(`MyDOS（${type}）：エラーの出し方`, o.includes(nl('C:\\>type nofile.txt\nFile not found\n')) &&
@@ -247,7 +249,7 @@ const cases = [];
   const small = () => makeDisk(diskSources, { type: 'fat16', spc: 1, partStart: 32, totalSectors: 4300 });
   cases.push(
     { name: 'mydos-sd', file: 'bios.asm', disk: small(), max: 60_000_000,
-      input: ' hello rtl\rcopy con a.txt\rwritten by rtl\r\x1a\rtype a.txt\rren a.txt b.txt\rtype b.txt\rdel b.txt\rcrash\rshutdown\r' },
+      input: ' hello rtl\rcopy con a.txt\rwritten by rtl\r\x1a\rtype a.txt\rren a.txt b.txt\rtype b.txt\rdel b.txt\rcrash\rbig\rshutdown\r' },
     { name: 'mydos-uart', file: 'bios.asm', input: bootInput, disk: small(), max: 60_000_000 },
     { name: 'hello', file: 'hello.asm' },
     { name: 'sdram', file: 'sdram.asm', sdram: true, trace: true },
