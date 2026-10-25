@@ -33,6 +33,16 @@ MyDOS の上で C コンパイラを動かし、C のプログラム（コンパ
 小さいものから順に確かめる：LED の点滅 → UART だけ → CPU ＋ UART → HDMI → SD カード → SDRAM。
 書き込みは openFPGALoader（`-b tangnano20k`）か Gowin の Programmer。合成は Gowin EDA。
 
+## 速くする（セルフホストが実機で 7〜20 分かかる見込み。hello.c なら 4 秒）
+
+効く順に：
+1. コンパイラ（cc/codegen.c）にレジスタ割り当て：今はスタックマシンで、gcc -O2 の 5〜10 倍の命令を実行している。
+   命令数が 3〜5 分の 1 になれば、CC・AS・全部の C のプログラムが速くなる
+2. データキャッシュ（Verilog）：EXE はスタックも SDRAM なので、読み書きのたびに SDRAM を待つ。実機で 2〜3 倍
+3. CC の出力を短くする：AS は文字のアセンブリ（chibicc 全体で約 2.5MB）を 1 行ずつ読むので、時間の半分以上が AS。
+   いらない行・コメントを出さない、push/pop の組を減らすなど。いつかは .OBJ（バイナリ）にする
+4. softfloat をアセンブリで（double の足し算 1 回が約 1500 命令）
+
 ## そのほか（急がない）
 
 - MyDOS のサブディレクトリ：今はルートだけ。パス（`C:\INCLUDE\STDIO.H`）・`MKDIR`・`RMDIR`・`CD`・`DIR` の中身、
