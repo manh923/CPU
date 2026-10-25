@@ -1,0 +1,211 @@
+#!/usr/bin/env node
+// C のプログラムを、この CPU の MyDOS 用 .EXE にする（PC の上で動かすドライバ）
+//   node tools/cc.js prog.c [ほかの .c ...] -o PROG.EXE   … .EXE を作る（SDRAM の 0x1000000 から動く）
+//   node tools/cc.js prog.c -S prog.asm                   … アセンブリ（ライブラリ込み）だけ出す
+// コンパイラは cc/（chibicc をこの CPU 向けに改造したもの）。なければ make でビルドする（gcc が要る）。
+// リンカの代わりに、crt0・プログラム・C ライブラリ（libc/）のアセンブリを 1 つにつなげてアセンブルする：
+//   コードを前に、データを後ろにまとめ（codegen.c の「; @text」「; @data」で分ける）、
+//   最後に __heap_start（malloc がここから後ろを使う）を置く。
+//   使われない関数・変数は捨てる（codegen.c の「; @fn」「; @obj」で分けて、crt0 からたどれるものだけ残す）。
+// require して使う：buildAsm(.c のパスの並び) → アセンブリの文字列、diskSources(フォルダ) → mkdisk 用の並び
+'use strict';
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { execFileSync } = require('child_process');
+
+const ROOT = path.join(__dirname, '..');
+const CC_DIR = path.join(ROOT, 'cc');
+const CC = path.join(CC_DIR, 'chibicc');
+const LIBC = path.join(ROOT, 'libc');
+const BASE = 0x01000000;              // SDRAM（MyDOS が .EXE をここに読み込み、スタックも SDRAM の末尾に置く）
+
+class CcError extends Error {}
+
+// cc/chibicc がなければ（ソースより古ければ）ビルドする
+function ensureCompiler() {
+  const srcs = fs.readdirSync(CC_DIR).filter((f) => /\.[ch]$/.test(f)).map((f) => path.join(CC_DIR, f));
+  const built = fs.existsSync(CC) ? fs.statSync(CC).mtimeMs : 0;
+  if (srcs.some((f) => fs.statSync(f).mtimeMs > built)) {
+    try {
+      execFileSync('make', ['-C', CC_DIR, 'chibicc'], { stdio: ['ignore', 'ignore', 'pipe'] });
+    } catch (e) {
+      throw new CcError('cc/ のビルドに失敗（gcc と make が要る）\n' + (e.stderr || e.message));
+    }
+  }
+}
+
+// 1 つの .c をアセンブリにする。パスはリポジトリからの相対で渡す（ファイルの番号＝ラベルが、どの PC でも同じになるように）
+function compileFile(file, includes = []) {
+  ensureCompiler();
+  const tmp = path.join(os.tmpdir(), `mycpu-cc-${process.pid}-${path.basename(file)}.s`);
+  const rel = path.relative(ROOT, path.resolve(file));
+  const inc = includes.map((d) => '-I' + (path.relative(ROOT, path.resolve(d)) || '.'));
+  try {
+    execFileSync(CC, ['-cc1', '-cc1-input', rel, '-cc1-output', tmp, ...inc, rel], { cwd: ROOT, stdio: ['ignore', 'ignore', 'pipe'] });
+    return fs.readFileSync(tmp, 'utf8');
+  } catch (e) {
+    throw new CcError(String(e.stderr || e.message).trim());
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
+}
+
+// コンパイルした結果を覚えておく（libc は何度もコンパイルするので）：パス・-I・更新時刻 → アセンブリ
+const cache = new Map();
+function compileCached(file, includes) {
+  const key = [path.resolve(file), ...includes, fs.statSync(file).mtimeMs, fs.statSync(CC).mtimeMs].join('\0');
+  if (!cache.has(key)) cache.set(key, compileFile(file, includes));
+  return cache.get(key);
+}
+
+// アセンブリをコードとデータに分け、それぞれを関数・変数ごとのかたまりにする（codegen.c の「; @fn」「; @obj」）
+//   かたまり = { name: 定義するラベル（先頭のものは null）, lines: [...] }
+function split(asm) {
+  const text = [{ name: null, lines: [] }], data = [{ name: null, lines: [] }];
+  let cur = text;
+  for (const line of asm.split('\n')) {
+    if (line === '; @data') cur = data;
+    else if (line === '; @text') cur = text;
+    else if (line.startsWith('; @fn ') || line.startsWith('; @obj ')) cur.push({ name: line.split(' ')[2], lines: [] });
+    else if (line.startsWith('; @common ')) data[0].lines.push(line);     // 残すかは後で決める
+    else cur[cur.length - 1].lines.push(line);
+  }
+  return { text, data };
+}
+
+// 使われない関数・変数を捨てる（リンカの --gc-sections と同じ）。.s のファイルと名前のないかたまりから、
+// たどれるラベルのものだけ残す
+function gc(parts, roots) {
+  const byName = new Map();
+  for (const p of parts) for (const c of [...p.text, ...p.data]) if (c.name) byName.set(c.name, c);
+  const keep = new Set();
+  const refs = (lines) => {
+    const out = [];
+    for (const line of lines) {
+      const code = line.replace(/;.*/, '');
+      for (const m of code.matchAll(/[A-Za-z_][\w.]*/g)) if (byName.has(m[0])) out.push(m[0]);
+    }
+    return out;
+  };
+  const todo = [...roots];
+  for (const p of parts) for (const c of [...p.text, ...p.data]) if (!c.name) todo.push(...refs(c.lines));
+  while (todo.length) {
+    const n = todo.pop();
+    if (keep.has(n)) continue;
+    keep.add(n);
+    todo.push(...refs(byName.get(n).lines));
+  }
+  for (const p of parts) {
+    p.text = p.text.filter((c) => !c.name || keep.has(c.name));
+    p.data = p.data.filter((c) => !c.name || keep.has(c.name));
+  }
+  return keep;
+}
+
+// .c の並び → プログラム全体のアセンブリ（crt0・C ライブラリ込み）
+//   opts.includes はインクルードを探すフォルダ。opts.gc = false なら、使わない関数・変数も捨てない
+//   （disk/as.c は捨てないので、比べるテストはこれを使う）
+function buildAsm(files, opts = {}) {
+  const includes = opts.includes || [];
+  const libc = fs.readdirSync(LIBC).filter((f) => f.endsWith('.c')).sort().map((f) => path.join(LIBC, f));
+  ensureCompiler();
+  const parts = [...files, ...libc].map((f) => ({ name: path.relative(ROOT, f), ...split(compileCached(f, includes)) }));
+  // crt0.s を先頭に、ほかの libc/*.s（setjmp など）はその後ろに
+  const asms = fs.readdirSync(LIBC).filter((f) => f.endsWith('.s') && f !== 'crt0.s').sort();
+  const asmText = ['crt0.s', ...asms].map((f) => fs.readFileSync(path.join(LIBC, f), 'utf8'));
+  let keep = null;
+  if (opts.gc !== false) {
+    const roots = [];
+    for (const t of asmText) for (const m of t.replace(/;.*/g, '').matchAll(/[A-Za-z_][\w.]*/g)) roots.push(m[0]);
+    keep = gc(parts, roots.filter((n) => parts.some((p) => [...p.text, ...p.data].some((c) => c.name === n))));
+  }
+  const join = (chunks) => chunks.map((c) => c.lines.join('\n')).join('\n');
+  for (const p of parts) {
+    p.text = join(p.text);
+    p.data = join(p.data);
+  }
+  const out = [
+    `; ${files.map((f) => path.basename(f)).join(' ')} — tools/cc.js が作ったアセンブリ（C ライブラリ込み）`,
+    `        .org 0x${BASE.toString(16)}`,
+    ...asmText,
+  ];
+  for (const p of parts) out.push(`; ---- ${p.name} ----`, p.text);
+  out.push('', '; ---- データ ----', '        .align 64');
+  for (const p of parts) out.push(`; ---- ${p.name} ----`, p.data);
+  // 初期値なしの大域変数：どこにも定義がなければ、ここに 1 つだけ置く（大きさ・揃えはいちばん大きいもの）
+  const defined = new Set();
+  for (const p of parts) for (const m of (p.text + '\n' + p.data).matchAll(/^([A-Za-z_][\w.]*):/gm)) defined.add(m[1]);
+  const common = new Map();
+  for (const p of parts) {
+    for (const m of p.data.matchAll(/^; @common (\S+) (\d+) (\d+)$/gm)) {
+      const c = common.get(m[1]) || { size: 0, align: 4 };
+      common.set(m[1], { size: Math.max(c.size, +m[2]), align: Math.max(c.align, +m[3]) });
+    }
+  }
+  for (const [name, c] of common) if (!defined.has(name) && (!keep || keepCommon(name, parts))) out.push(`        .align ${c.align}`, `${name}:`, `        .space ${c.size}`);
+  out.push('        .align 8', '___heap_start:', '');
+  return out.join('\n');
+}
+
+// 初期値なしの大域変数が、残したコードかデータから使われているか
+function keepCommon(name, parts) {
+  const re = new RegExp(`(^|[^\\w.])${name.replace(/\./g, '\\.')}($|[^\\w.])`, 'm');
+  return parts.some((p) => re.test((p.text + '\n' + p.data).replace(/;.*/g, '')));
+}
+
+// SD カードの中身のもと（mkdisk・sim.js・テスト用）：フォルダのファイルを読み、
+// NAME.c があればコンパイルした NAME.exe.asm も足す（.c もそのまま入れる）。.asm は文字列、ほかはバイト列
+function diskSources(dir) {
+  const out = [];
+  for (const name of fs.readdirSync(dir).sort()) {
+    const file = path.join(dir, name);
+    if (!fs.statSync(file).isFile()) continue;
+    out.push({ name, contents: /\.asm$/i.test(name) ? fs.readFileSync(file, 'utf8') : fs.readFileSync(file) });
+    if (/\.c$/i.test(name)) out.push({ name: name.replace(/\.c$/i, '.exe.asm'), contents: buildAsm([file]) });
+  }
+  return out;
+}
+
+function main(argv) {
+  const inputs = [];
+  let out = null, asmOut = null;
+  for (let i = 2; i < argv.length; i++) {
+    if (argv[i] === '-o') out = argv[++i];
+    else if (argv[i] === '-S') asmOut = argv[++i];
+    else if (!argv[i].startsWith('-')) inputs.push(argv[i]);
+    else usage();
+  }
+  if (!inputs.length || (!out && !asmOut)) usage();
+  let asm;
+  try {
+    asm = buildAsm(inputs);
+  } catch (e) {
+    if (!(e instanceof CcError)) throw e;
+    console.error(e.message);
+    process.exit(1);
+  }
+  if (asmOut) fs.writeFileSync(asmOut, asm);
+  if (out) {
+    const { makeFile } = require('../lib/disk.js');
+    const { AsmError } = require('../lib/assembler.js');
+    try {
+      const f = makeFile(path.basename(out).replace(/\.exe$/i, '') + '.exe.asm', asm);
+      fs.writeFileSync(out, f.data);
+      console.log(`${out}: ${f.data.length} バイト`);
+    } catch (e) {
+      if (!(e instanceof AsmError)) throw e;
+      for (const err of e.errors.slice(0, 10)) console.error(`${err.line}: ${err.message}`);
+      process.exit(1);
+    }
+  }
+}
+
+function usage() {
+  console.error('使い方: node tools/cc.js prog.c [ほかの .c ...] -o PROG.EXE [-S prog.asm]');
+  process.exit(2);
+}
+
+if (require.main === module) main(process.argv);
+
+module.exports = { buildAsm, diskSources, compileFile, CcError };

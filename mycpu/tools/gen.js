@@ -2,6 +2,7 @@
 //   lib/opcodes.js   … アセンブラ・シミュレータ用の命令表
 //   lib/examples.js  … ブラウザ版に載せるサンプル
 //   rtl/opcodes.vh   … Verilog デコーダ用の定数
+//   disk/asops.h     … C で書いたアセンブラ（disk/as.c）の命令表
 // 使い方: node tools/gen.js        （作り直す）
 //         node tools/gen.js --check（作り直さず、古くなっていないか確認だけ）
 'use strict';
@@ -98,9 +99,10 @@ function genExamplesJs() {
   const dir = path.join(ROOT, 'examples');
   const files = fs.readdirSync(dir).filter((f) => f.endsWith('.asm')).sort();
   const items = files.map((f) => ({ name: f, source: fs.readFileSync(path.join(dir, f), 'utf8') }));
-  // SD カードの中身（disk/）。どれも文字のファイル
-  const ddir = path.join(ROOT, 'disk');
-  const disk = fs.readdirSync(ddir).sort().map((f) => ({ name: f, contents: fs.readFileSync(path.join(ddir, f), 'latin1') }));
+  // SD カードの中身（disk/）。NAME.c はコンパイルした NAME.exe.asm も入れる（tools/cc.js。ブラウザではコンパイルできないので）。
+  // 中身はバイト列を latin1 の文字列にしたもの
+  const disk = require('./cc.js').diskSources(path.join(ROOT, 'disk')).map((f) => ({
+    name: f.name, contents: Buffer.from(f.contents).toString('latin1') }));
   return `// 自動生成（tools/gen.js が examples/*.asm と disk/ から作る）。手で編集しない。
 (function (root) {
   var EXAMPLES = ${JSON.stringify(items, null, 2)};
@@ -111,16 +113,48 @@ function genExamplesJs() {
 `;
 }
 
+// disk/as.c の命令表：名前、オペコード、命令長、即値の bit 数、オペランドの数と（種類 × 16 + 入れる欄）
+function genAsOps() {
+  delete require.cache[require.resolve('../lib/opcodes.js')];
+  delete require.cache[require.resolve('../lib/isa.js')];
+  const isa = require('../lib/isa.js');
+  const CLS = { imm: 0, data: 1, addr: 2, p: 3, r32: 4, r64: 5 };
+  const FIELD = { rd: 0, rs1: 1, rs2: 2, imm: 3 };
+  const rows = isa.OPCODES.map((r) => {
+    const spec = r.spec.map((x) => CLS[x.cls] * 16 + FIELD[x.field]);
+    while (spec.length < 4) spec.push(0);
+    return `  {"${r.mnemonic}", 0x${r.opcode.toString(16).padStart(4, '0')}, ${r.length}, ${r.wbits}, ${r.spec.length}, {${spec.join(', ')}}},`;
+  });
+  return `// 自動生成（tools/gen.js が opcodes.csv から作る）。手で編集しない。AS.EXE（as.c）の命令表
+// 欄：名前、オペコード（14bit）、命令長（バイト）、即値の bit 数、オペランドの数、
+//     オペランド（種類 × 16 + 入れる欄。種類 0 = 即値、1 = データ、2 = 番地、3 = 1bit、4 = r32、5 = r64。
+//     欄 0 = rd、1 = rs1、2 = rs2、3 = 即値）
+typedef struct {
+  char *name;
+  int opcode, len, wbits, nops;
+  int spec[4];
+} AsOp;
+
+static AsOp as_ops[] = {
+${rows.join('\n')}
+};
+#define NUM_AS_OPS ${rows.length}
+`;
+}
+
 function main() {
   const check = process.argv.includes('--check');
   const ops = loadOpcodes();
-  const outputs = {
-    'lib/opcodes.js': genOpcodesJs(ops),
-    'lib/examples.js': genExamplesJs(),
-    'rtl/opcodes.vh': genVh(ops),
-  };
+  // 順番に作る（後のものが前のものを読む：isa.js は opcodes.js を、examples.js は disk/ を）
+  const outputs = [
+    ['lib/opcodes.js', () => genOpcodesJs(ops)],
+    ['rtl/opcodes.vh', () => genVh(ops)],
+    ['disk/asops.h', () => genAsOps()],
+    ['lib/examples.js', () => genExamplesJs()],
+  ];
   let stale = 0;
-  for (const [rel, text] of Object.entries(outputs)) {
+  for (const [rel, make] of outputs) {
+    const text = make();
     const file = path.join(ROOT, rel);
     const old = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
     if (old === text) continue;

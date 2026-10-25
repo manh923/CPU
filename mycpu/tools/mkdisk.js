@@ -12,11 +12,8 @@ const path = require('path');
 const { makeFile, makeDisk } = require('../lib/disk.js');
 const { AsmError } = require('../lib/assembler.js');
 
-function readSources(dir) {
-  return fs.readdirSync(dir).sort()
-    .filter((n) => fs.statSync(path.join(dir, n)).isFile())
-    .map((n) => ({ name: n, contents: /\.asm$/i.test(n) ? fs.readFileSync(path.join(dir, n), 'utf8') : fs.readFileSync(path.join(dir, n)) }));
-}
+// NAME.c はコンパイルして NAME.EXE も作る（tools/cc.js）
+const readSources = (dir) => require('./cc.js').diskSources(dir);
 
 function main(argv) {
   let dir = path.join(__dirname, '..', 'disk'), out = null, filesDir = null, type = 'fat16', sizeMB = null;

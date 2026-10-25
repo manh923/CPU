@@ -150,8 +150,7 @@ const cases = [];
   const bios = src('bios.asm');
   const biosImage = assemble(bios).image;
   check('BIOS は ROM（16KB）に収まる', biosImage.length <= isa.MAP.ROM_SIZE, biosImage.length);
-  const diskSources = fs.readdirSync(path.join(ROOT, 'disk')).sort().map((n) => ({
-    name: n, contents: /\.asm$/.test(n) ? fs.readFileSync(path.join(ROOT, 'disk', n), 'utf8') : fs.readFileSync(path.join(ROOT, 'disk', n)) }));
+  const diskSources = require('../tools/cc.js').diskSources(path.join(ROOT, 'disk'));   // primes.c は PRIMES.EXE にも
   const files = diskSources.map((x) => makeFile(x.name, x.contents));
   const dosSym = assemble(fs.readFileSync(path.join(ROOT, 'disk/mydos.sys.asm'), 'utf8')).symbols;
   check('MYDOS.SYS（変数も含めて）は 0x26000 より前に収まる', Number(dosSym.get('bss_end')) <= 0x26000, dosSym.get('bss_end'));
@@ -169,15 +168,23 @@ const cases = [];
   check('BIOS：MYDOS.SYS のないカードも Non-System disk', r.out.includes('SD card     : SDHC/SDXC') && r.out.includes('Non-System disk'), r.out.slice(-200));
 
   const readme = fs.readFileSync(path.join(ROOT, 'disk/README.TXT'), 'latin1');
-  const session = ' dir\rtype readme.txt\rhello\rhello claude\rfib 12\rkitt\r crash\rbig\rtype nofile.txt\rtype\rver\rcolor 1e\rled 2a\r' +
+  const session = ' dir\rtype readme.txt\rhello\rhello claude\rfib 12\rkitt\r crash\rbig\rprimes\rtype nofile.txt\rtype\rver\rcolor 1e\rled 2a\r' +
     'copy con note.txt\rHello from MyDOS!\rSecond lline\b\b\b\b\bline\r\x1a\rcopy note.txt copy.txt\rren copy.txt renamed.txt\r' +
     'dir > list.txt\rfib 3 >> list.txt\rtoupper readme.txt up.txt\rdel note.txt\rdel nofile\rren renamed.txt hello.exe\r' +
-    'type list.txt\rdemo\rshutdown\r';
+    'type list.txt\rlibtest\r' +
+    // EDIT：2 行打ち、↑・Home で 1 行目の頭へ戻って足し、Ctrl-S で保存、Ctrl-X で終わる
+    'edit memo.txt\rHello EDIT!\rsecond line\x1b[A\x1b[H>> \x13\x18type memo.txt\rdel memo.txt\r' +
+    // AS：MyDOS の上でアセンブルして実行
+    'as -o hi2.exe hi.s\rhi2 MyCPU\rdel hi2.exe\r' +
+    'demo\rshutdown\r';
+  // C ライブラリのテスト（test/libtest.c）は、このセッションのカードにだけ入れる
+  const libtest = { name: 'libtest.exe.asm', contents: require('../tools/cc.js').buildAsm([path.join(ROOT, 'test/libtest.c')]) };
+  const hiS = { name: 'HI.S', contents: fs.readFileSync(path.join(ROOT, 'disk/hello.exe.asm')) };
   const mtoolsOk = !spawnSync('fsck.fat', ['--help']).error && !spawnSync('mcopy', ['--version']).error;
   const env = { ...process.env, MTOOLS_SKIP_CHECK: '1' };
   for (const type of ['fat16', 'fat32']) {
-    const disk = makeDisk(diskSources, { type });
-    r = runSim(bios, { input: session, disk, max: 120_000_000 });
+    const disk = makeDisk([...diskSources, libtest, hiS], { type });
+    r = runSim(bios, { input: session, disk, max: 400_000_000 });
     const o = r.out;
     check(`MyDOS（${type}）：SD カードの MYDOS.SYS から起動、AUTOEXEC.BAT`, o.includes('Starting MyDOS') && o.includes('MyDOS Version 3.0') &&
       o.includes(nl('Welcome to MyDOS 3.0. Drive C: is the SD card.\n')), o.slice(0, 1500));
@@ -187,6 +194,17 @@ const cases = [];
       o.includes(nl('fib(12) = 144\n')) && o.includes('LED chaser'), '');
     check(`MyDOS（${type}）：SDRAM に読み込む .EXE（スタックも SDRAM）`,
       o.includes(nl('Hello from SDRAM! PC = 01000024, SP = 017FFFF8\nRecursion depth: 10000\n')), '');
+    check(`MyDOS（${type}）：C で書いたプログラム（PRIMES.EXE、cc/ と libc/ で作る）`,
+      o.includes(nl('=== MyCPU Prime Search ===\nSearching primes from 2 to 1000...\nFound: 10 primes\n')) &&
+      o.includes(nl('Found: 160 primes\nSearch complete!\nTotal primes: 168\n')), '');
+    check(`MyDOS（${type}）：C ライブラリ（test/libtest.c：ファイル・書式・long long・setjmp など）`,
+      o.includes(nl('libtest: 0 NG\n')),
+      o.slice(o.indexOf('C:\\>libtest'), o.indexOf('libtest: ') + 20));
+    check(`MyDOS（${type}）：EDIT（C で書いたエディタ。矢印キー・保存）`,
+      o.includes(nl('C:\\>type memo.txt\n>> Hello EDIT!\nsecond line\n')), o.slice(o.indexOf('C:\\>type memo.txt'), o.indexOf('C:\\>type memo.txt') + 80));
+    check(`MyDOS（${type}）：AS（C で書いたアセンブラ）でアセンブルして実行`,
+      o.includes(nl('C:\\>as -o hi2.exe hi.s\nhi2.exe: 218 bytes\n')) && o.includes(nl('C:\\>hi2 MyCPU\nHello, MyCPU!\n')),
+      o.slice(o.indexOf('C:\\>as -o'), o.indexOf('C:\\>as -o') + 120));
     check(`MyDOS（${type}）：0 で割るプログラムは止めて C:\\> に戻る`,
       o.includes(nl('Dividing by zero...\n\nProgram terminated: divide by zero at ')) && !o.includes('never printed'), '');
     check(`MyDOS（${type}）：エラーの出し方`, o.includes(nl('C:\\>type nofile.txt\nFile not found\n')) &&
@@ -249,7 +267,7 @@ const cases = [];
   const small = () => makeDisk(diskSources, { type: 'fat16', spc: 1, partStart: 32, totalSectors: 4300 });
   cases.push(
     { name: 'mydos-sd', file: 'bios.asm', disk: small(), max: 60_000_000,
-      input: ' hello rtl\rcopy con a.txt\rwritten by rtl\r\x1a\rtype a.txt\rren a.txt b.txt\rtype b.txt\rdel b.txt\rcrash\rbig\rshutdown\r' },
+      input: ' hello rtl\rcopy con a.txt\rwritten by rtl\r\x1a\rtype a.txt\rren a.txt b.txt\rtype b.txt\rdel b.txt\rcrash\rbig\rprimes\rshutdown\r' },
     { name: 'mydos-uart', file: 'bios.asm', input: bootInput, disk: small(), max: 60_000_000 },
     { name: 'hello', file: 'hello.asm' },
     { name: 'sdram', file: 'sdram.asm', sdram: true, trace: true },
@@ -260,6 +278,60 @@ const cases = [];
     { name: 'console', file: 'console.asm', input },
     { name: 'colors', file: 'colors.asm', ppm: true },
   );
+}
+
+// ---- C コンパイラ ----
+console.log('C コンパイラ（cc/。chibicc のテストをこの CPU で動かす）');
+{
+  // x86 のアセンブリ・pthread を使うものは除く（この CPU にはない）
+  const NA = ['asm', 'atomic', 'tls'];
+  const results = require('./cctest.js').run();
+  const expect = results.filter((r) => !NA.includes(r.name));
+  const bad = expect.filter((r) => !r.ok);
+  check(`chibicc のテスト ${expect.length} 本が通る（x86・pthread の ${NA.length} 本は除く）`,
+    bad.length === 0 && expect.length >= 38, bad.map((r) => `${r.name}：${r.why}`).join('\n'));
+}
+
+// ---- 浮動小数点（libc/softfloat.c・fltio.c・math.c） ----
+if (spawnSync('gcc', ['--version']).error) {
+  console.log('  --   gcc がないので、浮動小数点のライブラリの比較は飛ばす');
+} else {
+  const exe = (name) => path.join(TMP, name);
+  const gcc = (out, args) => execFileSync('gcc', ['-O2', '-o', exe(out), ...args.map((f) => (f.startsWith('-') ? f : path.join(ROOT, f)))], { stdio: ['ignore', 'ignore', 'pipe'] });
+  const runExe = (name, args) => spawnSync(exe(name), args, { encoding: 'utf8' });
+
+  gcc('floattest', ['test/floattest.c', 'libc/softfloat.c']);
+  let r = runExe('floattest', ['300000']);
+  check('ソフトウェアの浮動小数点（libc/softfloat.c）：四則・比較・変換が PC の FPU とビット単位で同じ（30 万組）',
+    r.status === 0, r.stdout.trim());
+
+  gcc('fltiotest', ['-Dstrtod=my_strtod', '-Dstrtof=my_strtof', '-Dstrtold=my_strtold', '-Datof=my_atof', 'test/fltiotest.c', 'libc/fltio.c']);
+  r = runExe('fltiotest', ['20000']);
+  check('printf の %f・%e・%g と strtod（libc/fltio.c）：glibc と同じ文字列・同じビット列（2 万回）', r.status === 0, r.stdout.trim());
+
+  gcc('mathtest', ['-fno-builtin', '-fno-math-errno', 'test/mathtest.c', 'libc/math.c', '-lm']);
+  r = runExe('mathtest', ['200000']);
+  check('数学の関数（libc/math.c）：sqrt・fmod などは正確、sin・exp・pow などは 2 ulp 以内（glibc の long double と比べる）',
+    r.status === 0, r.stdout.trim());
+
+  // 同じプログラムを、この CPU（シミュレータ）と PC で動かして、出力が同じ
+  execFileSync('gcc', ['-O0', '-ffp-contract=off', '-fno-builtin', '-o', exe('cfloat'), path.join(ROOT, 'test/cfloat.c'), path.join(ROOT, 'libc/math.c'), '-lm']);
+  const want = runExe('cfloat', []).stdout;
+  const got = require('./cctest.js').runC([path.join(ROOT, 'test/cfloat.c')], { max: 400_000_000 });
+  const diff = got.out.split('\n').findIndex((l, i) => l !== want.split('\n')[i]);
+  check('C の float・double（test/cfloat.c）：この CPU で動かした出力が、PC の gcc で動かしたものと同じ',
+    got.ok && got.out === want, got.why || `${diff + 1} 行目：${got.out.split('\n')[diff]}（PC：${want.split('\n')[diff]}）`);
+}
+
+// ---- C のアセンブラ ----
+{
+  const results = require('./astest.js').run();
+  if (!results) console.log('  --   gcc がないので、C のアセンブラ（disk/as.c）の比較は飛ばす');
+  else {
+    const bad = results.filter((r) => !r.ok);
+    check(`C のアセンブラ（disk/as.c を gcc で）：JS と同じバイト列 ${results.length - 2} 本、別々のファイルのリンクも tools/cc.js と同じ`,
+      bad.length === 0, bad.map((r) => `${r.name}：${r.why}`).join('\n'));
+  }
 }
 
 // ---- 4 ----

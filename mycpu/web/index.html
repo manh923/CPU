@@ -323,7 +323,16 @@
     if (e.ctrlKey && k.length === 1 && /[a-z@\[\\\]^_]/i.test(k)) code = k.toUpperCase().charCodeAt(0) & 31;
     else if (e.ctrlKey) return;
     else if (k.length === 1) code = k.charCodeAt(0);
-    else code = { Enter: 13, Backspace: 8, Tab: 9, Escape: 27, Delete: 127 }[k];
+    else code = { Enter: 13, Backspace: 8, Tab: 9, Escape: 27 }[k];
+    // 矢印などは、端末（VT100）と同じ並びで送る（libc の getch() が 1 つのキーにまとめる）
+    var seq = { ArrowUp: '\x1b[A', ArrowDown: '\x1b[B', ArrowRight: '\x1b[C', ArrowLeft: '\x1b[D', Home: '\x1b[H', End: '\x1b[F',
+      PageUp: '\x1b[5~', PageDown: '\x1b[6~', Insert: '\x1b[2~', Delete: '\x1b[3~',
+      F1: '\x1bOP', F2: '\x1bOQ', F3: '\x1bOR', F4: '\x1bOS' }[k];
+    if (seq && !e.ctrlKey) {
+      e.preventDefault();
+      cpu.pushRx(Array.from(seq, function (ch) { return ch.charCodeAt(0); }));
+      return;
+    }
     if (code == null || code > 255) return;
     e.preventDefault();
     cpu.pushRx([code]);

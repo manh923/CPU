@@ -11,6 +11,9 @@
 | `lib/` | アセンブラ・CPU・表示の本体（Node とブラウザで共通） |
 | `examples/` | 例題（`bios.asm` は ROM に入れる BIOS ＋ブートローダー） |
 | `disk/` | SD カードの中身のもと（MyDOS 本体 `mydos.sys.asm` も。`tools/mkdisk.js` で作る） |
+| `cc/` | C コンパイラ（chibicc をこの CPU 向けに改造したもの）。`cc/README.md` |
+| `libc/` | C ライブラリ（`printf`・文字列・`malloc` など）と、ヘッダ |
+| `tools/cc.js` | C のプログラムを MyDOS の `.EXE` にする |
 | `tools/mkboot.js` | UART 起動で送るファイルを作る |
 | `tools/mkdisk.js` | SD カードの中身（ファイルかディスクイメージ）を作る |
 | `rtl/` | Verilog（CPU・メモリ・入出力・UART・表示回路・DVI 符号器） |
@@ -59,6 +62,27 @@ msg:    .asciz "hi\n"
 - 疑似命令：`.org .align .space .byte .half .word .dword .ascii .asciz .equ .phase .dephase`
 - `.phase 番地` 〜 `.dephase`：中身はその場所（ROM）に置き、ラベルは「番地」（RAM）に写して動かす前提で決める。`.phase` の前は `.align 16`
 - 命令は自動で 4 バイト境界にそろう。幅の合わないレジスタ・予備レジスタ・PC への書き込みはエラー
+
+## C で書く
+
+```sh
+node tools/cc.js disk/primes.c -o PRIMES.EXE     # C → MyDOS の .EXE（SDRAM で動く）
+node tools/cc.js disk/primes.c -S primes.asm     # アセンブリだけ（C ライブラリ込み）
+node test/cctest.js                              # コンパイラのテスト（chibicc のテスト）
+```
+
+- コンパイラは `cc/`（chibicc の改造版）。`gcc` と `make` で自動でビルドされる。`int`・`long`・ポインタは 32bit、`long long` は 64bit。`float` は 32bit、`double`・`long double` は 64bit（IEEE 754。計算はソフトウェアで、`libc/softfloat.c`）。使わない関数・変数はつながない（`tools/cc.js` がリンカの代わりに捨てる）
+- C ライブラリ（`libc/`）：
+  - `stdio.h`：`FILE`（`fopen`・`fread`・`fwrite`・`fgets`・`fputs`・`fseek`・`ftell`・`fprintf` …。書くファイルは後ろに足すだけなので、`fseek` できるのは読むファイル）、`stdin`（1 行ずつ）・`stdout`・`stderr`、`printf` の仲間（`%lld` も）、`remove`・`rename`・`perror`
+  - `printf` の `%f`・`%e`・`%g` と `strtod`・`atof` は正しく丸める（`libc/fltio.c`）
+  - `math.h`（`libc/math.c`）：`sqrt`・`fmod`・`floor`・`ceil`・`round` などは正確、`sin`・`cos`・`tan`・`atan2`・`exp`・`log`・`pow` などは誤差 2 ulp 以内。`float` の版（`sinf` など）もある
+  - `stdlib.h`（`malloc`・`free`・`realloc`・`exit`・`strtol`・`strtod`・`qsort`・`rand`）、`string.h`、`ctype.h`、`errno.h`、`limits.h`、`stdint.h`、`inttypes.h`、`assert.h`、`setjmp.h`、`time.h`（時計がないので 2026-01-01 から起動後の秒数）、`stdarg.h`・`stddef.h`・`stdbool.h`
+  - `conio.h`：`clrscr`・`gotoxy`・`textattr`・`getch`（矢印・Home・End・PgUp・PgDn・Delete・F1〜F4 を 1 つのキーに）・`kbhit`
+  - `mycpu.h`：MyDOS の SYSCALL を直接呼ぶ
+  - テストは `test/libtest.c`（MyDOS の上で動かす）
+- `disk/` に `NAME.c` を置くと、mkdisk・`sim.js --sd disk/`・ブラウザ版の SD カードに `NAME.EXE` も入る（`disk/primes.c` → `PRIMES.EXE`）。ブラウザではコンパイルできないので、ブラウザ版で `.c` を書き換えても `.EXE` は変わらない
+- **`AS`**（`disk/as.c`）：C で書いたアセンブラ。MyDOS の上で `AS -o OUT.EXE FILE.S ...` と使う（`-bin` でそのままのバイト列、`-b 番地` で最初の番地）。書き方は `lib/assembler.js` と同じで、同じバイト列を作る（テストで比べている）。ファイルをいくつも渡すと、コードとデータを分けて並べ直してつなぐ（リンカの代わり。C のプログラムなら `-b 0x1000000`）。命令の表 `disk/asops.h` は `tools/gen.js` が作る
+- **`EDIT 名前`**（`disk/edit.c`）：全画面のテキストエディタ。80 桁 × 24 行なので、UART の端末でもそのまま使える。矢印・Home・End・PgUp・PgDn・Backspace・Delete・Tab、**Ctrl-S で保存、Ctrl-X で終わり**（保存していなければ聞く）。保存は CRLF
 
 ## BIOS と MyDOS
 
