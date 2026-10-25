@@ -77,6 +77,11 @@ console.log('アセンブラ');
   check('知らない命令はエラー', /知らない/.test(errs('FOO r1').join()));
   check('即値が幅に入らないとエラー', errs('ADDI32 r16, r0, 0x100000000').length === 1);
   check('未定義のラベルはエラー', /未定義/.test(errs('JMP32 nowhere').join()));
+  const ph = assemble('JMP32 b\n.align 16\nimg:\n.phase 0x20000\nb: JMP32 b\n.dephase\nimg_end:\n');
+  check('.phase：置く場所はそのまま、ラベルは写した先の番地',
+    ph.symbols.get('img') === 0x10n && ph.symbols.get('b') === 0x20000n && ph.symbols.get('img_end') === 0x18n &&
+    ph.image[4] === 0x00 && ph.image[6] === 0x02 && ph.image[0x14] === 0x00 && ph.image[0x16] === 0x02);
+  check('.phase：16 バイト単位でそろっていないとエラー', /16/.test(errs('NOP\n.phase 0x20000\n').join()));
   const lab = assemble('.byte 1\nx: NOP\ny: .byte 2\n').symbols;
   check('命令の前のラベルは 4 バイト境界', lab.get('x') === 4n && lab.get('y') === 8n);
   const loc = assemble('a:\n.l: NOP\nb:\n.l: JMP32 .l\nJMP32 a.l').image;
@@ -127,7 +132,29 @@ const cases = [];
   check('32bit CPU で r32〜r47 をアドレスに使うと止まる（アセンブルはできる）',
     runSim('LOAD32_32 r17, r32, 0\nHLT').cpu.halted.kind === 'illegal');
 
+  // MyDOS：BIOS → ROM から写して起動 → コマンド
+  const dosInput = ' ver\rdir\rtype readme.txt\rtype nofile\rfoo\recho  Hi   there\rcolor 1e\rmem\rled 2a\rshutdown\r';
+  r = runSim(src('mydos.asm'), { input: dosInput, max: 20_000_000 });
+  const scr = video.text(r.cpu.vram);
+  check('mydos：BIOS からシャットダウンまで', r.cpu.halted && r.cpu.halted.kind === 'hlt' &&
+    r.out.includes('Memory Test : 32 KB OK') && r.out.includes('MyDOS Version 1.0 (MyCPU-32)') &&
+    r.out.includes('README   TXT') && r.out.includes('Bad command or file name') && r.out.includes('File not found') &&
+    r.out.includes('Hi   there\r\n') && r.out.includes(` ${0x27000 - Number(assemble(src('mydos.asm')).symbols.get('os_end'))} bytes free`) && r.out.includes("safe to turn off"),
+  r.out.slice(-300));
+  check('mydos：COLOR と LED', r.cpu.vram[1] === 0x0E && r.cpu.led === 0x2a, `attr=${r.cpu.vram[1]} led=${r.cpu.led}`);
+  check('mydos：画面にも出ている', scr.includes("It's now safe to turn off your computer."), scr.slice(0, 200));
+
+  // UART から起動：U → 'MC' + 長さ + プログラム → 動いて、キーで再起動 → MyDOS → シャットダウン
+  const app = assemble(fs.readFileSync(path.join(ROOT, 'examples/uartboot/hello_uart.asm'), 'utf8')).image.subarray(0x20000);
+  const frame = Buffer.concat([Buffer.from('MC', 'latin1'), Buffer.from(new Uint32Array([app.length]).buffer), Buffer.from(app)]);
+  const bootInput = Buffer.concat([Buffer.from('u', 'latin1'), frame, Buffer.from('x shutdown\r', 'latin1')]).toString('latin1');
+  r = runSim(src('mydos.asm'), { input: bootInput, max: 20_000_000 });
+  check('mydos：UART から起動したプログラムが動き、再起動して MyDOS へ',
+    r.out.includes('Loaded ' + app.length + ' bytes') && r.out.includes('1 4 9 16 25 36 49 64 81 100') &&
+    r.out.split('MyCPU BIOS').length === 3 && r.out.includes("safe to turn off"), r.out.slice(-400));
+
   cases.push(
+    { name: 'mydos', file: 'mydos.asm', input: bootInput, max: 40_000_000 },
     { name: 'hello', file: 'hello.asm' },
     { name: 'selftest32', file: 'selftest32.asm' },
     { name: 'trap', file: 'trap.asm', regs: false },

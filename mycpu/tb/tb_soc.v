@@ -92,6 +92,8 @@ module tb;
       repeat (BIT * 200) @(posedge clk);
       c = $fgetc(fx);
       while (c >= 0 && !halted) begin
+        // 人がキーを打つのと同じく、前の文字を CPU が読んでから次を送る（受信 FIFO をあふれさせない）
+        while (soc.uart.rw != soc.uart.rr) @(posedge clk);
         send(c[7:0]);
         c = $fgetc(fx);
       end

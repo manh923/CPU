@@ -4,7 +4,8 @@
 //   label:  ADDI32 r16, r0, 'A'     ; コメント
 //   .loop:                          ; '.' で始まるラベルは直前のラベルの中だけで有効
 //   NAME = 0x10000                  ; 定数（.equ NAME, 0x10000 も可）
-// 疑似命令: .org .align .space .byte .half .word .dword .ascii .asciz .equ
+// 疑似命令: .org .align .space .byte .half .word .dword .ascii .asciz .equ .phase .dephase
+//   .phase 番地 〜 .dephase：中身はその場所に置くが、ラベルは「番地」に写して動かす前提で決める
 // 命令は自動で 4 バイト境界にそろえる。
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory(require('./isa.js'));
@@ -201,6 +202,7 @@
 
     // 1 パス目：番地を決める
     var pc = 0n;
+    var delta = 0n; // .phase 中は「動く番地 − 置く番地」
     stmts.forEach(function (st, idx) {
       try {
         if (st.kind === 'label') {
@@ -209,7 +211,7 @@
           var j = idx + 1;
           while (stmts[j] && (stmts[j].kind === 'label' || stmts[j].kind === 'equ')) j++;
           if (stmts[j] && stmts[j].kind === 'insn') pc = (pc + 3n) & ~3n;
-          define(st.name, pc);
+          define(st.name, pc + delta);
         } else if (st.kind === 'equ') {
           define(st.name, evalNow(st.expr));
         } else if (st.kind === 'insn') {
@@ -219,7 +221,17 @@
           st.row = row;
           st.addr = pc;
           pc += BigInt(row.length);
+        } else if (st.dir === '.phase') {
+          // ここから先は、置く場所は今のまま、ラベルは指定の番地で動く前提で決める（ROM から RAM へ写して動かすコード用）
+          if (st.ops.length !== 1) throw new Error('.phase 動く番地');
+          if (delta) throw new Error('.phase の中で .phase はできない');
+          delta = evalNow(st.ops[0]) - pc;
+          if (delta % 16n) throw new Error('.phase の番地と今の番地は 16 バイト単位でそろえる（前に .align 16）');
+        } else if (st.dir === '.dephase') {
+          if (st.ops.length) throw new Error('.dephase にオペランドはない');
+          delta = 0n;
         } else {
+          if (delta && st.dir === '.org') throw new Error('.phase の中で .org は使えない');
           st.addr = pc;
           pc = layoutDirective(st, pc, evalNow);
         }
