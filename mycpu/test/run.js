@@ -125,6 +125,14 @@ const cases = [];
   const lines = video.text(r2.cpu.vram).split('\n');
   check('console：画面の下まで来たらスクロール', lines[1] === 'line8' && lines[43] === 'line50', lines.slice(0, 3).join('|'));
 
+  {
+    const c = new CPU({});
+    const ok = c.load(assemble(fs.readFileSync(path.join(ROOT, 'examples/uartboot/hello_uart.asm'), 'utf8')).image);
+    check('.org 0x20000 のプログラムも読み込める（すき間は飛ばす）。番地 0 が空なのも分かる', ok === false && c.ram[0] !== 0);
+    let msg = '';
+    try { new CPU({}).load(assemble('.org 0x4000\n.word 1').image); } catch (e) { msg = e.message; }
+    check('メモリのない番地に中身があればエラー', /0x4000/.test(msg), msg);
+  }
   r = runSim('ADDI32 r16, r0, 0x10001\nLOAD32_32 r17, r16, 0\nHLT');
   check('整列していない読み出しは例外（EVEC = 0 へ）', r.cpu.cause === 1n);
   r = runSim('ADDI32 r16, r0, 0\nSTORE32_32 r16, r0, 0x100\nHLT');

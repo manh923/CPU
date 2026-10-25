@@ -134,7 +134,12 @@ function main() {
     clock: o.realtime ? () => Number((process.hrtime.bigint() - t0) / 1000n) : null,
     trace: o.trace ? (pc, text) => process.stderr.write(pc.toString(16).padStart(8, '0') + '  ' + text + '\n') : null,
   });
-  cpu.load(loadImage(o.file));
+  try {
+    if (!cpu.load(loadImage(o.file))) console.error('注意: ' + CPU.NO_RESET_CODE);
+  } catch (e) {
+    console.error(e.message);
+    process.exit(1);
+  }
   cpu.pushRx(Buffer.from(o.input, 'latin1'));
   if (o.rxFile) cpu.pushRx(fs.readFileSync(o.rxFile));
 

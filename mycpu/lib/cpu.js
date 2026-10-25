@@ -60,17 +60,26 @@
     this.halted = null;
   };
 
-  // プログラムを番地 0 から置く（ROM を超えた分はその番地のメモリへ）
+  // プログラムを番地 0 から置く（ROM を超えた分はその番地のメモリへ）。
+  // .org で飛ばしたすき間（メモリのない番地の 0）は読み飛ばす。戻り値は「番地 0 に命令があるか」
   CPU.prototype.load = function (image, base) {
     base = base || 0;
     for (var i = 0; i < image.length; i++) {
       var r = this.region(base + i, 1);
-      if (!r || !r.mem) throw new Error('0x' + (base + i).toString(16) + ' にはプログラムを置けない');
+      if (!r || !r.mem) {
+        if (image[i] === 0) continue;
+        throw new Error('0x' + (base + i).toString(16) + ' にはメモリがないので、プログラムを置けない');
+      }
       r.mem[r.off] = image[i];
     }
     this.vramDirty.fill(1);
     this.vramChanged = true;
+    return (this.rom[0] | this.rom[1] | this.rom[2] | this.rom[3]) !== 0;
   };
+
+  // 番地 0 に何もないときの説明（リセット後は番地 0 から実行するので、すぐ HLT で止まる）
+  CPU.NO_RESET_CODE = '番地 0（リセット後に実行を始める場所）に何もないので、すぐ HLT で止まる。' +
+    '.org 0x20000 で書いたプログラムは、mydos.asm の BIOS から UART 起動で読み込んで使う（tools/mkboot.js）。';
 
   CPU.prototype.pushRx = function (bytes) {
     for (var i = 0; i < bytes.length; i++) this.rx.push(bytes[i] & 0xff);

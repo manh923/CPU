@@ -122,7 +122,9 @@
       xlen: +$('xlen').value, onTx: onTx, onLed: onLed,
       clock: function () { return Math.floor((performance.now() - t0) * 1000); },
     });
-    try { cpu.load(result.image); } catch (e) { errors.textContent = e.message; return false; }
+    try {
+      if (!cpu.load(result.image)) errors.textContent = '注意: ' + M.CPU.NO_RESET_CODE;
+    } catch (e) { errors.textContent = e.message; return false; }
     uartText = ''; uart.textContent = '';
     onLed(0);
     stepsAtSecond = 0; secondStart = performance.now();
