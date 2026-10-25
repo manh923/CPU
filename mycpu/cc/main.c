@@ -700,6 +700,18 @@ int main(int argc, char **argv) {
   init_macros();
   parse_args(argc, argv);
 
+#ifdef __MYCPU__
+  // MyCPU（MyDOS の上）：fork も as・ld もないので、いつも cc1 として動く。
+  //   CC FOO.C → FOO.S（-o で名前を変えられる）。ヘッダはカードのルートから探す（libc の fopen がディレクトリを捨てる）
+  if (!opt_cc1) {
+    if (input_paths.len != 1)
+      error("MyCPU：入力のファイルは 1 つだけ（CC [-Iディレクトリ] [-D名前] [-o 出力] ファイル.C）");
+    base_file = input_paths.data[0];
+    output_file = opt_o ? opt_o : replace_extn(base_file, ".s");
+    opt_cc1 = true;
+  }
+#endif
+
   if (opt_cc1) {
     add_default_include_paths(argv[0]);
     cc1();
