@@ -4,6 +4,7 @@
 ;   3. バイト・ハーフワードの書き込みと、符号付き・なしの読み出し
 ;   4. 16KB を数で埋めて読み戻し、合計を出す
 ;   5. SDRAM にプログラムを写して実行。スタックも SDRAM に置いて再帰（fib）
+;   6. SDRAM のコードを実行してから書き換え、もう一度実行（Verilog では命令キャッシュに入っている）
 ; 結果は UART に出す。シミュレータと Verilog（tb/sdram_model.v）で同じになる
 UART_TX     = 0x00010000
 UART_STATUS = 0x00010004
@@ -133,6 +134,21 @@ start:
         ADDI32 r16, r0, 10
         CALL32 putc
 
+        ; ---- 6. SDRAM のコードを書き換える ----
+        ADDI32 r16, r0, s_smc
+        CALL32 puts
+        CALL32 sd_k                     ; r16 = 1（ここで命令キャッシュに入る）
+        ADDR32 r25, r16, r0
+        ADDI32 r17, r0, 0x55
+        STORE32_32 r17, r0, sd_k + 4    ; ADDI32 の即値を書き換える
+        CALL32 sd_k                     ; r16 = 0x55
+        SHLI32 r25, r25, 8
+        ORR32 r25, r25, r16
+        CMPEQI32 p1, r25, 0x155
+        BR32 p1, .smcok
+        ADDI32 r24, r24, 1
+.smcok: CALL32 result
+
         CMPNEI32 p1, r24, 0
         BR32 p1, .ng
         ADDI32 r16, r0, s_ok
@@ -247,6 +263,8 @@ sd_fib:
         LOAD32_32 r25, sp, 8
         ADDI32 sp, sp, 16
 .ret:   RET32
+sd_k:   ADDI32 r16, r0, 1               ; 6. で即値を書き換える
+        RET32
         .align 16
         .dephase
 code_rom_end:
@@ -256,6 +274,7 @@ s_addr:  .asciz "SDRAM address lines : "
 s_bytes: .asciz "SDRAM byte/half     : "
 s_fill:  .asciz "SDRAM 16KB checksum : "
 s_run:   .asciz "fib(12) from SDRAM  : "
+s_smc:   .asciz "SDRAM code rewrite  : "
 s_pass:  .asciz "OK\n"
 s_fail:  .asciz "NG\n"
 s_ok:    .asciz "SDRAM test passed\n"

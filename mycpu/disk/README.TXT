@@ -17,10 +17,12 @@ Programs
   KITT.COM     Runs the board LEDs back and forth.
   TOUPPER.EXE  TOUPPER README.TXT UP.TXT writes an upper-case copy.
   SIEVE.EXE    Counts primes below 1,000,000 using 1 MB of SDRAM.
+  BIG.EXE      Runs from SDRAM (with its stack there too).
   CRASH.EXE    Divides by zero on purpose.
   DEMO.BAT     A batch file that runs some of the above.
 
 Try writing: COPY CON NOTE.TXT, DIR > LIST.TXT, REN, DEL.
 
-Make your own: write it with .org 0x26000, then tools/mkdisk.js turns
+Make your own: write it with .org 0x26000 (or .org 0x1000000 for a
+big .EXE in SDRAM), then tools/mkdisk.js turns
 NAME.exe.asm into NAME.EXE (or NAME.com.asm into NAME.COM).

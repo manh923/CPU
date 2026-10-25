@@ -45,6 +45,7 @@ ATTR         = BDA + 8
 SD_TYPE      = BDA + 16
 USER_FAULT   = BDA + 24
 SDRAM_KB     = BDA + 28                 ; BIOS が調べた SDRAM の大きさ（KB）
+SDRAM        = 0x01000000               ; SDRAM の先頭（.EXE をここに読み込んでもよい）
 VEC          = 0x0002B100               ; SYSCALL の表
 SECBUF       = 0x0002B200               ; セクタの置き場（1 つだけ覚えておく。書いたら後でまとめて書き戻す）
 FATBUF       = 0x0002B400               ; FAT のセクタの置き場（同じく）
@@ -427,60 +428,85 @@ run_prog:
         ADDR32 r24, r16, r0
         CALL32 h_ptr
         LOAD32_32 r25, r16, H_SIZE
-        ADDI32 r17, r0, TPA_END - TPA
-        CMPLTUR32 p1, r17, r25
-        BR32 p1, .big
-        ADDR32 r16, r24, r0             ; 全部 TPA に読む
-        ADDI32 r17, r0, TPA
-        ADDR32 r18, r25, r0
-        CALL32 f_read
-        ADDR32 r26, r16, r0
-        ADDR32 r16, r24, r0
-        CALL32 f_close
-        CMPNER32 p1, r26, r25
-        BR32 p1, .ioerr
-        ADDI32 r26, r0, TPA             ; r26 = 開始番地
         ADDI32 r16, r0, ent + 8
         ADDI32 r17, r0, x_com
         CALL32 ext_is
-        CMPNEI32 p1, r16, 0
-        BR32 p1, .go
-        ; .EXE：ヘッダを確かめて、本体を TPA の先頭へずらす
-        LOAD16U_32 r16, r0, TPA
+        CMPEQI32 p1, r16, 0
+        BR32 p1, .exe
+        ; .COM：全部 TPA に読んで、TPA から実行
+        ADDI32 r17, r0, TPA_END - TPA
+        CMPLTUR32 p1, r17, r25
+        BR32 p1, .big
+        ADDI32 r26, r0, TPA             ; r26 = 開始番地
+        ADDI32 r17, r0, TPA
+        ADDR32 r18, r25, r0
+        JMP32 .load
+        ; .EXE：ヘッダ（16 バイト）を読んで確かめ、本体を「読み込む番地」へ直接読む
+        ;   読み込む番地は TPA（0x26000〜）か SDRAM（0x1000000〜。BIOS が SDRAM を見つけたときだけ）
+.exe:   ADDR32 r16, r24, r0
+        ADDI32 r17, r0, exehdr
+        ADDI32 r18, r0, 16
+        CALL32 f_read
+        CMPNEI32 p1, r16, 16
+        BR32 p1, .badexe1
+        LOAD16U_32 r16, r0, exehdr
         CMPNEI32 p1, r16, 0x5A4D        ; 'M' 'Z'
-        BR32 p1, .badexe
-        LOAD16U_32 r17, r0, TPA + 2     ; ヘッダの大きさ
-        LOAD32_32 r18, r0, TPA + 4      ; 読み込む番地
-        LOAD32_32 r26, r0, TPA + 8      ; 開始番地
-        LOAD32_32 r19, r0, TPA + 12     ; 本体の大きさ
-        CMPNEI32 p1, r18, TPA
-        BR32 p1, .badexe
-        ANDI32 r20, r17, 3
-        CMPNEI32 p1, r20, 0
-        BR32 p1, .badexe
-        ADDR32 r20, r17, r19            ; ヘッダ + 本体 ≦ ファイルの大きさ
+        BR32 p1, .badexe1
+        LOAD16U_32 r17, r0, exehdr + 2  ; ヘッダの大きさ（16 だけ）
+        LOAD32_32 r18, r0, exehdr + 4   ; 読み込む番地
+        LOAD32_32 r26, r0, exehdr + 8   ; 開始番地
+        LOAD32_32 r19, r0, exehdr + 12  ; 本体の大きさ
+        CMPNEI32 p1, r17, 16
+        BR32 p1, .badexe1
+        ADDI32 r20, r19, 16             ; ヘッダ + 本体 ≦ ファイルの大きさ
         CMPLTUR32 p1, r25, r20
-        BR32 p1, .badexe
-        ADDI32 r20, r26, -TPA           ; 開始番地が本体の中
+        BR32 p1, .badexe1
+        ANDI32 r20, r18, 3              ; 読み込む番地は 4 の倍数
+        CMPNEI32 p1, r20, 0
+        BR32 p1, .badexe1
+        SUBR32 r20, r26, r18            ; 開始番地が本体の中
         CMPGEUR32 p1, r20, r19
-        BR32 p1, .badexe
-        ADDI32 r17, r17, TPA            ; 写す元
-        ADDI32 r18, r0, TPA             ; 写す先（前へずらすので先頭から写してよい）
-        ADDR32 r19, r18, r19
-.mv:    CMPGEUR32 p1, r18, r19
-        BR32 p1, .go
-        LOAD32_32 r20, r17, 0
-        STORE32_32 r20, r18, 0
-        ADDI32 r17, r17, 4
-        ADDI32 r18, r18, 4
-        JMP32 .mv
+        BR32 p1, .badexe1
+        ; どこに置くか：TPA の中か、SDRAM の中
+        ADDI32 r20, r18, -TPA
+        ADDI32 r21, r0, TPA_END - TPA
+        CMPLTUR32 p1, r20, r21          ; TPA ≦ 読み込む番地 < TPA_END
+        SUBR32 r21, r21, r20            ; 残りの大きさ
+        BR32 p1, .fit
+        LOAD32_32 r21, r0, SDRAM_KB
+        CMPEQI32 p1, r21, 0
+        BR32 p1, .big1
+        ADDI32 r20, r18, -SDRAM
+        SHLI32 r21, r21, 10
+        CMPGEUR32 p1, r20, r21          ; SDRAM ≦ 読み込む番地 < SDRAM の終わり
+        BR32 p1, .big1
+        SUBR32 r21, r21, r20
+.fit:   CMPLTUR32 p1, r21, r19          ; 本体が入りきるか
+        BR32 p1, .big1
+        ADDR32 r17, r18, r0
+        ADDR32 r18, r19, r0
+.load:  ADDR32 r25, r18, r0             ; r25 = 読む大きさ
+        STORE32_32 r17, r0, prog_base
+        ADDR32 r16, r24, r0
+        CALL32 f_read
+        ADDR32 r20, r16, r0
+        ADDR32 r16, r24, r0
+        CALL32 f_close
+        CMPNER32 p1, r20, r25
+        BR32 p1, .ioerr
 .go:    LOAD32_32 r16, r0, ATTR         ; 色を覚えておいて、終わったら戻す
         STORE32_32 r16, r0, saved_attr
         ADDI32 r16, r0, 1
         STORE32_32 r16, r0, running
         STORE32_32 sp, r0, saved_sp     ; 終了（SYSCALL 0）・例外のときは .back へ
         ADDI32 lr, r0, exit_stub        ; RET32 で戻ってきたら SYSCALL 0
-        ADDR32 epc, r26, r0
+        LOAD32_32 r16, r0, prog_base    ; SDRAM のプログラムは、スタックも SDRAM の末尾に
+        CMPLTUI32 p1, r16, SDRAM
+        BR32 p1, .stk
+        LOAD32_32 r16, r0, SDRAM_KB
+        SHLI32 r16, r16, 10
+        ADDI32 sp, r16, SDRAM
+.stk:   ADDR32 epc, r26, r0
         ADDI32 status, r0, 4            ; ERET で「例外の直前の特権 = ユーザー」に戻る → ユーザーモード
         LOAD32_32 r16, r0, args
         ERET
@@ -492,11 +518,14 @@ run_prog:
         LOAD32_32 r16, r0, saved_attr
         CALL32 BIOS_SETATTR
         JMP32 .ret
+.big1:
 .big:   ADDR32 r16, r24, r0
         CALL32 f_close
         ADDI32 r16, r0, s_toobig
         JMP32 .say
-.badexe:
+.badexe1:
+        ADDR32 r16, r24, r0
+        CALL32 f_close
         ADDI32 r16, r0, s_badexe
         JMP32 .say
 .ioerr: ADDI32 r16, r0, s_readerr
@@ -2906,6 +2935,8 @@ c_vol:      .asciz "VOL"
         .align 4
 bss_start:
 fs_ok:      .reserve 4
+exehdr:     .reserve 16                 ; .EXE のヘッダ
+prog_base:  .reserve 4                  ; 実行中のプログラムを読み込んだ番地
 fs_type:    .reserve 4
 fat_lba:    .reserve 4
 fat_sz:     .reserve 4

@@ -1,5 +1,6 @@
 // SD カードに入れるファイルを作る（Node・ブラウザ共通）。
-//   makeFile(name, contents)：NAME.exe.asm → NAME.EXE、NAME.com.asm → NAME.COM（0x26000 から）、
+//   makeFile(name, contents)：NAME.exe.asm → NAME.EXE（0x26000 から。.org 0x1000000 なら SDRAM から）、
+//                             NAME.com.asm → NAME.COM（0x26000 から）、
 //                             NAME.sys.asm → NAME.SYS（0x20000 から。MYDOS.SYS 用）。アセンブルして作る。ほかはそのまま
 //   makeDisk(sources, opts)：ファイルを並べて FAT のディスクイメージにする（lib/fat.js）
 // .EXE：'MZ'、ヘッダの大きさ（16）、読み込む番地、開始番地（ラベル start、なければ読み込む番地）、本体の大きさ、本体
@@ -8,7 +9,7 @@
   else root.MyCPU.disk = factory(root.MyCPU.Assembler, root.MyCPU.fat);
 })(typeof self !== 'undefined' ? self : this, function (Assembler, fat) {
   'use strict';
-  var TPA = 0x26000, SYS_BASE = 0x20000;
+  var TPA = 0x26000, SYS_BASE = 0x20000, SDRAM = 0x01000000;
 
   function le32(v) { return [v & 0xFF, (v >>> 8) & 0xFF, (v >>> 16) & 0xFF, (v >>> 24) & 0xFF]; }
 
@@ -25,13 +26,14 @@
     var source = typeof contents === 'string' ? contents : new TextDecoder().decode(contents);
     var r;
     try { r = Assembler.assemble(source); } catch (e) { e.message = name + '：' + e.message; e.file = name; throw e; }
-    var kind = m[2].toLowerCase(), base = kind === 'sys' ? SYS_BASE : TPA;
+    var kind = m[2].toLowerCase();
+    var base = kind === 'sys' ? SYS_BASE : kind === 'exe' && r.image.length > SDRAM ? SDRAM : TPA;
     if (r.image.length <= base) throw new Error(name + '：.org 0x' + base.toString(16) + ' から書く');
     var body = r.image.subarray(base);
     var outName = (m[1] + '.' + m[2]).toUpperCase();
     if (kind !== 'exe') return { name: outName, data: new Uint8Array(body) };
-    var entry = r.symbols.has('start') ? Number(r.symbols.get('start')) : TPA;
-    var head = [0x4D, 0x5A, 16, 0].concat(le32(TPA), le32(entry), le32(body.length));
+    var entry = r.symbols.has('start') ? Number(r.symbols.get('start')) : base;
+    var head = [0x4D, 0x5A, 16, 0].concat(le32(base), le32(entry), le32(body.length));
     var data = new Uint8Array(16 + body.length);
     data.set(head, 0);
     data.set(body, 16);
