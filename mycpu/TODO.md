@@ -79,6 +79,12 @@ MyDOS の上で C コンパイラを動かし、C のプログラム（コンパ
 
 ## そのほか（急がない）
 
+- **scanf を足す**（libc にまだない）：`scanf`・`sscanf`・`fscanf` と v 付きの版。`%d %i %u %x %o %c %s %f %e %g %[...] %n %%`、
+  `%lld`・`%lf` などの長さ、幅、`*`（読み飛ばし）。数の変換は今ある strtol・strtod を使う。PC の glibc の sscanf と比べるテストも
+- **カードを作るときにサブディレクトリに分ける**（下の MyDOS のサブディレクトリができてから）：tools/cc.js の diskSources・mkdisk・
+  ブラウザ版のカードで、ヘッダは `INCLUDE\`、chibicc のソースは `SRC\CC\`、CRT0.S・LIBC.* は `LIB\` に。
+  CC はヘッダを `INCLUDE\` から探し、BUILD.BAT・SELFHOST.BAT もパスを付けて呼ぶ。libc の fopen のディレクトリを捨てる処理はやめる
+
 - MyDOS のサブディレクトリ：今はルートだけ。パス（`C:\INCLUDE\STDIO.H`）・`MKDIR`・`RMDIR`・`CD`・`DIR` の中身、
   プログラムを今のディレクトリ → ルートの順に探す。mkdisk もサブディレクトリに。そうしたらヘッダを `INCLUDE\`、
   chibicc のソースを `SRC\CC\` に分ける（今は全部ルートに平らに置き、libc の fopen がディレクトリを捨てて 8.3 にしている）
