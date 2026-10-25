@@ -11,6 +11,9 @@
 | `lib/` | アセンブラ・CPU・表示の本体（Node とブラウザで共通） |
 | `examples/` | 例題（`bios.asm` は ROM に入れる BIOS ＋ブートローダー） |
 | `disk/` | SD カードの中身のもと（MyDOS 本体 `mydos.sys.asm` も。`tools/mkdisk.js` で作る） |
+| `cc/` | C コンパイラ（chibicc をこの CPU 向けに改造したもの）。`cc/README.md` |
+| `libc/` | C ライブラリ（`printf`・文字列・`malloc` など）と、ヘッダ |
+| `tools/cc.js` | C のプログラムを MyDOS の `.EXE` にする |
 | `tools/mkboot.js` | UART 起動で送るファイルを作る |
 | `tools/mkdisk.js` | SD カードの中身（ファイルかディスクイメージ）を作る |
 | `rtl/` | Verilog（CPU・メモリ・入出力・UART・表示回路・DVI 符号器） |
@@ -59,6 +62,18 @@ msg:    .asciz "hi\n"
 - 疑似命令：`.org .align .space .byte .half .word .dword .ascii .asciz .equ .phase .dephase`
 - `.phase 番地` 〜 `.dephase`：中身はその場所（ROM）に置き、ラベルは「番地」（RAM）に写して動かす前提で決める。`.phase` の前は `.align 16`
 - 命令は自動で 4 バイト境界にそろう。幅の合わないレジスタ・予備レジスタ・PC への書き込みはエラー
+
+## C で書く
+
+```sh
+node tools/cc.js disk/primes.c -o PRIMES.EXE     # C → MyDOS の .EXE（SDRAM で動く）
+node tools/cc.js disk/primes.c -S primes.asm     # アセンブリだけ（C ライブラリ込み）
+node test/cctest.js                              # コンパイラのテスト（chibicc のテスト）
+```
+
+- コンパイラは `cc/`（chibicc の改造版）。`gcc` と `make` で自動でビルドされる。`int`・`long`・ポインタは 32bit、`long long` は 64bit。`float`・`double` はまだない
+- C ライブラリ（`libc/`）：`stdio.h`（`printf` の仲間・`puts`・`putchar`・`getchar`）、`stdlib.h`（`malloc`・`free`・`exit`・`atoi`・`strtol`・`qsort`・`rand`）、`string.h`、`ctype.h`、`stdarg.h`、`stddef.h`、`stdbool.h`、`mycpu.h`（MyDOS の SYSCALL）
+- `disk/` に `NAME.c` を置くと、mkdisk・`sim.js --sd disk/`・ブラウザ版の SD カードに `NAME.EXE` も入る（`disk/primes.c` → `PRIMES.EXE`）。ブラウザではコンパイルできないので、ブラウザ版で `.c` を書き換えても `.EXE` は変わらない
 
 ## BIOS と MyDOS
 

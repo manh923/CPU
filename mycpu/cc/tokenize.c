@@ -356,8 +356,9 @@ static bool convert_pp_int(Token *tok) {
 
   int64_t val = strtoul(p, &p, base);
 
-  // Read U, L or LL suffixes.
+  // Read U, L or LL suffixes.（MyCPU：LL は long long。long は 4 バイトなので別に扱う）
   bool l = false;
+  bool ll = false;
   bool u = false;
 
   if (startswith(p, "LLU") || startswith(p, "LLu") ||
@@ -365,13 +366,13 @@ static bool convert_pp_int(Token *tok) {
       startswith(p, "ULL") || startswith(p, "Ull") ||
       startswith(p, "uLL") || startswith(p, "ull")) {
     p += 3;
-    l = u = true;
+    ll = u = true;
   } else if (!strncasecmp(p, "lu", 2) || !strncasecmp(p, "ul", 2)) {
     p += 2;
     l = u = true;
   } else if (startswith(p, "LL") || startswith(p, "ll")) {
     p += 2;
-    l = true;
+    ll = true;
   } else if (*p == 'L' || *p == 'l') {
     p++;
     l = true;
@@ -384,27 +385,36 @@ static bool convert_pp_int(Token *tok) {
     return false;
 
   // Infer a type.
+  // MyCPU：int・long は 32bit、long long は 64bit
   Type *ty;
   if (base == 10) {
-    if (l && u)
-      ty = ty_ulong;
+    if (ll && u)
+      ty = ty_ullong;
+    else if (ll)
+      ty = ty_llong;
+    else if (l && u)
+      ty = (val >> 32) ? ty_ullong : ty_ulong;
     else if (l)
-      ty = ty_long;
+      ty = (val >> 31) ? ty_llong : ty_long;
     else if (u)
-      ty = (val >> 32) ? ty_ulong : ty_uint;
+      ty = (val >> 32) ? ty_ullong : ty_uint;
     else
-      ty = (val >> 31) ? ty_long : ty_int;
+      ty = (val >> 31) ? ty_llong : ty_int;
   } else {
-    if (l && u)
-      ty = ty_ulong;
+    if (ll && u)
+      ty = ty_ullong;
+    else if (ll)
+      ty = (val >> 63) ? ty_ullong : ty_llong;
+    else if (l && u)
+      ty = (val >> 32) ? ty_ullong : ty_ulong;
     else if (l)
-      ty = (val >> 63) ? ty_ulong : ty_long;
+      ty = (val >> 63) ? ty_ullong : (val >> 32) ? ty_llong : (val >> 31) ? ty_ulong : ty_long;
     else if (u)
-      ty = (val >> 32) ? ty_ulong : ty_uint;
+      ty = (val >> 32) ? ty_ullong : ty_uint;
     else if (val >> 63)
-      ty = ty_ulong;
+      ty = ty_ullong;
     else if (val >> 32)
-      ty = ty_long;
+      ty = ty_llong;
     else if (val >> 31)
       ty = ty_uint;
     else

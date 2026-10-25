@@ -138,9 +138,7 @@ function main() {
     const SDCard = require('../lib/sdcard.js');
     if (fs.statSync(o.sd).isDirectory()) {
       const { makeDisk } = require('../lib/disk.js');
-      const sources = fs.readdirSync(o.sd).sort().filter((n) => fs.statSync(path.join(o.sd, n)).isFile())
-        .map((n) => ({ name: n, contents: /\.asm$/i.test(n) ? fs.readFileSync(path.join(o.sd, n), 'utf8') : fs.readFileSync(path.join(o.sd, n)) }));
-      sd = new SDCard(makeDisk(sources));
+      sd = new SDCard(makeDisk(require('../tools/cc.js').diskSources(o.sd)));   // NAME.c はコンパイルして NAME.EXE も
     } else {
       sd = new SDCard(require('../lib/fat.js').bufferDisk(new Uint8Array(fs.readFileSync(o.sd))));   // 読み込んだ写しに書く
     }

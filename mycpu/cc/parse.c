@@ -540,19 +540,23 @@ static Type *declspec(Token **rest, Token *tok, VarAttr *attr) {
       break;
     case LONG:
     case LONG + INT:
-    case LONG + LONG:
-    case LONG + LONG + INT:
     case SIGNED + LONG:
     case SIGNED + LONG + INT:
+      ty = ty_long;
+      break;
+    case LONG + LONG:                  // MyCPU：long long は long と別（8 バイト）
+    case LONG + LONG + INT:
     case SIGNED + LONG + LONG:
     case SIGNED + LONG + LONG + INT:
-      ty = ty_long;
+      ty = ty_llong;
       break;
     case UNSIGNED + LONG:
     case UNSIGNED + LONG + INT:
+      ty = ty_ulong;
+      break;
     case UNSIGNED + LONG + LONG:
     case UNSIGNED + LONG + LONG + INT:
-      ty = ty_ulong;
+      ty = ty_ullong;
       break;
     case FLOAT:
       ty = ty_float;
@@ -1849,12 +1853,16 @@ static int64_t eval2(Node *node, char ***label) {
   case ND_MUL:
     return eval(node->lhs) * eval(node->rhs);
   case ND_DIV:
+    if (eval(node->rhs) == 0)
+      error_tok(node->tok, "division by zero");
     if (node->ty->is_unsigned)
       return (uint64_t)eval(node->lhs) / eval(node->rhs);
     return eval(node->lhs) / eval(node->rhs);
   case ND_NEG:
     return -eval(node->lhs);
   case ND_MOD:
+    if (eval(node->rhs) == 0)
+      error_tok(node->tok, "division by zero");
     if (node->ty->is_unsigned)
       return (uint64_t)eval(node->lhs) % eval(node->rhs);
     return eval(node->lhs) % eval(node->rhs);
@@ -3231,15 +3239,15 @@ static Token *function(Token *tok, Type *basety, VarAttr *attr) {
   create_param_lvars(ty->params);
 
   // A buffer for a struct/union return value is passed
-  // as the hidden first parameter.
+  // as the hidden first parameter.（MyCPU：大きさによらずいつも）
   Type *rty = ty->return_ty;
-  if ((rty->kind == TY_STRUCT || rty->kind == TY_UNION) && rty->size > 16)
+  if (rty->kind == TY_STRUCT || rty->kind == TY_UNION)
     new_lvar("", pointer_to(rty));
 
   fn->params = locals;
 
   if (ty->is_variadic)
-    fn->va_area = new_lvar("__va_area__", array_of(ty_char, 136));
+    fn->va_area = new_lvar("__va_area__", array_of(ty_int, 16));   // MyCPU：codegen.c の可変長引数の置き場
   fn->alloca_bottom = new_lvar("__alloca_size__", pointer_to(ty_char));
 
   tok = skip(tok, "{");

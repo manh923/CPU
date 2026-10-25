@@ -1,11 +1,12 @@
 #ifndef __STDARG_H
 #define __STDARG_H
 
+// MyCPU：可変長引数（cc/codegen.c の __va_area__ と同じ形）
+//   レジスタで渡された引数（r16〜r21）は 8 バイトずつ並べて置いてあり、その後はスタックで渡されたもの
 typedef struct {
-  unsigned int gp_offset;
-  unsigned int fp_offset;
-  void *overflow_arg_area;
-  void *reg_save_area;
+  unsigned int gp_offset;      // 次に読むレジスタの引数（0〜48 バイト）
+  void *overflow_arg_area;     // 次に読むスタックの引数
+  void *reg_save_area;         // レジスタの引数の置き場
 } __va_elem;
 
 typedef __va_elem va_list[1];
@@ -15,39 +16,19 @@ typedef __va_elem va_list[1];
 
 #define va_end(ap)
 
-static void *__va_arg_mem(__va_elem *ap, int sz, int align) {
-  void *p = ap->overflow_arg_area;
-  if (align > 8)
-    p = (p + 15) / 16 * 16;
-  ap->overflow_arg_area = ((unsigned long)p + sz + 7) / 8 * 8;
-  return p;
-}
-
-static void *__va_arg_gp(__va_elem *ap, int sz, int align) {
-  if (ap->gp_offset >= 48)
-    return __va_arg_mem(ap, sz, align);
-
-  void *r = ap->reg_save_area + ap->gp_offset;
-  ap->gp_offset += 8;
+static void *__va_arg(__va_elem *ap, int sz) {
+  void *r;
+  if (sz <= 4 && ap->gp_offset < 48) {
+    r = (char *)ap->reg_save_area + ap->gp_offset;
+    ap->gp_offset += 8;
+    return r;
+  }
+  r = ap->overflow_arg_area;
+  ap->overflow_arg_area = (char *)ap->overflow_arg_area + (sz + 7) / 8 * 8;
   return r;
 }
 
-static void *__va_arg_fp(__va_elem *ap, int sz, int align) {
-  if (ap->fp_offset >= 112)
-    return __va_arg_mem(ap, sz, align);
-
-  void *r = ap->reg_save_area + ap->fp_offset;
-  ap->fp_offset += 8;
-  return r;
-}
-
-#define va_arg(ap, ty)                                                  \
-  ({                                                                    \
-    int klass = __builtin_reg_class(ty);                                \
-    *(ty *)(klass == 0 ? __va_arg_gp(ap, sizeof(ty), _Alignof(ty)) :    \
-            klass == 1 ? __va_arg_fp(ap, sizeof(ty), _Alignof(ty)) :    \
-            __va_arg_mem(ap, sizeof(ty), _Alignof(ty)));                \
-  })
+#define va_arg(ap, ty) (*(ty *)__va_arg(ap, sizeof(ty)))
 
 #define va_copy(dest, src) ((dest)[0] = (src)[0])
 

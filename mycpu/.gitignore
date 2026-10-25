@@ -2,3 +2,7 @@
 *.bin
 *.lst
 examples/*.hex
+
+# cc/ のビルドでできるもの（tools/cc.js が make で作る）
+cc/*.o
+cc/chibicc

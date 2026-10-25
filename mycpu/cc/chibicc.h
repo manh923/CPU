@@ -386,6 +386,8 @@ extern Type *ty_uchar;
 extern Type *ty_ushort;
 extern Type *ty_uint;
 extern Type *ty_ulong;
+extern Type *ty_llong;   // MyCPU：long long は 8 バイト（long は 4）
+extern Type *ty_ullong;
 
 extern Type *ty_float;
 extern Type *ty_double;

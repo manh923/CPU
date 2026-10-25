@@ -1,15 +1,26 @@
+// コード生成：この CPU（isa-spec.md、32bit）のアセンブリを出す。元の chibicc は x86-64 向け。
+//
+// 作りは元と同じ「スタックマシン」：式の値は r16 に置き、途中の値はスタックに 8 バイトずつ積む。
+//   r16 = 値（x86 の rax）、r17〜r22 = 作業用、r31 = フレームポインタ（x86 の rbp）
+// 型の大きさ（ILP32）：char 1、short 2、int・long・ポインタ 4、long long 8。
+//   long long の値はレジスタ 2 つ（r16 = 下位、r17 = 上位）。割り算・余りは libc の __divdi3 などを呼ぶ。
+//   float・double はまだない（使うとエラー）。
+// 呼び出し規約（isa-spec.md の 8 章）：引数は r16〜r21（7 個目からと、構造体・long long はスタック）、
+//   戻り値は r16（long long は r16・r17）。
+//   構造体を返す関数は、呼ぶ側がバッファを用意して、その番地を隠れた最初の引数として渡す。
+// フレーム：[r31] = 戻り番地（lr）、[r31 + 4] = 呼んだ側の r31、[r31 + 8] 〜 = スタックで渡された引数、
+//   [r31 − n] = ローカル変数。SP は常に 8 の倍数。
+// 名前：C の大域の名前は「_名前」、static と内部のラベルは「L<ファイルの番号>…」（ファイルごとに別）。
+//   データは「; @data」、コードは「; @text」の行で区切って出す（ドライバが分けて並べ直す）。
 #include "chibicc.h"
 
 #define GP_MAX 6
-#define FP_MAX 8
 
 static FILE *output_file;
 static int depth;
-static char *argreg8[] = {"%dil", "%sil", "%dl", "%cl", "%r8b", "%r9b"};
-static char *argreg16[] = {"%di", "%si", "%dx", "%cx", "%r8w", "%r9w"};
-static char *argreg32[] = {"%edi", "%esi", "%edx", "%ecx", "%r8d", "%r9d"};
-static char *argreg64[] = {"%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"};
 static Obj *current_fn;
+static HashMap globals;            // この翻訳単位の大域の名前 → Obj（static かどうかを知るため）
+static char fid[16];               // ファイルの番号（ファイル名のハッシュ）
 
 static void gen_expr(Node *node);
 static void gen_stmt(Node *node);
@@ -28,26 +39,65 @@ static int count(void) {
   return i++;
 }
 
+// C の名前をラベルに使える文字だけにする（英数字と _ 以外のバイトは「.16 進」に。日本語の識別子など）
+static char *safe_name(char *name) {
+  char *buf = calloc(1, strlen(name) * 3 + 1), *p = buf;
+  for (unsigned char *s = (unsigned char *)name; *s; s++) {
+    if (isalnum(*s) || *s == '_')
+      *p++ = *s;
+    else
+      p += sprintf(p, ".%02X", *s);
+  }
+  return buf;
+}
+
+// 名前をアセンブラのラベルにする
+static char *sym_name(char *name) {
+  if (!strncmp(name, ".L..", 4))         // 文字列・static なローカル変数・goto のラベル
+    return format("L%s..%s", fid, name + 4);
+  Obj *var = hashmap_get(&globals, name);
+  if (var && var->is_static)
+    return format("L%s_%s", fid, safe_name(name));
+  return format("_%s", safe_name(name));
+}
+
 static void push(void) {
-  println("  push %%rax");
+  println("  ADDI32 sp, sp, -8");
+  println("  STORE32_32 r16, sp, 0");
   depth++;
 }
 
-static void pop(char *arg) {
-  println("  pop %s", arg);
+static void pop(int reg) {
+  println("  LOAD32_32 r%d, sp, 0", reg);
+  println("  ADDI32 sp, sp, 8");
   depth--;
 }
 
-static void pushf(void) {
-  println("  sub $8, %%rsp");
-  println("  movsd %%xmm0, (%%rsp)");
+// long long（8 バイトの整数）か
+static bool is64(Type *ty) {
+  return ty->kind == TY_LONG && ty->size == 8;
+}
+
+// 64bit の値（r16 = 下位、r17 = 上位）を 1 つの 8 バイトに積む・取り出す
+static void push64(void) {
+  println("  ADDI32 sp, sp, -8");
+  println("  STORE32_32 r16, sp, 0");
+  println("  STORE32_32 r17, sp, 4");
   depth++;
 }
 
-static void popf(int reg) {
-  println("  movsd (%%rsp), %%xmm%d", reg);
-  println("  add $8, %%rsp");
+static void pop64(int lo, int hi) {
+  println("  LOAD32_32 r%d, sp, 0", lo);
+  println("  LOAD32_32 r%d, sp, 4", hi);
+  println("  ADDI32 sp, sp, 8");
   depth--;
+}
+
+static void push_val(Type *ty) {
+  if (is64(ty))
+    push64();
+  else
+    push();
 }
 
 // Round up `n` to the nearest multiple of `align`. For instance,
@@ -56,24 +106,53 @@ int align_to(int n, int align) {
   return (n + align - 1) / align * align;
 }
 
-static char *reg_dx(int sz) {
-  switch (sz) {
-  case 1: return "%dl";
-  case 2: return "%dx";
-  case 4: return "%edx";
-  case 8: return "%rdx";
-  }
-  unreachable();
+static void unsupported(Node *node, Type *ty) {
+  if (is_flonum(ty))
+    error_tok(node->tok, "float / double はまだ使えない（MyCPU）");
+  error_tok(node->tok, "この型はまだ使えない（MyCPU）");
 }
 
-static char *reg_ax(int sz) {
-  switch (sz) {
-  case 1: return "%al";
-  case 2: return "%ax";
-  case 4: return "%eax";
-  case 8: return "%rax";
+// 値（型 ty）が 0 なら / 0 でなければ飛ぶ（long long は r16 を壊す）
+static void jump_if_zero(Type *ty, char *label) {
+  if (is64(ty))
+    println("  ORR32 r16, r16, r17");
+  println("  CMPEQI32 p1, r16, 0");
+  println("  BR32 p1, %s", label);
+}
+
+static void jump_if_nonzero(Type *ty, char *label) {
+  if (is64(ty))
+    println("  ORR32 r16, r16, r17");
+  println("  CMPNEI32 p1, r16, 0");
+  println("  BR32 p1, %s", label);
+}
+
+// src から dst へ size バイト写す（r20・r21 を壊す。src・dst のレジスタは変えない）
+static void copy_bytes(int dst, int dst_off, int src, int size, int align) {
+  if (align >= 4 && size % 4 == 0 && size <= 64) {
+    for (int i = 0; i < size; i += 4) {
+      println("  LOAD32_32 r20, r%d, %d", src, i);
+      println("  STORE32_32 r20, r%d, %d", dst, dst_off + i);
+    }
+    return;
   }
-  unreachable();
+  if (size <= 16) {
+    for (int i = 0; i < size; i++) {
+      println("  LOAD8U_32 r20, r%d, %d", src, i);
+      println("  STORE8_32 r20, r%d, %d", dst, dst_off + i);
+    }
+    return;
+  }
+  int c = count();
+  println("  ADDI32 r21, r0, 0");
+  println("L%s.cp.%d:", fid, c);
+  println("  ADDR32 r22, r%d, r21", src);
+  println("  LOAD8U_32 r20, r22, 0");
+  println("  ADDR32 r22, r%d, r21", dst);
+  println("  STORE8_32 r20, r22, %d", dst_off);
+  println("  ADDI32 r21, r21, 1");
+  println("  CMPLTUI32 p1, r21, %d", size);
+  println("  BR32 p1, L%s.cp.%d", fid, c);
 }
 
 // Compute the absolute address of a given node.
@@ -83,72 +162,18 @@ static void gen_addr(Node *node) {
   case ND_VAR:
     // Variable-length array, which is always local.
     if (node->var->ty->kind == TY_VLA) {
-      println("  mov %d(%%rbp), %%rax", node->var->offset);
+      println("  LOAD32_32 r16, r31, %d", node->var->offset);
       return;
     }
 
     // Local variable
     if (node->var->is_local) {
-      println("  lea %d(%%rbp), %%rax", node->var->offset);
+      println("  ADDI32 r16, r31, %d", node->var->offset);
       return;
     }
 
-    if (opt_fpic) {
-      // Thread-local variable
-      if (node->var->is_tls) {
-        println("  data16 lea %s@tlsgd(%%rip), %%rdi", node->var->name);
-        println("  .value 0x6666");
-        println("  rex64");
-        println("  call __tls_get_addr@PLT");
-        return;
-      }
-
-      // Function or global variable
-      println("  mov %s@GOTPCREL(%%rip), %%rax", node->var->name);
-      return;
-    }
-
-    // Thread-local variable
-    if (node->var->is_tls) {
-      println("  mov %%fs:0, %%rax");
-      println("  add $%s@tpoff, %%rax", node->var->name);
-      return;
-    }
-
-    // Here, we generate an absolute address of a function or a global
-    // variable. Even though they exist at a certain address at runtime,
-    // their addresses are not known at link-time for the following
-    // two reasons.
-    //
-    //  - Address randomization: Executables are loaded to memory as a
-    //    whole but it is not known what address they are loaded to.
-    //    Therefore, at link-time, relative address in the same
-    //    exectuable (i.e. the distance between two functions in the
-    //    same executable) is known, but the absolute address is not
-    //    known.
-    //
-    //  - Dynamic linking: Dynamic shared objects (DSOs) or .so files
-    //    are loaded to memory alongside an executable at runtime and
-    //    linked by the runtime loader in memory. We know nothing
-    //    about addresses of global stuff that may be defined by DSOs
-    //    until the runtime relocation is complete.
-    //
-    // In order to deal with the former case, we use RIP-relative
-    // addressing, denoted by `(%rip)`. For the latter, we obtain an
-    // address of a stuff that may be in a shared object file from the
-    // Global Offset Table using `@GOTPCREL(%rip)` notation.
-
-    // Function
-    if (node->ty->kind == TY_FUNC) {
-      if (node->var->is_definition)
-        println("  lea %s(%%rip), %%rax", node->var->name);
-      else
-        println("  mov %s@GOTPCREL(%%rip), %%rax", node->var->name);
-      return;
-    }
-
-    // Global variable
-    println("  lea %s(%%rip), %%rax", node->var->name);
+    // 関数・大域変数（スレッドローカルも、ただの大域変数として扱う）
+    println("  ADDI32 r16, r0, %s", sym_name(node->var->name));
     return;
   case ND_DEREF:
     gen_expr(node->lhs);
@@ -159,7 +184,8 @@ static void gen_addr(Node *node) {
     return;
   case ND_MEMBER:
     gen_addr(node->lhs);
-    println("  add $%d, %%rax", node->member->offset);
+    if (node->member->offset)
+      println("  ADDI32 r16, r16, %d", node->member->offset);
     return;
   case ND_FUNCALL:
     if (node->ret_buffer) {
@@ -175,15 +201,15 @@ static void gen_addr(Node *node) {
     }
     break;
   case ND_VLA_PTR:
-    println("  lea %d(%%rbp), %%rax", node->var->offset);
+    println("  ADDI32 r16, r31, %d", node->var->offset);
     return;
   }
 
   error_tok(node->tok, "not an lvalue");
 }
 
-// Load a value from where %rax is pointing to.
-static void load(Type *ty) {
+// Load a value from where r16 is pointing to.
+static void load(Node *node, Type *ty) {
   switch (ty->kind) {
   case TY_ARRAY:
   case TY_STRUCT:
@@ -198,259 +224,110 @@ static void load(Type *ty) {
     // the first element of the array in C" occurs.
     return;
   case TY_FLOAT:
-    println("  movss (%%rax), %%xmm0");
-    return;
   case TY_DOUBLE:
-    println("  movsd (%%rax), %%xmm0");
-    return;
   case TY_LDOUBLE:
-    println("  fldt (%%rax)");
+    unsupported(node, ty);
+  }
+
+  // char・short は int の大きさに広げて読む
+  if (ty->size == 1)
+    println("  %s r16, r16, 0", ty->is_unsigned ? "LOAD8U_32" : "LOAD8S_32");
+  else if (ty->size == 2)
+    println("  %s r16, r16, 0", ty->is_unsigned ? "LOAD16U_32" : "LOAD16S_32");
+  else if (ty->size == 4)
+    println("  LOAD32_32 r16, r16, 0");
+  else if (is64(ty)) {
+    println("  LOAD32_32 r17, r16, 4");
+    println("  LOAD32_32 r16, r16, 0");
+  } else
+    unsupported(node, ty);
+}
+
+// Store r16 to an address that the stack top is pointing to.
+static void store(Node *node, Type *ty) {
+  if (is64(ty)) {
+    pop(22);
+    println("  STORE32_32 r16, r22, 0");
+    println("  STORE32_32 r17, r22, 4");
     return;
   }
 
-  char *insn = ty->is_unsigned ? "movz" : "movs";
-
-  // When we load a char or a short value to a register, we always
-  // extend them to the size of int, so we can assume the lower half of
-  // a register always contains a valid value. The upper half of a
-  // register for char, short and int may contain garbage. When we load
-  // a long value to a register, it simply occupies the entire register.
-  if (ty->size == 1)
-    println("  %sbl (%%rax), %%eax", insn);
-  else if (ty->size == 2)
-    println("  %swl (%%rax), %%eax", insn);
-  else if (ty->size == 4)
-    println("  movsxd (%%rax), %%rax");
-  else
-    println("  mov (%%rax), %%rax");
-}
-
-// Store %rax to an address that the stack top is pointing to.
-static void store(Type *ty) {
-  pop("%rdi");
+  pop(17);
 
   switch (ty->kind) {
   case TY_STRUCT:
   case TY_UNION:
-    for (int i = 0; i < ty->size; i++) {
-      println("  mov %d(%%rax), %%r8b", i);
-      println("  mov %%r8b, %d(%%rdi)", i);
-    }
+    copy_bytes(17, 0, 16, ty->size, ty->align);
     return;
   case TY_FLOAT:
-    println("  movss %%xmm0, (%%rdi)");
-    return;
   case TY_DOUBLE:
-    println("  movsd %%xmm0, (%%rdi)");
-    return;
   case TY_LDOUBLE:
-    println("  fstpt (%%rdi)");
-    return;
+    unsupported(node, ty);
   }
 
   if (ty->size == 1)
-    println("  mov %%al, (%%rdi)");
+    println("  STORE8_32 r16, r17, 0");
   else if (ty->size == 2)
-    println("  mov %%ax, (%%rdi)");
+    println("  STORE16_32 r16, r17, 0");
   else if (ty->size == 4)
-    println("  mov %%eax, (%%rdi)");
+    println("  STORE32_32 r16, r17, 0");
   else
-    println("  mov %%rax, (%%rdi)");
+    unsupported(node, ty);
 }
 
-static void cmp_zero(Type *ty) {
-  switch (ty->kind) {
-  case TY_FLOAT:
-    println("  xorps %%xmm1, %%xmm1");
-    println("  ucomiss %%xmm1, %%xmm0");
-    return;
-  case TY_DOUBLE:
-    println("  xorpd %%xmm1, %%xmm1");
-    println("  ucomisd %%xmm1, %%xmm0");
-    return;
-  case TY_LDOUBLE:
-    println("  fldz");
-    println("  fucomip");
-    println("  fstp %%st(0)");
-    return;
-  }
-
-  if (is_integer(ty) && ty->size <= 4)
-    println("  cmp $0, %%eax");
-  else
-    println("  cmp $0, %%rax");
-}
-
-enum { I8, I16, I32, I64, U8, U16, U32, U64, F32, F64, F80 };
-
-static int getTypeId(Type *ty) {
-  switch (ty->kind) {
-  case TY_CHAR:
-    return ty->is_unsigned ? U8 : I8;
-  case TY_SHORT:
-    return ty->is_unsigned ? U16 : I16;
-  case TY_INT:
-    return ty->is_unsigned ? U32 : I32;
-  case TY_LONG:
-    return ty->is_unsigned ? U64 : I64;
-  case TY_FLOAT:
-    return F32;
-  case TY_DOUBLE:
-    return F64;
-  case TY_LDOUBLE:
-    return F80;
-  }
-  return U64;
-}
-
-// The table for type casts
-static char i32i8[] = "movsbl %al, %eax";
-static char i32u8[] = "movzbl %al, %eax";
-static char i32i16[] = "movswl %ax, %eax";
-static char i32u16[] = "movzwl %ax, %eax";
-static char i32f32[] = "cvtsi2ssl %eax, %xmm0";
-static char i32i64[] = "movsxd %eax, %rax";
-static char i32f64[] = "cvtsi2sdl %eax, %xmm0";
-static char i32f80[] = "mov %eax, -4(%rsp); fildl -4(%rsp)";
-
-static char u32f32[] = "mov %eax, %eax; cvtsi2ssq %rax, %xmm0";
-static char u32i64[] = "mov %eax, %eax";
-static char u32f64[] = "mov %eax, %eax; cvtsi2sdq %rax, %xmm0";
-static char u32f80[] = "mov %eax, %eax; mov %rax, -8(%rsp); fildll -8(%rsp)";
-
-static char i64f32[] = "cvtsi2ssq %rax, %xmm0";
-static char i64f64[] = "cvtsi2sdq %rax, %xmm0";
-static char i64f80[] = "movq %rax, -8(%rsp); fildll -8(%rsp)";
-
-static char u64f32[] = "cvtsi2ssq %rax, %xmm0";
-static char u64f64[] =
-  "test %rax,%rax; js 1f; pxor %xmm0,%xmm0; cvtsi2sd %rax,%xmm0; jmp 2f; "
-  "1: mov %rax,%rdi; and $1,%eax; pxor %xmm0,%xmm0; shr %rdi; "
-  "or %rax,%rdi; cvtsi2sd %rdi,%xmm0; addsd %xmm0,%xmm0; 2:";
-static char u64f80[] =
-  "mov %rax, -8(%rsp); fildq -8(%rsp); test %rax, %rax; jns 1f;"
-  "mov $1602224128, %eax; mov %eax, -4(%rsp); fadds -4(%rsp); 1:";
-
-static char f32i8[] = "cvttss2sil %xmm0, %eax; movsbl %al, %eax";
-static char f32u8[] = "cvttss2sil %xmm0, %eax; movzbl %al, %eax";
-static char f32i16[] = "cvttss2sil %xmm0, %eax; movswl %ax, %eax";
-static char f32u16[] = "cvttss2sil %xmm0, %eax; movzwl %ax, %eax";
-static char f32i32[] = "cvttss2sil %xmm0, %eax";
-static char f32u32[] = "cvttss2siq %xmm0, %rax";
-static char f32i64[] = "cvttss2siq %xmm0, %rax";
-static char f32u64[] = "cvttss2siq %xmm0, %rax";
-static char f32f64[] = "cvtss2sd %xmm0, %xmm0";
-static char f32f80[] = "movss %xmm0, -4(%rsp); flds -4(%rsp)";
-
-static char f64i8[] = "cvttsd2sil %xmm0, %eax; movsbl %al, %eax";
-static char f64u8[] = "cvttsd2sil %xmm0, %eax; movzbl %al, %eax";
-static char f64i16[] = "cvttsd2sil %xmm0, %eax; movswl %ax, %eax";
-static char f64u16[] = "cvttsd2sil %xmm0, %eax; movzwl %ax, %eax";
-static char f64i32[] = "cvttsd2sil %xmm0, %eax";
-static char f64u32[] = "cvttsd2siq %xmm0, %rax";
-static char f64i64[] = "cvttsd2siq %xmm0, %rax";
-static char f64u64[] = "cvttsd2siq %xmm0, %rax";
-static char f64f32[] = "cvtsd2ss %xmm0, %xmm0";
-static char f64f80[] = "movsd %xmm0, -8(%rsp); fldl -8(%rsp)";
-
-#define FROM_F80_1                                           \
-  "fnstcw -10(%rsp); movzwl -10(%rsp), %eax; or $12, %ah; " \
-  "mov %ax, -12(%rsp); fldcw -12(%rsp); "
-
-#define FROM_F80_2 " -24(%rsp); fldcw -10(%rsp); "
-
-static char f80i8[] = FROM_F80_1 "fistps" FROM_F80_2 "movsbl -24(%rsp), %eax";
-static char f80u8[] = FROM_F80_1 "fistps" FROM_F80_2 "movzbl -24(%rsp), %eax";
-static char f80i16[] = FROM_F80_1 "fistps" FROM_F80_2 "movzbl -24(%rsp), %eax";
-static char f80u16[] = FROM_F80_1 "fistpl" FROM_F80_2 "movswl -24(%rsp), %eax";
-static char f80i32[] = FROM_F80_1 "fistpl" FROM_F80_2 "mov -24(%rsp), %eax";
-static char f80u32[] = FROM_F80_1 "fistpl" FROM_F80_2 "mov -24(%rsp), %eax";
-static char f80i64[] = FROM_F80_1 "fistpq" FROM_F80_2 "mov -24(%rsp), %rax";
-static char f80u64[] = FROM_F80_1 "fistpq" FROM_F80_2 "mov -24(%rsp), %rax";
-static char f80f32[] = "fstps -8(%rsp); movss -8(%rsp), %xmm0";
-static char f80f64[] = "fstpl -8(%rsp); movsd -8(%rsp), %xmm0";
-
-static char *cast_table[][11] = {
-  // i8   i16     i32     i64     u8     u16     u32     u64     f32     f64     f80
-  {NULL,  NULL,   NULL,   i32i64, i32u8, i32u16, NULL,   i32i64, i32f32, i32f64, i32f80}, // i8
-  {i32i8, NULL,   NULL,   i32i64, i32u8, i32u16, NULL,   i32i64, i32f32, i32f64, i32f80}, // i16
-  {i32i8, i32i16, NULL,   i32i64, i32u8, i32u16, NULL,   i32i64, i32f32, i32f64, i32f80}, // i32
-  {i32i8, i32i16, NULL,   NULL,   i32u8, i32u16, NULL,   NULL,   i64f32, i64f64, i64f80}, // i64
-
-  {i32i8, NULL,   NULL,   i32i64, NULL,  NULL,   NULL,   i32i64, i32f32, i32f64, i32f80}, // u8
-  {i32i8, i32i16, NULL,   i32i64, i32u8, NULL,   NULL,   i32i64, i32f32, i32f64, i32f80}, // u16
-  {i32i8, i32i16, NULL,   u32i64, i32u8, i32u16, NULL,   u32i64, u32f32, u32f64, u32f80}, // u32
-  {i32i8, i32i16, NULL,   NULL,   i32u8, i32u16, NULL,   NULL,   u64f32, u64f64, u64f80}, // u64
-
-  {f32i8, f32i16, f32i32, f32i64, f32u8, f32u16, f32u32, f32u64, NULL,   f32f64, f32f80}, // f32
-  {f64i8, f64i16, f64i32, f64i64, f64u8, f64u16, f64u32, f64u64, f64f32, NULL,   f64f80}, // f64
-  {f80i8, f80i16, f80i32, f80i64, f80u8, f80u16, f80u32, f80u64, f80f32, f80f64, NULL},   // f80
-};
-
-static void cast(Type *from, Type *to) {
+static void cast(Node *node, Type *from, Type *to) {
   if (to->kind == TY_VOID)
     return;
 
+  if (is_flonum(from) || is_flonum(to))
+    unsupported(node, is_flonum(from) ? from : to);
+
   if (to->kind == TY_BOOL) {
-    cmp_zero(from);
-    println("  setne %%al");
-    println("  movzx %%al, %%eax");
+    if (is64(from))
+      println("  ORR32 r16, r16, r17");
+    println("  CMPNEI32 p1, r16, 0");
+    println("  BTOI32 r16, p1");
     return;
   }
 
-  int t1 = getTypeId(from);
-  int t2 = getTypeId(to);
-  if (cast_table[t1][t2])
-    println("  %s", cast_table[t1][t2]);
-}
-
-// Structs or unions equal or smaller than 16 bytes are passed
-// using up to two registers.
-//
-// If the first 8 bytes contains only floating-point type members,
-// they are passed in an XMM register. Otherwise, they are passed
-// in a general-purpose register.
-//
-// If a struct/union is larger than 8 bytes, the same rule is
-// applied to the the next 8 byte chunk.
-//
-// This function returns true if `ty` has only floating-point
-// members in its byte range [lo, hi).
-static bool has_flonum(Type *ty, int lo, int hi, int offset) {
-  if (ty->kind == TY_STRUCT || ty->kind == TY_UNION) {
-    for (Member *mem = ty->members; mem; mem = mem->next)
-      if (!has_flonum(mem->ty, lo, hi, offset + mem->offset))
-        return false;
-    return true;
+  // long long へ：上位を、符号付きなら符号で、符号なし・ポインタなら 0 で埋める
+  if (is64(to)) {
+    if (!is64(from)) {
+      if (from->is_unsigned || from->base || from->kind == TY_BOOL)
+        println("  ADDI32 r17, r0, 0");
+      else
+        println("  SARI32 r17, r16, 31");
+    }
+    return;
   }
 
-  if (ty->kind == TY_ARRAY) {
-    for (int i = 0; i < ty->array_len; i++)
-      if (!has_flonum(ty->base, lo, hi, offset + ty->base->size * i))
-        return false;
-    return true;
+  // 整数どうし：小さい型へは切り詰めて広げ直す（読むときに広げてあるので、大きい型へは何もしない）
+  if (to->size == 1 && !(from->size == 1 && from->is_unsigned == to->is_unsigned)) {
+    if (to->is_unsigned) {
+      println("  ANDI32 r16, r16, 0xFF");
+    } else {
+      println("  SHLI32 r16, r16, 24");
+      println("  SARI32 r16, r16, 24");
+    }
+  } else if (to->size == 2 && from->size > 1 && !(from->size == 2 && from->is_unsigned == to->is_unsigned)) {
+    if (to->is_unsigned) {
+      println("  ANDI32 r16, r16, 0xFFFF");
+    } else {
+      println("  SHLI32 r16, r16, 16");
+      println("  SARI32 r16, r16, 16");
+    }
+  } else if (to->size == 2 && from->size == 1 && to->is_unsigned && !from->is_unsigned) {
+    println("  ANDI32 r16, r16, 0xFFFF");
   }
-
-  return offset < lo || hi <= offset || ty->kind == TY_FLOAT || ty->kind == TY_DOUBLE;
 }
 
-static bool has_flonum1(Type *ty) {
-  return has_flonum(ty, 0, 8, 0);
-}
-
-static bool has_flonum2(Type *ty) {
-  return has_flonum(ty, 8, 16, 0);
-}
-
+// 構造体をスタックに写す（r16 が構造体の番地）
 static void push_struct(Type *ty) {
   int sz = align_to(ty->size, 8);
-  println("  sub $%d, %%rsp", sz);
+  println("  ADDI32 sp, sp, -%d", sz);
   depth += sz / 8;
-
-  for (int i = 0; i < ty->size; i++) {
-    println("  mov %d(%%rax), %%r10b", i);
-    println("  mov %%r10b, %d(%%rsp)", i);
-  }
+  println("  ADDR32 r17, sp, r0");
+  copy_bytes(17, 0, 16, ty->size, ty->align);
 }
 
 static void push_args2(Node *args, bool first_pass) {
@@ -470,79 +347,40 @@ static void push_args2(Node *args, bool first_pass) {
     break;
   case TY_FLOAT:
   case TY_DOUBLE:
-    pushf();
-    break;
   case TY_LDOUBLE:
-    println("  sub $16, %%rsp");
-    println("  fstpt (%%rsp)");
-    depth += 2;
-    break;
+    unsupported(args, args->ty);
   default:
-    push();
+    push_val(args->ty);
   }
 }
 
-// Load function call arguments. Arguments are already evaluated and
-// stored to the stack as local variables. What we need to do in this
-// function is to load them to registers or push them to the stack as
-// specified by the x86-64 psABI. Here is what the spec says:
-//
-// - Up to 6 arguments of integral type are passed using RDI, RSI,
-//   RDX, RCX, R8 and R9.
-//
-// - Up to 8 arguments of floating-point type are passed using XMM0 to
-//   XMM7.
-//
-// - If all registers of an appropriate type are already used, push an
-//   argument to the stack in the right-to-left order.
-//
-// - Each argument passed on the stack takes 8 bytes, and the end of
-//   the argument area must be aligned to a 16 byte boundary.
-//
-// - If a function is variadic, set the number of floating-point type
-//   arguments to RAX.
+// 引数を積む。先に「スタックで渡すもの」を後ろから、次に「レジスタで渡すもの」を後ろから積むので、
+// 後で取り出すと最初の引数から順に出てくる。スタックで渡すものは、そのまま呼ばれた側が読む。
+//   - 整数・ポインタは r16〜r21 の 6 個まで。残りはスタック（8 バイトずつ）
+//   - 構造体・共用体はいつもスタック
+//   - 構造体を返す関数には、バッファの番地を隠れた最初の引数として渡す
 static int push_args(Node *node) {
-  int stack = 0, gp = 0, fp = 0;
+  int stack = 0, gp = 0;
 
-  // If the return type is a large struct/union, the caller passes
-  // a pointer to a buffer as if it were the first argument.
-  if (node->ret_buffer && node->ty->size > 16)
+  if (node->ret_buffer)
     gp++;
 
-  // Load as many arguments to the registers as possible.
   for (Node *arg = node->args; arg; arg = arg->next) {
     Type *ty = arg->ty;
 
     switch (ty->kind) {
     case TY_STRUCT:
     case TY_UNION:
-      if (ty->size > 16) {
-        arg->pass_by_stack = true;
-        stack += align_to(ty->size, 8) / 8;
-      } else {
-        bool fp1 = has_flonum1(ty);
-        bool fp2 = has_flonum2(ty);
-
-        if (fp + fp1 + fp2 < FP_MAX && gp + !fp1 + !fp2 < GP_MAX) {
-          fp = fp + fp1 + fp2;
-          gp = gp + !fp1 + !fp2;
-        } else {
-          arg->pass_by_stack = true;
-          stack += align_to(ty->size, 8) / 8;
-        }
-      }
+      arg->pass_by_stack = true;
+      stack += align_to(ty->size, 8) / 8;
       break;
-    case TY_FLOAT:
-    case TY_DOUBLE:
-      if (fp++ >= FP_MAX) {
+    case TY_LONG:
+      if (is64(ty)) {
         arg->pass_by_stack = true;
         stack++;
+        break;
       }
-      break;
-    case TY_LDOUBLE:
-      arg->pass_by_stack = true;
-      stack += 2;
-      break;
+      // fallthrough
     default:
       if (gp++ >= GP_MAX) {
         arg->pass_by_stack = true;
@@ -551,256 +389,327 @@ static int push_args(Node *node) {
     }
   }
 
-  if ((depth + stack) % 2 == 1) {
-    println("  sub $8, %%rsp");
-    depth++;
-    stack++;
-  }
-
   push_args2(node->args, true);
   push_args2(node->args, false);
 
-  // If the return type is a large struct/union, the caller passes
-  // a pointer to a buffer as if it were the first argument.
-  if (node->ret_buffer && node->ty->size > 16) {
-    println("  lea %d(%%rbp), %%rax", node->ret_buffer->offset);
+  if (node->ret_buffer) {
+    println("  ADDI32 r16, r31, %d", node->ret_buffer->offset);
     push();
   }
 
   return stack;
 }
 
-static void copy_ret_buffer(Obj *var) {
-  Type *ty = var->ty;
-  int gp = 0, fp = 0;
-
-  if (has_flonum1(ty)) {
-    assert(ty->size == 4 || 8 <= ty->size);
-    if (ty->size == 4)
-      println("  movss %%xmm0, %d(%%rbp)", var->offset);
-    else
-      println("  movsd %%xmm0, %d(%%rbp)", var->offset);
-    fp++;
-  } else {
-    for (int i = 0; i < MIN(8, ty->size); i++) {
-      println("  mov %%al, %d(%%rbp)", var->offset + i);
-      println("  shr $8, %%rax");
-    }
-    gp++;
-  }
-
-  if (ty->size > 8) {
-    if (has_flonum2(ty)) {
-      assert(ty->size == 12 || ty->size == 16);
-      if (ty->size == 12)
-        println("  movss %%xmm%d, %d(%%rbp)", fp, var->offset + 8);
-      else
-        println("  movsd %%xmm%d, %d(%%rbp)", fp, var->offset + 8);
-    } else {
-      char *reg1 = (gp == 0) ? "%al" : "%dl";
-      char *reg2 = (gp == 0) ? "%rax" : "%rdx";
-      for (int i = 8; i < MIN(16, ty->size); i++) {
-        println("  mov %s, %d(%%rbp)", reg1, var->offset + i);
-        println("  shr $8, %s", reg2);
-      }
-    }
-  }
-}
-
-static void copy_struct_reg(void) {
-  Type *ty = current_fn->ty->return_ty;
-  int gp = 0, fp = 0;
-
-  println("  mov %%rax, %%rdi");
-
-  if (has_flonum(ty, 0, 8, 0)) {
-    assert(ty->size == 4 || 8 <= ty->size);
-    if (ty->size == 4)
-      println("  movss (%%rdi), %%xmm0");
-    else
-      println("  movsd (%%rdi), %%xmm0");
-    fp++;
-  } else {
-    println("  mov $0, %%rax");
-    for (int i = MIN(8, ty->size) - 1; i >= 0; i--) {
-      println("  shl $8, %%rax");
-      println("  mov %d(%%rdi), %%al", i);
-    }
-    gp++;
-  }
-
-  if (ty->size > 8) {
-    if (has_flonum(ty, 8, 16, 0)) {
-      assert(ty->size == 12 || ty->size == 16);
-      if (ty->size == 4)
-        println("  movss 8(%%rdi), %%xmm%d", fp);
-      else
-        println("  movsd 8(%%rdi), %%xmm%d", fp);
-    } else {
-      char *reg1 = (gp == 0) ? "%al" : "%dl";
-      char *reg2 = (gp == 0) ? "%rax" : "%rdx";
-      println("  mov $0, %s", reg2);
-      for (int i = MIN(16, ty->size) - 1; i >= 8; i--) {
-        println("  shl $8, %s", reg2);
-        println("  mov %d(%%rdi), %s", i, reg1);
-      }
-    }
-  }
-}
-
-static void copy_struct_mem(void) {
-  Type *ty = current_fn->ty->return_ty;
-  Obj *var = current_fn->params;
-
-  println("  mov %d(%%rbp), %%rdi", var->offset);
-
-  for (int i = 0; i < ty->size; i++) {
-    println("  mov %d(%%rax), %%dl", i);
-    println("  mov %%dl, %d(%%rdi)", i);
-  }
-}
-
 static void builtin_alloca(void) {
-  // Align size to 16 bytes.
-  println("  add $15, %%rdi");
-  println("  and $0xfffffff0, %%edi");
+  // r17 = 大きさ。8 の倍数に切り上げる
+  println("  ADDI32 r17, r17, 7");
+  println("  ANDI32 r17, r17, -8");
 
-  // Shift the temporary area by %rdi.
-  println("  mov %d(%%rbp), %%rcx", current_fn->alloca_bottom->offset);
-  println("  sub %%rsp, %%rcx");
-  println("  mov %%rsp, %%rax");
-  println("  sub %%rdi, %%rsp");
-  println("  mov %%rsp, %%rdx");
-  println("1:");
-  println("  cmp $0, %%rcx");
-  println("  je 2f");
-  println("  mov (%%rax), %%r8b");
-  println("  mov %%r8b, (%%rdx)");
-  println("  inc %%rdx");
-  println("  inc %%rax");
-  println("  dec %%rcx");
-  println("  jmp 1b");
-  println("2:");
+  // 一時的に積んであるもの（alloca_bottom 〜 SP）を r17 だけ下へずらす
+  int c = count();
+  println("  LOAD32_32 r18, r31, %d", current_fn->alloca_bottom->offset);
+  println("  SUBR32 r18, r18, sp");          // ずらすバイト数
+  println("  ADDR32 r19, sp, r0");           // 元
+  println("  SUBR32 sp, sp, r17");
+  println("  ADDR32 r20, sp, r0");           // 先
+  println("L%s.al.%d:", fid, c);
+  println("  CMPEQI32 p1, r18, 0");
+  println("  BR32 p1, L%s.ald.%d", fid, c);
+  println("  LOAD8U_32 r21, r19, 0");
+  println("  STORE8_32 r21, r20, 0");
+  println("  ADDI32 r19, r19, 1");
+  println("  ADDI32 r20, r20, 1");
+  println("  ADDI32 r18, r18, -1");
+  println("  JMP32 L%s.al.%d", fid, c);
+  println("L%s.ald.%d:", fid, c);
 
-  // Move alloca_bottom pointer.
-  println("  mov %d(%%rbp), %%rax", current_fn->alloca_bottom->offset);
-  println("  sub %%rdi, %%rax");
-  println("  mov %%rax, %d(%%rbp)", current_fn->alloca_bottom->offset);
+  // alloca_bottom を下げて、空いたところの先頭を返す
+  println("  LOAD32_32 r16, r31, %d", current_fn->alloca_bottom->offset);
+  println("  SUBR32 r16, r16, r17");
+  println("  STORE32_32 r16, r31, %d", current_fn->alloca_bottom->offset);
+}
+
+// 2 つの値の演算：r16 = 左、r17 = 右
+static void gen_binary(Node *node) {
+  bool uns = node->lhs->ty->is_unsigned || node->lhs->ty->base;
+
+  switch (node->kind) {
+  case ND_ADD:
+    println("  ADDR32 r16, r16, r17");
+    return;
+  case ND_SUB:
+    println("  SUBR32 r16, r16, r17");
+    return;
+  case ND_MUL:
+    println("  MULR32 r16, r16, r17");
+    return;
+  case ND_DIV:
+    println("  %s r16, r16, r17", node->ty->is_unsigned ? "DIVUR32" : "DIVR32");
+    return;
+  case ND_MOD:
+    println("  %s r16, r16, r17", node->ty->is_unsigned ? "REMUR32" : "REMR32");
+    return;
+  case ND_BITAND:
+    println("  ANDR32 r16, r16, r17");
+    return;
+  case ND_BITOR:
+    println("  ORR32 r16, r16, r17");
+    return;
+  case ND_BITXOR:
+    println("  XORR32 r16, r16, r17");
+    return;
+  case ND_EQ:
+    println("  CMPEQR32 p1, r16, r17");
+    println("  BTOI32 r16, p1");
+    return;
+  case ND_NE:
+    println("  CMPNER32 p1, r16, r17");
+    println("  BTOI32 r16, p1");
+    return;
+  case ND_LT:
+    println("  %s p1, r16, r17", uns ? "CMPLTUR32" : "CMPLTR32");
+    println("  BTOI32 r16, p1");
+    return;
+  case ND_LE:                          // a <= b は b >= a
+    println("  %s p1, r17, r16", uns ? "CMPGEUR32" : "CMPGER32");
+    println("  BTOI32 r16, p1");
+    return;
+  case ND_SHL:
+    println("  SHLR32 r16, r16, r17");
+    return;
+  case ND_SHR:
+    println("  %s r16, r16, r17", node->lhs->ty->is_unsigned ? "SHRR32" : "SARR32");
+    return;
+  }
+
+  error_tok(node->tok, "invalid expression");
+}
+
+// 64bit の 2 つの値の演算：r16・r17 = 左、r18・r19 = 右（シフトは r18 が回数）
+static void gen_binary64(Node *node) {
+  bool uns = node->lhs->ty->is_unsigned;
+  int c = count();
+
+  switch (node->kind) {
+  case ND_ADD:                         // 下位の桁上がり = 和 < 元の値
+    println("  ADDR32 r20, r16, r18");
+    println("  CMPLTUR32 p1, r20, r16");
+    println("  BTOI32 r21, p1");
+    println("  ADDR32 r17, r17, r19");
+    println("  ADDR32 r17, r17, r21");
+    println("  ADDR32 r16, r20, r0");
+    return;
+  case ND_SUB:                         // 下位の借り = 左 < 右
+    println("  CMPLTUR32 p1, r16, r18");
+    println("  BTOI32 r21, p1");
+    println("  SUBR32 r16, r16, r18");
+    println("  SUBR32 r17, r17, r19");
+    println("  SUBR32 r17, r17, r21");
+    return;
+  case ND_MUL:                         // 上位 = MULHU(a0, b0) + a0 × b1 + a1 × b0
+    println("  MULHUR32 r20, r16, r18");
+    println("  MULR32 r21, r16, r19");
+    println("  ADDR32 r20, r20, r21");
+    println("  MULR32 r21, r17, r18");
+    println("  ADDR32 r17, r20, r21");
+    println("  MULR32 r16, r16, r18");
+    return;
+  case ND_DIV:
+  case ND_MOD: {                       // libc の関数を呼ぶ（引数はどちらもスタック）
+    char *fn = node->kind == ND_DIV ? (node->ty->is_unsigned ? "___udivdi3" : "___divdi3")
+                                    : (node->ty->is_unsigned ? "___umoddi3" : "___moddi3");
+    println("  ADDI32 sp, sp, -16");
+    println("  STORE32_32 r16, sp, 0");
+    println("  STORE32_32 r17, sp, 4");
+    println("  STORE32_32 r18, sp, 8");
+    println("  STORE32_32 r19, sp, 12");
+    println("  CALL32 %s", fn);
+    println("  ADDI32 sp, sp, 16");
+    return;
+  }
+  case ND_BITAND:
+    println("  ANDR32 r16, r16, r18");
+    println("  ANDR32 r17, r17, r19");
+    return;
+  case ND_BITOR:
+    println("  ORR32 r16, r16, r18");
+    println("  ORR32 r17, r17, r19");
+    return;
+  case ND_BITXOR:
+    println("  XORR32 r16, r16, r18");
+    println("  XORR32 r17, r17, r19");
+    return;
+  case ND_EQ:
+  case ND_NE:
+    println("  XORR32 r16, r16, r18");
+    println("  XORR32 r17, r17, r19");
+    println("  ORR32 r16, r16, r17");
+    println("  %s p1, r16, 0", node->kind == ND_EQ ? "CMPEQI32" : "CMPNEI32");
+    println("  BTOI32 r16, p1");
+    return;
+  case ND_LT:                          // 上位が小さい、または上位が同じで下位が小さい（下位は符号なし）
+    println("  %s p1, r17, r19", uns ? "CMPLTUR32" : "CMPLTR32");
+    println("  BTOI32 r20, p1");
+    println("  CMPEQR32 p1, r17, r19");
+    println("  BTOI32 r21, p1");
+    println("  CMPLTUR32 p1, r16, r18");
+    println("  BTOI32 r22, p1");
+    println("  ANDR32 r21, r21, r22");
+    println("  ORR32 r16, r20, r21");
+    return;
+  case ND_LE:                          // a <= b は !(b < a)
+    println("  %s p1, r19, r17", uns ? "CMPLTUR32" : "CMPLTR32");
+    println("  BTOI32 r20, p1");
+    println("  CMPEQR32 p1, r17, r19");
+    println("  BTOI32 r21, p1");
+    println("  CMPLTUR32 p1, r18, r16");
+    println("  BTOI32 r22, p1");
+    println("  ANDR32 r21, r21, r22");
+    println("  ORR32 r16, r20, r21");
+    println("  XORI32 r16, r16, 1");
+    return;
+  case ND_SHL:
+    println("  ANDI32 r18, r18, 63");
+    println("  CMPLTUI32 p1, r18, 32");
+    println("  BR32 p1, L%s.sh.%d", fid, c);
+    println("  ADDI32 r18, r18, -32");             // 32 以上：下位を上位へ
+    println("  SHLR32 r17, r16, r18");
+    println("  ADDI32 r16, r0, 0");
+    println("  JMP32 L%s.shd.%d", fid, c);
+    println("L%s.sh.%d:", fid, c);
+    println("  CMPEQI32 p1, r18, 0");
+    println("  BR32 p1, L%s.shd.%d", fid, c);
+    println("  ADDI32 r20, r0, 32");
+    println("  SUBR32 r20, r20, r18");
+    println("  SHRR32 r21, r16, r20");             // 下位からあふれる分
+    println("  SHLR32 r17, r17, r18");
+    println("  ORR32 r17, r17, r21");
+    println("  SHLR32 r16, r16, r18");
+    println("L%s.shd.%d:", fid, c);
+    return;
+  case ND_SHR:
+    println("  ANDI32 r18, r18, 63");
+    println("  CMPLTUI32 p1, r18, 32");
+    println("  BR32 p1, L%s.sh.%d", fid, c);
+    println("  ADDI32 r18, r18, -32");             // 32 以上：上位を下位へ
+    println("  %s r16, r17, r18", uns ? "SHRR32" : "SARR32");
+    if (uns)
+      println("  ADDI32 r17, r0, 0");
+    else
+      println("  SARI32 r17, r17, 31");
+    println("  JMP32 L%s.shd.%d", fid, c);
+    println("L%s.sh.%d:", fid, c);
+    println("  CMPEQI32 p1, r18, 0");
+    println("  BR32 p1, L%s.shd.%d", fid, c);
+    println("  ADDI32 r20, r0, 32");
+    println("  SUBR32 r20, r20, r18");
+    println("  SHLR32 r21, r17, r20");             // 上位から下位へ落ちる分
+    println("  SHRR32 r16, r16, r18");
+    println("  ORR32 r16, r16, r21");
+    println("  %s r17, r17, r18", uns ? "SHRR32" : "SARR32");
+    println("L%s.shd.%d:", fid, c);
+    return;
+  }
+
+  error_tok(node->tok, "invalid expression");
 }
 
 // Generate code for a given node.
 static void gen_expr(Node *node) {
-  println("  .loc %d %d", node->tok->file->file_no, node->tok->line_no);
-
   switch (node->kind) {
   case ND_NULL_EXPR:
     return;
-  case ND_NUM: {
-    switch (node->ty->kind) {
-    case TY_FLOAT: {
-      union { float f32; uint32_t u32; } u = { node->fval };
-      println("  mov $%u, %%eax  # float %Lf", u.u32, node->fval);
-      println("  movq %%rax, %%xmm0");
-      return;
-    }
-    case TY_DOUBLE: {
-      union { double f64; uint64_t u64; } u = { node->fval };
-      println("  mov $%lu, %%rax  # double %Lf", u.u64, node->fval);
-      println("  movq %%rax, %%xmm0");
-      return;
-    }
-    case TY_LDOUBLE: {
-      union { long double f80; uint64_t u64[2]; } u;
-      memset(&u, 0, sizeof(u));
-      u.f80 = node->fval;
-      println("  mov $%lu, %%rax  # long double %Lf", u.u64[0], node->fval);
-      println("  mov %%rax, -16(%%rsp)");
-      println("  mov $%lu, %%rax", u.u64[1]);
-      println("  mov %%rax, -8(%%rsp)");
-      println("  fldt -16(%%rsp)");
-      return;
-    }
-    }
-
-    println("  mov $%ld, %%rax", node->val);
+  case ND_NUM:
+    if (is_flonum(node->ty))
+      unsupported(node, node->ty);
+    println("  ADDI32 r16, r0, %d", (int32_t)node->val);
+    if (is64(node->ty))
+      println("  ADDI32 r17, r0, %d", (int32_t)(node->val >> 32));
     return;
-  }
   case ND_NEG:
     gen_expr(node->lhs);
-
-    switch (node->ty->kind) {
-    case TY_FLOAT:
-      println("  mov $1, %%rax");
-      println("  shl $31, %%rax");
-      println("  movq %%rax, %%xmm1");
-      println("  xorps %%xmm1, %%xmm0");
-      return;
-    case TY_DOUBLE:
-      println("  mov $1, %%rax");
-      println("  shl $63, %%rax");
-      println("  movq %%rax, %%xmm1");
-      println("  xorpd %%xmm1, %%xmm0");
-      return;
-    case TY_LDOUBLE:
-      println("  fchs");
+    if (is_flonum(node->ty))
+      unsupported(node, node->ty);
+    if (is64(node->ty)) {             // −(上位:下位)：下位が 0 でなければ上位から 1 借りる
+      println("  SUBR32 r16, r0, r16");
+      println("  CMPNEI32 p1, r16, 0");
+      println("  BTOI32 r18, p1");
+      println("  SUBR32 r17, r0, r17");
+      println("  SUBR32 r17, r17, r18");
       return;
     }
-
-    println("  neg %%rax");
+    println("  SUBR32 r16, r0, r16");
     return;
   case ND_VAR:
+    // スカラーのローカル変数は、番地を作らずに直接読む
+    if (node->var->is_local && node->var->ty->kind != TY_VLA && is_integer(node->ty) && node->ty->size == 4) {
+      println("  LOAD32_32 r16, r31, %d", node->var->offset);
+      return;
+    }
+    if (node->var->is_local && node->ty->kind == TY_PTR) {
+      println("  LOAD32_32 r16, r31, %d", node->var->offset);
+      return;
+    }
     gen_addr(node);
-    load(node->ty);
+    load(node, node->ty);
     return;
   case ND_MEMBER: {
     gen_addr(node);
-    load(node->ty);
+    load(node, node->ty);
 
     Member *mem = node->member;
     if (mem->is_bitfield) {
-      println("  shl $%d, %%rax", 64 - mem->bit_width - mem->bit_offset);
+      if (is64(mem->ty))
+        error_tok(node->tok, "long long のビットフィールドはまだ使えない（MyCPU）");
+      println("  SHLI32 r16, r16, %d", 32 - mem->bit_width - mem->bit_offset);
       if (mem->ty->is_unsigned)
-        println("  shr $%d, %%rax", 64 - mem->bit_width);
+        println("  SHRI32 r16, r16, %d", 32 - mem->bit_width);
       else
-        println("  sar $%d, %%rax", 64 - mem->bit_width);
+        println("  SARI32 r16, r16, %d", 32 - mem->bit_width);
     }
     return;
   }
   case ND_DEREF:
     gen_expr(node->lhs);
-    load(node->ty);
+    load(node, node->ty);
     return;
   case ND_ADDR:
     gen_addr(node->lhs);
     return;
   case ND_ASSIGN:
+    // スカラーのローカル変数へは、直接書く
+    if (node->lhs->kind == ND_VAR && node->lhs->var->is_local && node->lhs->var->ty->kind != TY_VLA &&
+        (is_integer(node->ty) || node->ty->kind == TY_PTR) && node->ty->size == 4) {
+      gen_expr(node->rhs);
+      println("  STORE32_32 r16, r31, %d", node->lhs->var->offset);
+      return;
+    }
+
     gen_addr(node->lhs);
     push();
     gen_expr(node->rhs);
 
     if (node->lhs->kind == ND_MEMBER && node->lhs->member->is_bitfield) {
-      println("  mov %%rax, %%r8");
-
       // If the lhs is a bitfield, we need to read the current value
       // from memory and merge it with a new value.
       Member *mem = node->lhs->member;
-      println("  mov %%rax, %%rdi");
-      println("  and $%ld, %%rdi", (1L << mem->bit_width) - 1);
-      println("  shl $%d, %%rdi", mem->bit_offset);
-
-      println("  mov (%%rsp), %%rax");
-      load(mem->ty);
-
-      long mask = ((1L << mem->bit_width) - 1) << mem->bit_offset;
-      println("  mov $%ld, %%r9", ~mask);
-      println("  and %%r9, %%rax");
-      println("  or %%rdi, %%rax");
-      store(node->ty);
-      println("  mov %%r8, %%rax");
+      if (is64(mem->ty))
+        error_tok(node->tok, "long long のビットフィールドはまだ使えない（MyCPU）");
+      uint32_t field = mem->bit_width >= 32 ? 0xFFFFFFFFu : ((1u << mem->bit_width) - 1);
+      uint32_t mask = field << mem->bit_offset;
+      println("  ADDR32 r22, r16, r0");          // 書く値（式の値として最後に戻す）
+      println("  ANDI32 r19, r16, %d", (int32_t)field);
+      println("  SHLI32 r19, r19, %d", mem->bit_offset);
+      println("  LOAD32_32 r16, sp, 0");         // 番地
+      load(node, mem->ty);
+      println("  ANDI32 r16, r16, %d", (int32_t)~mask);
+      println("  ORR32 r16, r16, r19");
+      store(node, node->ty);
+      println("  ADDR32 r16, r22, r0");
       return;
     }
 
-    store(node->ty);
+    store(node, node->ty);
     return;
   case ND_STMT_EXPR:
     for (Node *n = node->body; n; n = n->next)
@@ -812,454 +721,290 @@ static void gen_expr(Node *node) {
     return;
   case ND_CAST:
     gen_expr(node->lhs);
-    cast(node->lhs->ty, node->ty);
+    cast(node, node->lhs->ty, node->ty);
     return;
-  case ND_MEMZERO:
-    // `rep stosb` is equivalent to `memset(%rdi, %al, %rcx)`.
-    println("  mov $%d, %%rcx", node->var->ty->size);
-    println("  lea %d(%%rbp), %%rdi", node->var->offset);
-    println("  mov $0, %%al");
-    println("  rep stosb");
+  case ND_MEMZERO: {
+    int size = node->var->ty->size;
+    if (size <= 64 && size % 4 == 0 && node->var->align >= 4 && node->var->offset % 4 == 0) {
+      for (int i = 0; i < size; i += 4)
+        println("  STORE32_32 r0, r31, %d", node->var->offset + i);
+      return;
+    }
+    int c = count();
+    println("  ADDI32 r17, r31, %d", node->var->offset);
+    println("  ADDI32 r18, r17, %d", size);
+    println("L%s.z.%d:", fid, c);
+    println("  CMPGEUR32 p1, r17, r18");
+    println("  BR32 p1, L%s.zd.%d", fid, c);
+    println("  STORE8_32 r0, r17, 0");
+    println("  ADDI32 r17, r17, 1");
+    println("  JMP32 L%s.z.%d", fid, c);
+    println("L%s.zd.%d:", fid, c);
     return;
+  }
   case ND_COND: {
     int c = count();
     gen_expr(node->cond);
-    cmp_zero(node->cond->ty);
-    println("  je .L.else.%d", c);
+    jump_if_zero(node->cond->ty, format("L%s.else.%d", fid, c));
     gen_expr(node->then);
-    println("  jmp .L.end.%d", c);
-    println(".L.else.%d:", c);
+    println("  JMP32 L%s.end.%d", fid, c);
+    println("L%s.else.%d:", fid, c);
     gen_expr(node->els);
-    println(".L.end.%d:", c);
+    println("L%s.end.%d:", fid, c);
     return;
   }
   case ND_NOT:
     gen_expr(node->lhs);
-    cmp_zero(node->lhs->ty);
-    println("  sete %%al");
-    println("  movzx %%al, %%rax");
+    if (is64(node->lhs->ty))
+      println("  ORR32 r16, r16, r17");
+    println("  CMPEQI32 p1, r16, 0");
+    println("  BTOI32 r16, p1");
     return;
   case ND_BITNOT:
     gen_expr(node->lhs);
-    println("  not %%rax");
+    println("  XORI32 r16, r16, -1");
+    if (is64(node->ty))
+      println("  XORI32 r17, r17, -1");
     return;
   case ND_LOGAND: {
     int c = count();
     gen_expr(node->lhs);
-    cmp_zero(node->lhs->ty);
-    println("  je .L.false.%d", c);
+    jump_if_zero(node->lhs->ty, format("L%s.false.%d", fid, c));
     gen_expr(node->rhs);
-    cmp_zero(node->rhs->ty);
-    println("  je .L.false.%d", c);
-    println("  mov $1, %%rax");
-    println("  jmp .L.end.%d", c);
-    println(".L.false.%d:", c);
-    println("  mov $0, %%rax");
-    println(".L.end.%d:", c);
+    jump_if_zero(node->rhs->ty, format("L%s.false.%d", fid, c));
+    println("  ADDI32 r16, r0, 1");
+    println("  JMP32 L%s.end.%d", fid, c);
+    println("L%s.false.%d:", fid, c);
+    println("  ADDI32 r16, r0, 0");
+    println("L%s.end.%d:", fid, c);
     return;
   }
   case ND_LOGOR: {
     int c = count();
     gen_expr(node->lhs);
-    cmp_zero(node->lhs->ty);
-    println("  jne .L.true.%d", c);
+    jump_if_nonzero(node->lhs->ty, format("L%s.true.%d", fid, c));
     gen_expr(node->rhs);
-    cmp_zero(node->rhs->ty);
-    println("  jne .L.true.%d", c);
-    println("  mov $0, %%rax");
-    println("  jmp .L.end.%d", c);
-    println(".L.true.%d:", c);
-    println("  mov $1, %%rax");
-    println(".L.end.%d:", c);
+    jump_if_nonzero(node->rhs->ty, format("L%s.true.%d", fid, c));
+    println("  ADDI32 r16, r0, 0");
+    println("  JMP32 L%s.end.%d", fid, c);
+    println("L%s.true.%d:", fid, c);
+    println("  ADDI32 r16, r0, 1");
+    println("L%s.end.%d:", fid, c);
     return;
   }
   case ND_FUNCALL: {
     if (node->lhs->kind == ND_VAR && !strcmp(node->lhs->var->name, "alloca")) {
       gen_expr(node->args);
-      println("  mov %%rax, %%rdi");
+      println("  ADDR32 r17, r16, r0");
       builtin_alloca();
       return;
     }
 
     int stack_args = push_args(node);
-    gen_expr(node->lhs);
 
-    int gp = 0, fp = 0;
-
-    // If the return type is a large struct/union, the caller passes
-    // a pointer to a buffer as if it were the first argument.
-    if (node->ret_buffer && node->ty->size > 16)
-      pop(argreg64[gp++]);
-
-    for (Node *arg = node->args; arg; arg = arg->next) {
-      Type *ty = arg->ty;
-
-      switch (ty->kind) {
-      case TY_STRUCT:
-      case TY_UNION:
-        if (ty->size > 16)
-          continue;
-
-        bool fp1 = has_flonum1(ty);
-        bool fp2 = has_flonum2(ty);
-
-        if (fp + fp1 + fp2 < FP_MAX && gp + !fp1 + !fp2 < GP_MAX) {
-          if (fp1)
-            popf(fp++);
-          else
-            pop(argreg64[gp++]);
-
-          if (ty->size > 8) {
-            if (fp2)
-              popf(fp++);
-            else
-              pop(argreg64[gp++]);
-          }
-        }
-        break;
-      case TY_FLOAT:
-      case TY_DOUBLE:
-        if (fp < FP_MAX)
-          popf(fp++);
-        break;
-      case TY_LDOUBLE:
-        break;
-      default:
-        if (gp < GP_MAX)
-          pop(argreg64[gp++]);
-      }
+    // 名前の決まった関数は直接 CALL32。関数ポインタは r22 に入れて CALLR32
+    bool direct = node->lhs->kind == ND_VAR && !node->lhs->var->is_local && node->lhs->var->ty->kind == TY_FUNC;
+    if (!direct) {
+      gen_expr(node->lhs);
+      println("  ADDR32 r22, r16, r0");
     }
 
-    println("  mov %%rax, %%r10");
-    println("  mov $%d, %%rax", fp);
-    println("  call *%%r10");
-    println("  add $%d, %%rsp", stack_args * 8);
+    int gp = 0;
+    if (node->ret_buffer)
+      pop(16 + gp++);
+    for (Node *arg = node->args; arg; arg = arg->next)
+      if (!arg->pass_by_stack)
+        pop(16 + gp++);
 
-    depth -= stack_args;
+    if (direct)
+      println("  CALL32 %s", sym_name(node->lhs->var->name));
+    else
+      println("  CALLR32 r22");
 
-    // It looks like the most significant 48 or 56 bits in RAX may
-    // contain garbage if a function return type is short or bool/char,
-    // respectively. We clear the upper bits here.
+    if (stack_args) {
+      println("  ADDI32 sp, sp, %d", stack_args * 8);
+      depth -= stack_args;
+    }
+
     switch (node->ty->kind) {
     case TY_BOOL:
-      println("  movzx %%al, %%eax");
+      println("  ANDI32 r16, r16, 1");
       return;
     case TY_CHAR:
-      if (node->ty->is_unsigned)
-        println("  movzbl %%al, %%eax");
-      else
-        println("  movsbl %%al, %%eax");
+      if (node->ty->is_unsigned) {
+        println("  ANDI32 r16, r16, 0xFF");
+      } else {
+        println("  SHLI32 r16, r16, 24");
+        println("  SARI32 r16, r16, 24");
+      }
       return;
     case TY_SHORT:
-      if (node->ty->is_unsigned)
-        println("  movzwl %%ax, %%eax");
-      else
-        println("  movswl %%ax, %%eax");
+      if (node->ty->is_unsigned) {
+        println("  ANDI32 r16, r16, 0xFFFF");
+      } else {
+        println("  SHLI32 r16, r16, 16");
+        println("  SARI32 r16, r16, 16");
+      }
       return;
     }
 
-    // If the return type is a small struct, a value is returned
-    // using up to two registers.
-    if (node->ret_buffer && node->ty->size <= 16) {
-      copy_ret_buffer(node->ret_buffer);
-      println("  lea %d(%%rbp), %%rax", node->ret_buffer->offset);
-    }
-
+    // 構造体を返す関数：値は渡したバッファに入っている
+    if (node->ret_buffer)
+      println("  ADDI32 r16, r31, %d", node->ret_buffer->offset);
     return;
   }
   case ND_LABEL_VAL:
-    println("  lea %s(%%rip), %%rax", node->unique_label);
+    println("  ADDI32 r16, r0, %s", sym_name(node->unique_label));
     return;
   case ND_CAS: {
+    // 割り込みのない 1 つの CPU なので、ふつうに読んで比べて書く
+    int sz = node->cas_addr->ty->base->size;
+    if (sz > 4)
+      error_tok(node->tok, "8 バイトの __builtin_compare_and_swap はまだ使えない（MyCPU）");
+    char *ld = sz == 1 ? "LOAD8U_32" : sz == 2 ? "LOAD16U_32" : "LOAD32_32";
+    char *st = sz == 1 ? "STORE8_32" : sz == 2 ? "STORE16_32" : "STORE32_32";
+    int c = count();
     gen_expr(node->cas_addr);
     push();
     gen_expr(node->cas_new);
     push();
     gen_expr(node->cas_old);
-    println("  mov %%rax, %%r8");
-    load(node->cas_old->ty->base);
-    pop("%rdx"); // new
-    pop("%rdi"); // addr
-
-    int sz = node->cas_addr->ty->base->size;
-    println("  lock cmpxchg %s, (%%rdi)", reg_dx(sz));
-    println("  sete %%cl");
-    println("  je 1f");
-    println("  mov %s, (%%r8)", reg_ax(sz));
-    println("1:");
-    println("  movzbl %%cl, %%eax");
+    println("  ADDR32 r20, r16, r0");          // old の番地
+    pop(17);                                     // new
+    pop(18);                                     // addr
+    println("  %s r19, r20, 0", ld);            // 期待する値
+    println("  %s r21, r18, 0", ld);            // 今の値
+    println("  CMPEQR32 p1, r19, r21");
+    println("  BR32 p1, L%s.cas.%d", fid, c);
+    println("  %s r21, r20, 0", st);
+    println("  ADDI32 r16, r0, 0");
+    println("  JMP32 L%s.casd.%d", fid, c);
+    println("L%s.cas.%d:", fid, c);
+    println("  %s r17, r18, 0", st);
+    println("  ADDI32 r16, r0, 1");
+    println("L%s.casd.%d:", fid, c);
     return;
   }
   case ND_EXCH: {
+    int sz = node->lhs->ty->base->size;
+    if (sz > 4)
+      error_tok(node->tok, "8 バイトの __builtin_atomic_exchange はまだ使えない（MyCPU）");
     gen_expr(node->lhs);
     push();
     gen_expr(node->rhs);
-    pop("%rdi");
-
-    int sz = node->lhs->ty->base->size;
-    println("  xchg %s, (%%rdi)", reg_ax(sz));
-    return;
-  }
-  }
-
-  switch (node->lhs->ty->kind) {
-  case TY_FLOAT:
-  case TY_DOUBLE: {
-    gen_expr(node->rhs);
-    pushf();
-    gen_expr(node->lhs);
-    popf(1);
-
-    char *sz = (node->lhs->ty->kind == TY_FLOAT) ? "ss" : "sd";
-
-    switch (node->kind) {
-    case ND_ADD:
-      println("  add%s %%xmm1, %%xmm0", sz);
-      return;
-    case ND_SUB:
-      println("  sub%s %%xmm1, %%xmm0", sz);
-      return;
-    case ND_MUL:
-      println("  mul%s %%xmm1, %%xmm0", sz);
-      return;
-    case ND_DIV:
-      println("  div%s %%xmm1, %%xmm0", sz);
-      return;
-    case ND_EQ:
-    case ND_NE:
-    case ND_LT:
-    case ND_LE:
-      println("  ucomi%s %%xmm0, %%xmm1", sz);
-
-      if (node->kind == ND_EQ) {
-        println("  sete %%al");
-        println("  setnp %%dl");
-        println("  and %%dl, %%al");
-      } else if (node->kind == ND_NE) {
-        println("  setne %%al");
-        println("  setp %%dl");
-        println("  or %%dl, %%al");
-      } else if (node->kind == ND_LT) {
-        println("  seta %%al");
-      } else {
-        println("  setae %%al");
-      }
-
-      println("  and $1, %%al");
-      println("  movzb %%al, %%rax");
-      return;
-    }
-
-    error_tok(node->tok, "invalid expression");
-  }
-  case TY_LDOUBLE: {
-    gen_expr(node->lhs);
-    gen_expr(node->rhs);
-
-    switch (node->kind) {
-    case ND_ADD:
-      println("  faddp");
-      return;
-    case ND_SUB:
-      println("  fsubrp");
-      return;
-    case ND_MUL:
-      println("  fmulp");
-      return;
-    case ND_DIV:
-      println("  fdivrp");
-      return;
-    case ND_EQ:
-    case ND_NE:
-    case ND_LT:
-    case ND_LE:
-      println("  fcomip");
-      println("  fstp %%st(0)");
-
-      if (node->kind == ND_EQ)
-        println("  sete %%al");
-      else if (node->kind == ND_NE)
-        println("  setne %%al");
-      else if (node->kind == ND_LT)
-        println("  seta %%al");
-      else
-        println("  setae %%al");
-
-      println("  movzb %%al, %%rax");
-      return;
-    }
-
-    error_tok(node->tok, "invalid expression");
-  }
-  }
-
-  gen_expr(node->rhs);
-  push();
-  gen_expr(node->lhs);
-  pop("%rdi");
-
-  char *ax, *di, *dx;
-
-  if (node->lhs->ty->kind == TY_LONG || node->lhs->ty->base) {
-    ax = "%rax";
-    di = "%rdi";
-    dx = "%rdx";
-  } else {
-    ax = "%eax";
-    di = "%edi";
-    dx = "%edx";
-  }
-
-  switch (node->kind) {
-  case ND_ADD:
-    println("  add %s, %s", di, ax);
-    return;
-  case ND_SUB:
-    println("  sub %s, %s", di, ax);
-    return;
-  case ND_MUL:
-    println("  imul %s, %s", di, ax);
-    return;
-  case ND_DIV:
-  case ND_MOD:
-    if (node->ty->is_unsigned) {
-      println("  mov $0, %s", dx);
-      println("  div %s", di);
+    pop(17);
+    if (sz == 4) {
+      println("  SWAP32 r16, r17, r16, 0");
     } else {
-      if (node->lhs->ty->size == 8)
-        println("  cqo");
-      else
-        println("  cdq");
-      println("  idiv %s", di);
+      println("  ADDR32 r18, r16, r0");
+      println("  %s r16, r17, 0", sz == 1 ? "LOAD8U_32" : "LOAD16U_32");
+      println("  %s r18, r17, 0", sz == 1 ? "STORE8_32" : "STORE16_32");
     }
-
-    if (node->kind == ND_MOD)
-      println("  mov %%rdx, %%rax");
-    return;
-  case ND_BITAND:
-    println("  and %s, %s", di, ax);
-    return;
-  case ND_BITOR:
-    println("  or %s, %s", di, ax);
-    return;
-  case ND_BITXOR:
-    println("  xor %s, %s", di, ax);
-    return;
-  case ND_EQ:
-  case ND_NE:
-  case ND_LT:
-  case ND_LE:
-    println("  cmp %s, %s", di, ax);
-
-    if (node->kind == ND_EQ) {
-      println("  sete %%al");
-    } else if (node->kind == ND_NE) {
-      println("  setne %%al");
-    } else if (node->kind == ND_LT) {
-      if (node->lhs->ty->is_unsigned)
-        println("  setb %%al");
-      else
-        println("  setl %%al");
-    } else if (node->kind == ND_LE) {
-      if (node->lhs->ty->is_unsigned)
-        println("  setbe %%al");
-      else
-        println("  setle %%al");
-    }
-
-    println("  movzb %%al, %%rax");
-    return;
-  case ND_SHL:
-    println("  mov %%rdi, %%rcx");
-    println("  shl %%cl, %s", ax);
-    return;
-  case ND_SHR:
-    println("  mov %%rdi, %%rcx");
-    if (node->lhs->ty->is_unsigned)
-      println("  shr %%cl, %s", ax);
-    else
-      println("  sar %%cl, %s", ax);
     return;
   }
+  }
 
-  error_tok(node->tok, "invalid expression");
+  if (is_flonum(node->lhs->ty))
+    unsupported(node, node->lhs->ty);
+
+  // 右を積んでから左を求める。右は 32bit なら r17、long long なら r18・r19
+  // （シフトの右は左と型が違うことがある。そのときは下位だけ使う）
+  gen_expr(node->rhs);
+  push_val(node->rhs->ty);
+  gen_expr(node->lhs);
+  if (is64(node->lhs->ty)) {
+    if (is64(node->rhs->ty))
+      pop64(18, 19);
+    else
+      pop(18);
+    gen_binary64(node);
+    return;
+  }
+  if (is64(node->rhs->ty))
+    pop64(17, 18);
+  else
+    pop(17);
+  gen_binary(node);
 }
 
 static void gen_stmt(Node *node) {
-  println("  .loc %d %d", node->tok->file->file_no, node->tok->line_no);
-
   switch (node->kind) {
   case ND_IF: {
     int c = count();
     gen_expr(node->cond);
-    cmp_zero(node->cond->ty);
-    println("  je  .L.else.%d", c);
+    jump_if_zero(node->cond->ty, format("L%s.else.%d", fid, c));
     gen_stmt(node->then);
-    println("  jmp .L.end.%d", c);
-    println(".L.else.%d:", c);
+    println("  JMP32 L%s.end.%d", fid, c);
+    println("L%s.else.%d:", fid, c);
     if (node->els)
       gen_stmt(node->els);
-    println(".L.end.%d:", c);
+    println("L%s.end.%d:", fid, c);
     return;
   }
   case ND_FOR: {
     int c = count();
     if (node->init)
       gen_stmt(node->init);
-    println(".L.begin.%d:", c);
+    println("L%s.begin.%d:", fid, c);
     if (node->cond) {
       gen_expr(node->cond);
-      cmp_zero(node->cond->ty);
-      println("  je %s", node->brk_label);
+      jump_if_zero(node->cond->ty, sym_name(node->brk_label));
     }
     gen_stmt(node->then);
-    println("%s:", node->cont_label);
+    println("%s:", sym_name(node->cont_label));
     if (node->inc)
       gen_expr(node->inc);
-    println("  jmp .L.begin.%d", c);
-    println("%s:", node->brk_label);
+    println("  JMP32 L%s.begin.%d", fid, c);
+    println("%s:", sym_name(node->brk_label));
     return;
   }
   case ND_DO: {
     int c = count();
-    println(".L.begin.%d:", c);
+    println("L%s.begin.%d:", fid, c);
     gen_stmt(node->then);
-    println("%s:", node->cont_label);
+    println("%s:", sym_name(node->cont_label));
     gen_expr(node->cond);
-    cmp_zero(node->cond->ty);
-    println("  jne .L.begin.%d", c);
-    println("%s:", node->brk_label);
+    jump_if_nonzero(node->cond->ty, format("L%s.begin.%d", fid, c));
+    println("%s:", sym_name(node->brk_label));
     return;
   }
   case ND_SWITCH:
     gen_expr(node->cond);
 
     for (Node *n = node->case_next; n; n = n->case_next) {
-      char *ax = (node->cond->ty->size == 8) ? "%rax" : "%eax";
-      char *di = (node->cond->ty->size == 8) ? "%rdi" : "%edi";
-
-      if (n->begin == n->end) {
-        println("  cmp $%ld, %s", n->begin, ax);
-        println("  je %s", n->label);
+      if (is64(node->cond->ty)) {      // long long：上位と下位の両方が同じか
+        if (n->begin != n->end)
+          error_tok(n->tok, "long long の case の範囲はまだ使えない（MyCPU）");
+        println("  XORI32 r20, r16, %d", (int32_t)n->begin);
+        println("  XORI32 r21, r17, %d", (int32_t)(n->begin >> 32));
+        println("  ORR32 r20, r20, r21");
+        println("  CMPEQI32 p1, r20, 0");
+        println("  BR32 p1, %s", sym_name(n->label));
         continue;
       }
 
-      // [GNU] Case ranges
-      println("  mov %s, %s", ax, di);
-      println("  sub $%ld, %s", n->begin, di);
-      println("  cmp $%ld, %s", n->end - n->begin, di);
-      println("  jbe %s", n->label);
+      if (n->begin == n->end) {
+        println("  CMPEQI32 p1, r16, %d", (int32_t)n->begin);
+        println("  BR32 p1, %s", sym_name(n->label));
+        continue;
+      }
+
+      // [GNU] Case ranges：begin ≦ 値 ≦ end は（値 − begin）≦（end − begin）（符号なし）
+      println("  ADDI32 r17, r16, %d", (int32_t)-n->begin);
+      println("  ADDI32 r18, r0, %d", (int32_t)(n->end - n->begin));
+      println("  CMPGEUR32 p1, r18, r17");
+      println("  BR32 p1, %s", sym_name(n->label));
     }
 
     if (node->default_case)
-      println("  jmp %s", node->default_case->label);
+      println("  JMP32 %s", sym_name(node->default_case->label));
 
-    println("  jmp %s", node->brk_label);
+    println("  JMP32 %s", sym_name(node->brk_label));
     gen_stmt(node->then);
-    println("%s:", node->brk_label);
+    println("%s:", sym_name(node->brk_label));
     return;
   case ND_CASE:
-    println("%s:", node->label);
+    println("%s:", sym_name(node->label));
     gen_stmt(node->lhs);
     return;
   case ND_BLOCK:
@@ -1267,14 +1012,14 @@ static void gen_stmt(Node *node) {
       gen_stmt(n);
     return;
   case ND_GOTO:
-    println("  jmp %s", node->unique_label);
+    println("  JMP32 %s", sym_name(node->unique_label));
     return;
   case ND_GOTO_EXPR:
     gen_expr(node->lhs);
-    println("  jmp *%%rax");
+    println("  JMPR32 r16");
     return;
   case ND_LABEL:
-    println("%s:", node->unique_label);
+    println("%s:", sym_name(node->unique_label));
     gen_stmt(node->lhs);
     return;
   case ND_RETURN:
@@ -1282,18 +1027,14 @@ static void gen_stmt(Node *node) {
       gen_expr(node->lhs);
       Type *ty = node->lhs->ty;
 
-      switch (ty->kind) {
-      case TY_STRUCT:
-      case TY_UNION:
-        if (ty->size <= 16)
-          copy_struct_reg();
-        else
-          copy_struct_mem();
-        break;
+      // 構造体：隠れた最初の引数（呼ぶ側のバッファ）へ写す
+      if (ty->kind == TY_STRUCT || ty->kind == TY_UNION) {
+        println("  LOAD32_32 r17, r31, %d", current_fn->params->offset);
+        copy_bytes(17, 0, 16, ty->size, ty->align);
       }
     }
 
-    println("  jmp .L.return.%s", current_fn->name);
+    println("  JMP32 L%s.ret.%s", fid, current_fn->name);
     return;
   case ND_EXPR_STMT:
     gen_expr(node->lhs);
@@ -1312,162 +1053,103 @@ static void assign_lvar_offsets(Obj *prog) {
     if (!fn->is_function)
       continue;
 
-    // If a function has many parameters, some parameters are
-    // inevitably passed by stack rather than by register.
-    // The first passed-by-stack parameter resides at RBP+16.
-    int top = 16;
+    // スタックで渡された引数は [r31 + 8] から 8 バイトずつ
+    int top = 8;
     int bottom = 0;
+    int gp = 0;
 
-    int gp = 0, fp = 0;
-
-    // Assign offsets to pass-by-stack parameters.
     for (Obj *var = fn->params; var; var = var->next) {
       Type *ty = var->ty;
+      if (is_flonum(ty))
+        error("%s: float / double の引数はまだ使えない（MyCPU）", fn->name);
 
-      switch (ty->kind) {
-      case TY_STRUCT:
-      case TY_UNION:
-        if (ty->size <= 16) {
-          bool fp1 = has_flonum(ty, 0, 8, 0);
-          bool fp2 = has_flonum(ty, 8, 16, 8);
-          if (fp + fp1 + fp2 < FP_MAX && gp + !fp1 + !fp2 < GP_MAX) {
-            fp = fp + fp1 + fp2;
-            gp = gp + !fp1 + !fp2;
-            continue;
-          }
-        }
-        break;
-      case TY_FLOAT:
-      case TY_DOUBLE:
-        if (fp++ < FP_MAX)
-          continue;
-        break;
-      case TY_LDOUBLE:
-        break;
-      default:
-        if (gp++ < GP_MAX)
-          continue;
-      }
+      if (ty->kind != TY_STRUCT && ty->kind != TY_UNION && !is64(ty) && gp++ < GP_MAX)
+        continue;
 
-      top = align_to(top, 8);
       var->offset = top;
-      top += var->ty->size;
+      top += align_to(ty->size, 8);
     }
 
-    // Assign offsets to pass-by-register parameters and local variables.
+    // レジスタで渡された引数とローカル変数
     for (Obj *var = fn->locals; var; var = var->next) {
       if (var->offset)
         continue;
 
-      // AMD64 System V ABI has a special alignment rule for an array of
-      // length at least 16 bytes. We need to align such array to at least
-      // 16-byte boundaries. See p.14 of
-      // https://github.com/hjl-tools/x86-psABI/wiki/x86-64-psABI-draft.pdf.
-      int align = (var->ty->kind == TY_ARRAY && var->ty->size >= 16)
-        ? MAX(16, var->align) : var->align;
-
+      // 16 バイト以上の配列は 4 の倍数の番地に（memcpy などが 4 バイトずつ動けるように）
+      int align = (var->ty->kind == TY_ARRAY && var->ty->size >= 16 && var->align < 4) ? 4 : var->align;
       bottom += var->ty->size;
       bottom = align_to(bottom, align);
       var->offset = -bottom;
     }
 
-    fn->stack_size = align_to(bottom, 16);
+    fn->stack_size = align_to(bottom, 8);
   }
 }
 
 static void emit_data(Obj *prog) {
+  println("; @data");
   for (Obj *var = prog; var; var = var->next) {
     if (var->is_function || !var->is_definition)
       continue;
 
-    if (var->is_static)
-      println("  .local %s", var->name);
-    else
-      println("  .globl %s", var->name);
-
-    int align = (var->ty->kind == TY_ARRAY && var->ty->size >= 16)
-      ? MAX(16, var->align) : var->align;
-
-    // Common symbol
-    if (opt_fcommon && var->is_tentative) {
-      println("  .comm %s, %d, %d", var->name, var->ty->size, align);
+    // 初期値なしの大域変数（int x; など）は、ほかのファイルの同じ名前とまとめる（tools/cc.js が置く）
+    if (opt_fcommon && var->is_tentative && !var->is_static) {
+      println("; @common %s %d %d", sym_name(var->name), var->ty->size, var->align);
       continue;
     }
 
-    // .data or .tdata
+    println("  .align %d", var->align < 4 ? 4 : var->align);
+    println("%s:", sym_name(var->name));
+
+    // 初期値あり：ポインタ（ほかの大域の番地）は .word、それ以外は 1 バイトずつ
     if (var->init_data) {
-      if (var->is_tls)
-        println("  .section .tdata,\"awT\",@progbits");
-      else
-        println("  .data");
-
-      println("  .type %s, @object", var->name);
-      println("  .size %s, %d", var->name, var->ty->size);
-      println("  .align %d", align);
-      println("%s:", var->name);
-
       Relocation *rel = var->rel;
       int pos = 0;
       while (pos < var->ty->size) {
         if (rel && rel->offset == pos) {
-          println("  .quad %s%+ld", *rel->label, rel->addend);
+          int32_t add = (int32_t)rel->addend;
+          println("  .word %s %c %d", sym_name(*rel->label), add < 0 ? '-' : '+', add < 0 ? -add : add);
           rel = rel->next;
-          pos += 8;
-        } else {
-          println("  .byte %d", var->init_data[pos++]);
+          pos += 4;
+          continue;
+        }
+
+        // 次のポインタか終わりまでを、16 バイトずつまとめて書く
+        int end = rel ? rel->offset : var->ty->size;
+        while (pos < end) {
+          int n = end - pos < 16 ? end - pos : 16;
+          fprintf(output_file, "  .byte ");
+          for (int i = 0; i < n; i++)
+            fprintf(output_file, i ? ", %d" : "%d", (unsigned char)var->init_data[pos + i]);
+          fprintf(output_file, "\n");
+          pos += n;
         }
       }
       continue;
     }
 
-    // .bss or .tbss
-    if (var->is_tls)
-      println("  .section .tbss,\"awT\",@nobits");
-    else
-      println("  .bss");
-
-    println("  .align %d", align);
-    println("%s:", var->name);
-    println("  .zero %d", var->ty->size);
+    // 初期値なし（0 で埋める）
+    println("  .space %d", var->ty->size);
   }
-}
-
-static void store_fp(int r, int offset, int sz) {
-  switch (sz) {
-  case 4:
-    println("  movss %%xmm%d, %d(%%rbp)", r, offset);
-    return;
-  case 8:
-    println("  movsd %%xmm%d, %d(%%rbp)", r, offset);
-    return;
-  }
-  unreachable();
 }
 
 static void store_gp(int r, int offset, int sz) {
   switch (sz) {
   case 1:
-    println("  mov %s, %d(%%rbp)", argreg8[r], offset);
+    println("  STORE8_32 r%d, r31, %d", 16 + r, offset);
     return;
   case 2:
-    println("  mov %s, %d(%%rbp)", argreg16[r], offset);
+    println("  STORE16_32 r%d, r31, %d", 16 + r, offset);
     return;
   case 4:
-    println("  mov %s, %d(%%rbp)", argreg32[r], offset);
-    return;
-  case 8:
-    println("  mov %s, %d(%%rbp)", argreg64[r], offset);
-    return;
-  default:
-    for (int i = 0; i < sz; i++) {
-      println("  mov %s, %d(%%rbp)", argreg8[r], offset + i);
-      println("  shr $8, %s", argreg64[r]);
-    }
+    println("  STORE32_32 r%d, r31, %d", 16 + r, offset);
     return;
   }
+  unreachable();
 }
 
 static void emit_text(Obj *prog) {
+  println("; @text");
   for (Obj *fn = prog; fn; fn = fn->next) {
     if (!fn->is_function || !fn->is_definition)
       continue;
@@ -1477,90 +1159,44 @@ static void emit_text(Obj *prog) {
     if (!fn->is_live)
       continue;
 
-    if (fn->is_static)
-      println("  .local %s", fn->name);
-    else
-      println("  .globl %s", fn->name);
-
-    println("  .text");
-    println("  .type %s, @function", fn->name);
-    println("%s:", fn->name);
+    println("%s:", sym_name(fn->name));
     current_fn = fn;
 
-    // Prologue
-    println("  push %%rbp");
-    println("  mov %%rsp, %%rbp");
-    println("  sub $%d, %%rsp", fn->stack_size);
-    println("  mov %%rsp, %d(%%rbp)", fn->alloca_bottom->offset);
+    // Prologue：lr と r31 を積み、r31 をフレームの基準にして、ローカル変数の分だけ SP を下げる
+    println("  ADDI32 sp, sp, -8");
+    println("  STORE32_32 lr, sp, 0");
+    println("  STORE32_32 r31, sp, 4");
+    println("  ADDR32 r31, sp, r0");
+    if (fn->stack_size)
+      println("  ADDI32 sp, sp, %d", -fn->stack_size);
+    println("  STORE32_32 sp, r31, %d", fn->alloca_bottom->offset);
 
-    // Save arg registers if function is variadic
+    // 可変長引数の関数：レジスタの引数を並べて置き、va_list の元（__va_area__）を作る
+    //   [off] = 次に読むレジスタの引数（バイト）、[off + 4] = スタックの引数、[off + 8] = レジスタの引数の置き場
+    //   [off + 16] 〜 = r16〜r21（8 バイトずつ）
     if (fn->va_area) {
-      int gp = 0, fp = 0;
-      for (Obj *var = fn->params; var; var = var->next) {
-        if (is_flonum(var->ty))
-          fp++;
-        else
+      int gp = 0;                      // レジスタで来た名前付きの引数の数
+      for (Obj *var = fn->params; var; var = var->next)
+        if (var->ty->kind != TY_STRUCT && var->ty->kind != TY_UNION && !is64(var->ty) && gp < GP_MAX)
           gp++;
-      }
 
       int off = fn->va_area->offset;
-
-      // va_elem
-      println("  movl $%d, %d(%%rbp)", gp * 8, off);          // gp_offset
-      println("  movl $%d, %d(%%rbp)", fp * 8 + 48, off + 4); // fp_offset
-      println("  movq %%rbp, %d(%%rbp)", off + 8);            // overflow_arg_area
-      println("  addq $16, %d(%%rbp)", off + 8);
-      println("  movq %%rbp, %d(%%rbp)", off + 16);           // reg_save_area
-      println("  addq $%d, %d(%%rbp)", off + 24, off + 16);
-
-      // __reg_save_area__
-      println("  movq %%rdi, %d(%%rbp)", off + 24);
-      println("  movq %%rsi, %d(%%rbp)", off + 32);
-      println("  movq %%rdx, %d(%%rbp)", off + 40);
-      println("  movq %%rcx, %d(%%rbp)", off + 48);
-      println("  movq %%r8, %d(%%rbp)", off + 56);
-      println("  movq %%r9, %d(%%rbp)", off + 64);
-      println("  movsd %%xmm0, %d(%%rbp)", off + 72);
-      println("  movsd %%xmm1, %d(%%rbp)", off + 80);
-      println("  movsd %%xmm2, %d(%%rbp)", off + 88);
-      println("  movsd %%xmm3, %d(%%rbp)", off + 96);
-      println("  movsd %%xmm4, %d(%%rbp)", off + 104);
-      println("  movsd %%xmm5, %d(%%rbp)", off + 112);
-      println("  movsd %%xmm6, %d(%%rbp)", off + 120);
-      println("  movsd %%xmm7, %d(%%rbp)", off + 128);
+      println("  ADDI32 r22, r0, %d", gp * 8);
+      println("  STORE32_32 r22, r31, %d", off);
+      println("  ADDI32 r22, r31, 8");
+      println("  STORE32_32 r22, r31, %d", off + 4);
+      println("  ADDI32 r22, r31, %d", off + 16);
+      println("  STORE32_32 r22, r31, %d", off + 8);
+      for (int i = 0; i < GP_MAX; i++)
+        println("  STORE32_32 r%d, r31, %d", 16 + i, off + 16 + i * 8);
     }
 
     // Save passed-by-register arguments to the stack
-    int gp = 0, fp = 0;
+    int gp = 0;
     for (Obj *var = fn->params; var; var = var->next) {
       if (var->offset > 0)
         continue;
-
-      Type *ty = var->ty;
-
-      switch (ty->kind) {
-      case TY_STRUCT:
-      case TY_UNION:
-        assert(ty->size <= 16);
-        if (has_flonum(ty, 0, 8, 0))
-          store_fp(fp++, var->offset, MIN(8, ty->size));
-        else
-          store_gp(gp++, var->offset, MIN(8, ty->size));
-
-        if (ty->size > 8) {
-          if (has_flonum(ty, 8, 16, 0))
-            store_fp(fp++, var->offset + 8, ty->size - 8);
-          else
-            store_gp(gp++, var->offset + 8, ty->size - 8);
-        }
-        break;
-      case TY_FLOAT:
-      case TY_DOUBLE:
-        store_fp(fp++, var->offset, ty->size);
-        break;
-      default:
-        store_gp(gp++, var->offset, ty->size);
-      }
+      store_gp(gp++, var->offset, var->ty->size);
     }
 
     // Emit code
@@ -1572,23 +1208,32 @@ static void emit_text(Obj *prog) {
     // main function is equivalent to returning 0, even though the
     // behavior is undefined for the other functions.
     if (strcmp(fn->name, "main") == 0)
-      println("  mov $0, %%rax");
+      println("  ADDI32 r16, r0, 0");
 
     // Epilogue
-    println(".L.return.%s:", fn->name);
-    println("  mov %%rbp, %%rsp");
-    println("  pop %%rbp");
-    println("  ret");
+    println("L%s.ret.%s:", fid, fn->name);
+    println("  ADDR32 sp, r31, r0");
+    println("  LOAD32_32 lr, sp, 0");
+    println("  LOAD32_32 r31, sp, 4");
+    println("  ADDI32 sp, sp, 8");
+    println("  RET32");
   }
 }
 
 void codegen(Obj *prog, FILE *out) {
   output_file = out;
 
-  File **files = get_input_files();
-  for (int i = 0; files[i]; i++)
-    println("  .file %d \"%s\"", files[i]->file_no, files[i]->name);
+  // ファイルの番号：入力ファイルのパス（tools/cc.js はリポジトリからの相対パスで渡す）の FNV-1a ハッシュ
+  char *name = base_file ? base_file : "";
+  uint32_t h = 2166136261u;
+  for (char *p = name; *p; p++)
+    h = (h ^ (unsigned char)*p) * 16777619u;
+  snprintf(fid, sizeof(fid), "%08x", h);
 
+  for (Obj *var = prog; var; var = var->next)
+    hashmap_put(&globals, var->name, var);
+
+  println("; MyCPU のアセンブリ（chibicc）：%s", base_file ? base_file : "");
   assign_lvar_offsets(prog);
   emit_data(prog);
   emit_text(prog);

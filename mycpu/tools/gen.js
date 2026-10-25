@@ -98,9 +98,10 @@ function genExamplesJs() {
   const dir = path.join(ROOT, 'examples');
   const files = fs.readdirSync(dir).filter((f) => f.endsWith('.asm')).sort();
   const items = files.map((f) => ({ name: f, source: fs.readFileSync(path.join(dir, f), 'utf8') }));
-  // SD カードの中身（disk/）。どれも文字のファイル
-  const ddir = path.join(ROOT, 'disk');
-  const disk = fs.readdirSync(ddir).sort().map((f) => ({ name: f, contents: fs.readFileSync(path.join(ddir, f), 'latin1') }));
+  // SD カードの中身（disk/）。NAME.c はコンパイルした NAME.exe.asm も入れる（tools/cc.js。ブラウザではコンパイルできないので）。
+  // 中身はバイト列を latin1 の文字列にしたもの
+  const disk = require('./cc.js').diskSources(path.join(ROOT, 'disk')).map((f) => ({
+    name: f.name, contents: Buffer.from(f.contents).toString('latin1') }));
   return `// 自動生成（tools/gen.js が examples/*.asm と disk/ から作る）。手で編集しない。
 (function (root) {
   var EXAMPLES = ${JSON.stringify(items, null, 2)};

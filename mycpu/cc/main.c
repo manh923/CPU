@@ -55,10 +55,8 @@ static void add_default_include_paths(char *argv0) {
   // to ./include relative to argv[0].
   strarray_push(&include_paths, format("%s/include", dirname(strdup(argv0))));
 
-  // Add standard include paths.
-  strarray_push(&include_paths, "/usr/local/include");
-  strarray_push(&include_paths, "/usr/include/x86_64-linux-gnu");
-  strarray_push(&include_paths, "/usr/include");
+  // Add standard include paths.（MyCPU：../libc/include だけ）
+  strarray_push(&include_paths, format("%s/../libc/include", dirname(strdup(argv0))));
 
   // Keep a copy of the standard include paths for -MMD option.
   for (int i = 0; i < include_paths.len; i++)

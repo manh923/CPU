@@ -150,8 +150,7 @@ const cases = [];
   const bios = src('bios.asm');
   const biosImage = assemble(bios).image;
   check('BIOS は ROM（16KB）に収まる', biosImage.length <= isa.MAP.ROM_SIZE, biosImage.length);
-  const diskSources = fs.readdirSync(path.join(ROOT, 'disk')).sort().map((n) => ({
-    name: n, contents: /\.asm$/.test(n) ? fs.readFileSync(path.join(ROOT, 'disk', n), 'utf8') : fs.readFileSync(path.join(ROOT, 'disk', n)) }));
+  const diskSources = require('../tools/cc.js').diskSources(path.join(ROOT, 'disk'));   // primes.c は PRIMES.EXE にも
   const files = diskSources.map((x) => makeFile(x.name, x.contents));
   const dosSym = assemble(fs.readFileSync(path.join(ROOT, 'disk/mydos.sys.asm'), 'utf8')).symbols;
   check('MYDOS.SYS（変数も含めて）は 0x26000 より前に収まる', Number(dosSym.get('bss_end')) <= 0x26000, dosSym.get('bss_end'));
@@ -169,7 +168,7 @@ const cases = [];
   check('BIOS：MYDOS.SYS のないカードも Non-System disk', r.out.includes('SD card     : SDHC/SDXC') && r.out.includes('Non-System disk'), r.out.slice(-200));
 
   const readme = fs.readFileSync(path.join(ROOT, 'disk/README.TXT'), 'latin1');
-  const session = ' dir\rtype readme.txt\rhello\rhello claude\rfib 12\rkitt\r crash\rbig\rtype nofile.txt\rtype\rver\rcolor 1e\rled 2a\r' +
+  const session = ' dir\rtype readme.txt\rhello\rhello claude\rfib 12\rkitt\r crash\rbig\rprimes\rtype nofile.txt\rtype\rver\rcolor 1e\rled 2a\r' +
     'copy con note.txt\rHello from MyDOS!\rSecond lline\b\b\b\b\bline\r\x1a\rcopy note.txt copy.txt\rren copy.txt renamed.txt\r' +
     'dir > list.txt\rfib 3 >> list.txt\rtoupper readme.txt up.txt\rdel note.txt\rdel nofile\rren renamed.txt hello.exe\r' +
     'type list.txt\rdemo\rshutdown\r';
@@ -187,6 +186,9 @@ const cases = [];
       o.includes(nl('fib(12) = 144\n')) && o.includes('LED chaser'), '');
     check(`MyDOS（${type}）：SDRAM に読み込む .EXE（スタックも SDRAM）`,
       o.includes(nl('Hello from SDRAM! PC = 01000024, SP = 017FFFF8\nRecursion depth: 10000\n')), '');
+    check(`MyDOS（${type}）：C で書いたプログラム（PRIMES.EXE、cc/ と libc/ で作る）`,
+      o.includes(nl('=== MyCPU Prime Search ===\nSearching primes from 2 to 1000...\nFound: 10 primes\n')) &&
+      o.includes(nl('Found: 160 primes\nSearch complete!\nTotal primes: 168\n')), '');
     check(`MyDOS（${type}）：0 で割るプログラムは止めて C:\\> に戻る`,
       o.includes(nl('Dividing by zero...\n\nProgram terminated: divide by zero at ')) && !o.includes('never printed'), '');
     check(`MyDOS（${type}）：エラーの出し方`, o.includes(nl('C:\\>type nofile.txt\nFile not found\n')) &&
@@ -249,7 +251,7 @@ const cases = [];
   const small = () => makeDisk(diskSources, { type: 'fat16', spc: 1, partStart: 32, totalSectors: 4300 });
   cases.push(
     { name: 'mydos-sd', file: 'bios.asm', disk: small(), max: 60_000_000,
-      input: ' hello rtl\rcopy con a.txt\rwritten by rtl\r\x1a\rtype a.txt\rren a.txt b.txt\rtype b.txt\rdel b.txt\rcrash\rbig\rshutdown\r' },
+      input: ' hello rtl\rcopy con a.txt\rwritten by rtl\r\x1a\rtype a.txt\rren a.txt b.txt\rtype b.txt\rdel b.txt\rcrash\rbig\rprimes\rshutdown\r' },
     { name: 'mydos-uart', file: 'bios.asm', input: bootInput, disk: small(), max: 60_000_000 },
     { name: 'hello', file: 'hello.asm' },
     { name: 'sdram', file: 'sdram.asm', sdram: true, trace: true },
@@ -260,6 +262,21 @@ const cases = [];
     { name: 'console', file: 'console.asm', input },
     { name: 'colors', file: 'colors.asm', ppm: true },
   );
+}
+
+// ---- C コンパイラ ----
+console.log('C コンパイラ（cc/。chibicc のテストをこの CPU で動かす）');
+{
+  // まだ通らないもの：float・double を使う（TODO.md の 7）、x86 のアセンブリ・pthread を使う（この CPU にはない）
+  const LATER = ['arith', 'cast', 'constexpr', 'control', 'float', 'function', 'literal', 'macro', 'varargs'];
+  const NA = ['asm', 'atomic', 'tls'];
+  const results = require('./cctest.js').run();
+  const expect = results.filter((r) => !LATER.includes(r.name) && !NA.includes(r.name));
+  const bad = expect.filter((r) => !r.ok);
+  check(`chibicc のテスト ${expect.length} 本が通る（float・double の ${LATER.length} 本と x86・pthread の ${NA.length} 本は除く）`,
+    bad.length === 0 && expect.length >= 29, bad.map((r) => `${r.name}：${r.why}`).join('\n'));
+  const surprise = results.filter((r) => LATER.includes(r.name) && r.ok).map((r) => r.name);
+  if (surprise.length) console.log(`       （除いたうち通ったもの：${surprise.join(' ')}。LATER から外す）`);
 }
 
 // ---- 4 ----
