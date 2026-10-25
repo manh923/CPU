@@ -1,0 +1,4 @@
+# asm/asm.js の出力
+*.bin
+*.lst
+examples/*.hex

@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MyCPU シミュレータ</title>
+<style>
+  :root {
+    --bg: #15171c; --panel: #1e2128; --line: #2e323b; --text: #d8dce4; --dim: #8a909c;
+    --accent: #5aa9ff; --err: #ff6b6b; --ok: #6bd88a;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 16px; margin: 0 12px 0 0; }
+  button, select { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; font: inherit; cursor: pointer; }
+  button:hover, select:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: #0b1220; border-color: var(--accent); font-weight: 600; }
+  #state { margin-left: auto; color: var(--dim); font-variant-numeric: tabular-nums; }
+  main { display: grid; grid-template-columns: minmax(300px, 1fr) minmax(0, 2fr); gap: 12px; padding: 12px 16px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .col { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  textarea, pre { font: 13px/1.4 ui-monospace, Consolas, monospace; }
+  #src { width: 100%; height: 60vh; resize: vertical; background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 8px; tab-size: 8; white-space: pre; }
+  #errors { color: var(--err); white-space: pre-wrap; margin: 0; }
+  #screen { width: 100%; aspect-ratio: 16 / 9; background: #000; border: 1px solid var(--line); border-radius: 6px; outline: none; }
+  #screen:focus { border-color: var(--accent); }
+  .row { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 12px; }
+  @media (max-width: 600px) { .row { grid-template-columns: 1fr; } }
+  .box { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px; min-width: 0; }
+  .box h2 { font-size: 12px; color: var(--dim); margin: 0 0 4px; font-weight: 500; }
+  #uart { height: 180px; overflow: auto; margin: 0; white-space: pre-wrap; word-break: break-all; outline: none; }
+  #uart:focus { box-shadow: inset 0 0 0 1px var(--accent); }
+  #regs { margin: 0; font-size: 12px; overflow-x: auto; }
+  #leds { display: flex; gap: 6px; margin-top: 6px; }
+  .led { width: 12px; height: 12px; border-radius: 50%; background: #333; }
+  .led.on { background: #ffb347; box-shadow: 0 0 6px #ffb347; }
+  .hint { color: var(--dim); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>MyCPU シミュレータ</h1>
+  <select id="example" title="例題"></select>
+  <select id="xlen" title="CPU の bit 数"><option value="32">32bit CPU</option><option value="64">64bit CPU</option></select>
+  <button id="run" class="primary">アセンブルして実行</button>
+  <button id="pause">一時停止</button>
+  <button id="step">1 命令</button>
+  <span id="state">停止中</span>
+</header>
+<main>
+  <div class="col">
+    <textarea id="src" spellcheck="false"></textarea>
+    <pre id="errors"></pre>
+  </div>
+  <div class="col">
+    <canvas id="screen" width="1280" height="720" tabindex="0" title="クリックするとキー入力が UART 受信に届く"></canvas>
+    <div class="hint">画面か UART の欄をクリックしてからキーを押すと、その場で UART 受信に届きます（Ctrl-D なども送れます）。</div>
+    <div class="row">
+      <div class="box"><h2>UART 送信（CPU → PC）</h2><pre id="uart" tabindex="0"></pre></div>
+      <div class="box"><h2>レジスタ</h2><pre id="regs"></pre><div id="leds"></div></div>
+    </div>
+  </div>
+</main>
+<script src="../lib/opcodes.js"></script>
+<script src="../lib/isa.js"></script>
+<script src="../lib/assembler.js"></script>
+<script src="../lib/cpu.js"></script>
+<script src="../lib/font.js"></script>
+<script src="../lib/video.js"></script>
+<script src="../lib/examples.js"></script>
+<script>
+(function () {
+  'use strict';
+  var M = window.MyCPU;
+  var $ = function (id) { return document.getElementById(id); };
+  var src = $('src'), errors = $('errors'), uart = $('uart'), regs = $('regs'), state = $('state');
+  var canvas = $('screen'), ctx = canvas.getContext('2d');
+  var image = ctx.createImageData(M.video.WIDTH, M.video.HEIGHT);
+  var cpu = null, running = false, uartText = '', lastRegs = 0;
+  var stepsAtSecond = 0, secondStart = 0, mips = 0;
+
+  for (var i = 0; i < 6; i++) { var d = document.createElement('div'); d.className = 'led'; $('leds').appendChild(d); }
+  M.EXAMPLES.forEach(function (ex, i) {
+    var o = document.createElement('option'); o.value = i; o.textContent = ex.name; $('example').appendChild(o);
+  });
+  function loadExample(i) {
+    src.value = M.EXAMPLES[i].source;
+    $('xlen').value = /selftest64/.test(M.EXAMPLES[i].name) ? '64' : '32';
+  }
+  var start = M.EXAMPLES.findIndex(function (e) { return e.name === 'console.asm'; });
+  $('example').value = String(Math.max(start, 0));
+  loadExample(Math.max(start, 0));
+  $('example').onchange = function () { loadExample(+this.value); };
+
+  function onTx(b) {
+    if (b === 13) return;
+    if (b === 8) uartText = uartText.slice(0, -1);
+    else uartText += String.fromCharCode(b);
+    if (uartText.length > 20000) uartText = uartText.slice(-15000);
+    uart.textContent = uartText;
+    uart.scrollTop = uart.scrollHeight;
+  }
+  function onLed(v) {
+    var leds = $('leds').children;
+    for (var i = 0; i < leds.length; i++) leds[i].classList.toggle('on', !!(v & (1 << i)));
+  }
+
+  function build() {
+    errors.textContent = '';
+    var result;
+    try {
+      result = M.Assembler.assemble(src.value);
+    } catch (e) {
+      errors.textContent = e.errors ? e.errors.map(function (x) { return x.line + ' 行目: ' + x.message; }).join('\n') : String(e);
+      return false;
+    }
+    var t0 = performance.now();
+    cpu = new M.CPU({
+      xlen: +$('xlen').value, onTx: onTx, onLed: onLed,
+      clock: function () { return Math.floor((performance.now() - t0) * 1000); },
+    });
+    try { cpu.load(result.image); } catch (e) { errors.textContent = e.message; return false; }
+    uartText = ''; uart.textContent = '';
+    onLed(0);
+    stepsAtSecond = 0; secondStart = performance.now();
+    redraw(true);
+    return true;
+  }
+
+  function redraw(all) {
+    if (!cpu) return;
+    if (all) cpu.vramDirty.fill(1);
+    if (!cpu.vramChanged && !all) return;
+    cpu.vramChanged = false;
+    var dirty = cpu.vramDirty;
+    for (var i = 0; i < dirty.length; i++) {
+      if (dirty[i]) { dirty[i] = 0; M.video.drawCell(cpu.vram, i, image.data, 4); }
+    }
+    ctx.putImageData(image, 0, 0);
+  }
+
+  function showState() {
+    if (!cpu) { state.textContent = '停止中'; return; }
+    if (cpu.halted) state.textContent = (cpu.halted.kind === 'hlt' ? 'HLT' : '停止: ' + cpu.halted.message) + '（' + cpu.steps + ' 命令）';
+    else if (!running) state.textContent = '一時停止（' + cpu.steps + ' 命令）';
+    else state.textContent = (cpu.wfi ? 'WFI で待機中' : '実行中') + ' · ' + mips.toFixed(1) + ' MIPS';
+    regs.textContent = cpu.dumpRegs();
+  }
+
+  function frame() {
+    if (!running || !cpu) return;
+    var end = performance.now() + 12;
+    while (performance.now() < end && !cpu.halted) {
+      if (cpu.wfi && !cpu.irqPending()) break;
+      cpu.run(5000);
+    }
+    redraw(false);
+    var now = performance.now();
+    if (now - secondStart > 500) {
+      mips = (cpu.steps - stepsAtSecond) / ((now - secondStart) * 1000);
+      stepsAtSecond = cpu.steps; secondStart = now;
+    }
+    if (now - lastRegs > 100) { lastRegs = now; showState(); }
+    if (cpu.halted) { running = false; showState(); $('pause').textContent = '一時停止'; return; }
+    requestAnimationFrame(frame);
+  }
+
+  $('run').onclick = function () {
+    if (!build()) { running = false; showState(); return; }
+    running = true;
+    $('pause').textContent = '一時停止';
+    canvas.focus();
+    requestAnimationFrame(frame);
+  };
+  $('pause').onclick = function () {
+    if (!cpu || cpu.halted) return;
+    running = !running;
+    this.textContent = running ? '一時停止' : '再開';
+    showState();
+    if (running) requestAnimationFrame(frame);
+  };
+  $('step').onclick = function () {
+    if (!cpu && !build()) return;
+    running = false;
+    $('pause').textContent = '再開';
+    var pc = cpu.pc, text = '';
+    cpu.trace = function (p, t) { text = t; };
+    cpu.step();
+    cpu.trace = null;
+    redraw(false);
+    showState();
+    if (text) state.textContent = '0x' + pc.toString(16).padStart(8, '0') + '  ' + text;
+  };
+
+  // キー入力 → UART 受信
+  function onKey(e) {
+    if (!cpu || e.metaKey || e.altKey) return;
+    var code = null, k = e.key;
+    if (e.ctrlKey && k.length === 1 && /[a-z@\[\\\]^_]/i.test(k)) code = k.toUpperCase().charCodeAt(0) & 31;
+    else if (e.ctrlKey) return;
+    else if (k.length === 1) code = k.charCodeAt(0);
+    else code = { Enter: 13, Backspace: 8, Tab: 9, Escape: 27, Delete: 127 }[k];
+    if (code == null || code > 255) return;
+    e.preventDefault();
+    cpu.pushRx([code]);
+  }
+  canvas.addEventListener('keydown', onKey);
+  uart.addEventListener('keydown', onKey);
+  src.addEventListener('keydown', function (e) {
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      var s = this.selectionStart;
+      this.setRangeText('\t', s, this.selectionEnd, 'end');
+    } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      $('run').click();
+    }
+  });
+
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  showState();
+})();
+</script>
+</body>
+</html>

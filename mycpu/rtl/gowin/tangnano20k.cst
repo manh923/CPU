@@ -1,0 +1,37 @@
+// Tang Nano 20K のピン割り当て（Sipeed の資料・HDMI 例に合わせた。ボードで要確認）
+IO_LOC "clk27" 4;
+IO_PORT "clk27" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+
+// S1 ボタン（押すと 1）
+IO_LOC "btn_rst" 88;
+IO_PORT "btn_rst" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
+
+// USB-UART（BL616）
+IO_LOC "uart_tx" 69;
+IO_PORT "uart_tx" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_LOC "uart_rx" 70;
+IO_PORT "uart_rx" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+
+// LED（0 で点灯）
+IO_LOC "led_n[0]" 15;
+IO_LOC "led_n[1]" 16;
+IO_LOC "led_n[2]" 17;
+IO_LOC "led_n[3]" 18;
+IO_LOC "led_n[4]" 19;
+IO_LOC "led_n[5]" 20;
+IO_PORT "led_n[0]" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_PORT "led_n[1]" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_PORT "led_n[2]" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_PORT "led_n[3]" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_PORT "led_n[4]" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_PORT "led_n[5]" IO_TYPE=LVCMOS33 DRIVE=8;
+
+// HDMI（DVI）
+IO_LOC "tmds_clk_p" 33,34;
+IO_PORT "tmds_clk_p" PULL_MODE=NONE DRIVE=8;
+IO_LOC "tmds_d_p[0]" 35,36;
+IO_PORT "tmds_d_p[0]" PULL_MODE=NONE DRIVE=8;
+IO_LOC "tmds_d_p[1]" 37,38;
+IO_PORT "tmds_d_p[1]" PULL_MODE=NONE DRIVE=8;
+IO_LOC "tmds_d_p[2]" 39,40;
+IO_PORT "tmds_d_p[2]" PULL_MODE=NONE DRIVE=8;

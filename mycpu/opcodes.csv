@@ -1,0 +1,174 @@
+mnemonic,width,group,op,opcode14,form,operands,description
+HLT,00,0x0,0x00,0x0000,S,,停止（命令全体が0）
+NOP,00,0x0,0x01,0x0040,S,,何もしない
+ERET,00,0x0,0x02,0x0080,S,,EPCへ戻りSTATUSを例外前に戻す
+SYSCALL,00,0x0,0x03,0x00C0,S,,SYSCALL例外を起こす
+WFI,00,0x0,0x04,0x0100,S,,割り込みが来るまで待つ
+ADDR32,01,0x1,0x00,0x0005,R,"rd, rs1, rs2",rd ← rs1 + rs2
+ADDR64,10,0x1,0x00,0x0006,R,"rd, rs1, rs2",rd ← rs1 + rs2
+ADDI32,01,0x1,0x01,0x0045,I,"rd, rs1, imm",rd ← rs1 + imm
+ADDI64,10,0x1,0x01,0x0046,I,"rd, rs1, imm",rd ← rs1 + imm
+ADD32,01,0x1,0x02,0x0085,M,"rd, rs1, rs2, imm",rd ← rs1 + [rs2+imm]
+ADD64,10,0x1,0x02,0x0086,M,"rd, rs1, rs2, imm",rd ← rs1 + [rs2+imm]
+SUBR32,01,0x1,0x04,0x0105,R,"rd, rs1, rs2",rd ← rs1 - rs2
+SUBR64,10,0x1,0x04,0x0106,R,"rd, rs1, rs2",rd ← rs1 - rs2
+SUB32,01,0x1,0x06,0x0185,M,"rd, rs1, rs2, imm",rd ← rs1 - [rs2+imm]
+SUB64,10,0x1,0x06,0x0186,M,"rd, rs1, rs2, imm",rd ← rs1 - [rs2+imm]
+MULR32,01,0x1,0x08,0x0205,R,"rd, rs1, rs2",rd ← rs1 × rs2（下位）
+MULR64,10,0x1,0x08,0x0206,R,"rd, rs1, rs2",rd ← rs1 × rs2（下位）
+MULI32,01,0x1,0x09,0x0245,I,"rd, rs1, imm",rd ← rs1 × imm（下位）
+MULI64,10,0x1,0x09,0x0246,I,"rd, rs1, imm",rd ← rs1 × imm（下位）
+MUL32,01,0x1,0x0A,0x0285,M,"rd, rs1, rs2, imm",rd ← rs1 × [rs2+imm]（下位）
+MUL64,10,0x1,0x0A,0x0286,M,"rd, rs1, rs2, imm",rd ← rs1 × [rs2+imm]（下位）
+MULHR32,01,0x1,0x0C,0x0305,R,"rd, rs1, rs2",rd ← rs1 × rs2 の上位（符号付き）
+MULHR64,10,0x1,0x0C,0x0306,R,"rd, rs1, rs2",rd ← rs1 × rs2 の上位（符号付き）
+MULHI32,01,0x1,0x0D,0x0345,I,"rd, rs1, imm",rd ← rs1 × imm の上位（符号付き）
+MULHI64,10,0x1,0x0D,0x0346,I,"rd, rs1, imm",rd ← rs1 × imm の上位（符号付き）
+MULH32,01,0x1,0x0E,0x0385,M,"rd, rs1, rs2, imm",rd ← rs1 × [rs2+imm] の上位（符号付き）
+MULH64,10,0x1,0x0E,0x0386,M,"rd, rs1, rs2, imm",rd ← rs1 × [rs2+imm] の上位（符号付き）
+MULHUR32,01,0x1,0x10,0x0405,R,"rd, rs1, rs2",rd ← rs1 × rs2 の上位（符号なし）
+MULHUR64,10,0x1,0x10,0x0406,R,"rd, rs1, rs2",rd ← rs1 × rs2 の上位（符号なし）
+MULHUI32,01,0x1,0x11,0x0445,I,"rd, rs1, imm",rd ← rs1 × imm の上位（符号なし）
+MULHUI64,10,0x1,0x11,0x0446,I,"rd, rs1, imm",rd ← rs1 × imm の上位（符号なし）
+MULHU32,01,0x1,0x12,0x0485,M,"rd, rs1, rs2, imm",rd ← rs1 × [rs2+imm] の上位（符号なし）
+MULHU64,10,0x1,0x12,0x0486,M,"rd, rs1, rs2, imm",rd ← rs1 × [rs2+imm] の上位（符号なし）
+DIVR32,01,0x1,0x14,0x0505,R,"rd, rs1, rs2",rd ← rs1 ÷ rs2（符号付き）
+DIVR64,10,0x1,0x14,0x0506,R,"rd, rs1, rs2",rd ← rs1 ÷ rs2（符号付き）
+DIVI32,01,0x1,0x15,0x0545,I,"rd, rs1, imm",rd ← rs1 ÷ imm（符号付き）
+DIVI64,10,0x1,0x15,0x0546,I,"rd, rs1, imm",rd ← rs1 ÷ imm（符号付き）
+DIV32,01,0x1,0x16,0x0585,M,"rd, rs1, rs2, imm",rd ← rs1 ÷ [rs2+imm]（符号付き）
+DIV64,10,0x1,0x16,0x0586,M,"rd, rs1, rs2, imm",rd ← rs1 ÷ [rs2+imm]（符号付き）
+DIVUR32,01,0x1,0x18,0x0605,R,"rd, rs1, rs2",rd ← rs1 ÷ rs2（符号なし）
+DIVUR64,10,0x1,0x18,0x0606,R,"rd, rs1, rs2",rd ← rs1 ÷ rs2（符号なし）
+DIVUI32,01,0x1,0x19,0x0645,I,"rd, rs1, imm",rd ← rs1 ÷ imm（符号なし）
+DIVUI64,10,0x1,0x19,0x0646,I,"rd, rs1, imm",rd ← rs1 ÷ imm（符号なし）
+DIVU32,01,0x1,0x1A,0x0685,M,"rd, rs1, rs2, imm",rd ← rs1 ÷ [rs2+imm]（符号なし）
+DIVU64,10,0x1,0x1A,0x0686,M,"rd, rs1, rs2, imm",rd ← rs1 ÷ [rs2+imm]（符号なし）
+REMR32,01,0x1,0x1C,0x0705,R,"rd, rs1, rs2",rd ← rs1 mod rs2（符号付き）
+REMR64,10,0x1,0x1C,0x0706,R,"rd, rs1, rs2",rd ← rs1 mod rs2（符号付き）
+REMI32,01,0x1,0x1D,0x0745,I,"rd, rs1, imm",rd ← rs1 mod imm（符号付き）
+REMI64,10,0x1,0x1D,0x0746,I,"rd, rs1, imm",rd ← rs1 mod imm（符号付き）
+REM32,01,0x1,0x1E,0x0785,M,"rd, rs1, rs2, imm",rd ← rs1 mod [rs2+imm]（符号付き）
+REM64,10,0x1,0x1E,0x0786,M,"rd, rs1, rs2, imm",rd ← rs1 mod [rs2+imm]（符号付き）
+REMUR32,01,0x1,0x20,0x0805,R,"rd, rs1, rs2",rd ← rs1 mod rs2（符号なし）
+REMUR64,10,0x1,0x20,0x0806,R,"rd, rs1, rs2",rd ← rs1 mod rs2（符号なし）
+REMUI32,01,0x1,0x21,0x0845,I,"rd, rs1, imm",rd ← rs1 mod imm（符号なし）
+REMUI64,10,0x1,0x21,0x0846,I,"rd, rs1, imm",rd ← rs1 mod imm（符号なし）
+REMU32,01,0x1,0x22,0x0885,M,"rd, rs1, rs2, imm",rd ← rs1 mod [rs2+imm]（符号なし）
+REMU64,10,0x1,0x22,0x0886,M,"rd, rs1, rs2, imm",rd ← rs1 mod [rs2+imm]（符号なし）
+ANDR32,01,0x2,0x00,0x0009,R,"rd, rs1, rs2",rd ← rs1 AND rs2
+ANDR64,10,0x2,0x00,0x000A,R,"rd, rs1, rs2",rd ← rs1 AND rs2
+ANDI32,01,0x2,0x01,0x0049,I,"rd, rs1, imm",rd ← rs1 AND imm
+ANDI64,10,0x2,0x01,0x004A,I,"rd, rs1, imm",rd ← rs1 AND imm
+AND32,01,0x2,0x02,0x0089,M,"rd, rs1, rs2, imm",rd ← rs1 AND [rs2+imm]
+AND64,10,0x2,0x02,0x008A,M,"rd, rs1, rs2, imm",rd ← rs1 AND [rs2+imm]
+ORR32,01,0x2,0x04,0x0109,R,"rd, rs1, rs2",rd ← rs1 OR rs2
+ORR64,10,0x2,0x04,0x010A,R,"rd, rs1, rs2",rd ← rs1 OR rs2
+ORI32,01,0x2,0x05,0x0149,I,"rd, rs1, imm",rd ← rs1 OR imm
+ORI64,10,0x2,0x05,0x014A,I,"rd, rs1, imm",rd ← rs1 OR imm
+OR32,01,0x2,0x06,0x0189,M,"rd, rs1, rs2, imm",rd ← rs1 OR [rs2+imm]
+OR64,10,0x2,0x06,0x018A,M,"rd, rs1, rs2, imm",rd ← rs1 OR [rs2+imm]
+XORR32,01,0x2,0x08,0x0209,R,"rd, rs1, rs2",rd ← rs1 XOR rs2
+XORR64,10,0x2,0x08,0x020A,R,"rd, rs1, rs2",rd ← rs1 XOR rs2
+XORI32,01,0x2,0x09,0x0249,I,"rd, rs1, imm",rd ← rs1 XOR imm
+XORI64,10,0x2,0x09,0x024A,I,"rd, rs1, imm",rd ← rs1 XOR imm
+XOR32,01,0x2,0x0A,0x0289,M,"rd, rs1, rs2, imm",rd ← rs1 XOR [rs2+imm]
+XOR64,10,0x2,0x0A,0x028A,M,"rd, rs1, rs2, imm",rd ← rs1 XOR [rs2+imm]
+SHLR32,01,0x2,0x0C,0x0309,R,"rd, rs1, rs2",rd ← rs1 << rs2
+SHLR64,10,0x2,0x0C,0x030A,R,"rd, rs1, rs2",rd ← rs1 << rs2
+SHLI32,01,0x2,0x0D,0x0349,I,"rd, rs1, imm",rd ← rs1 << imm
+SHLI64,10,0x2,0x0D,0x034A,I,"rd, rs1, imm",rd ← rs1 << imm
+SHL32,01,0x2,0x0E,0x0389,M,"rd, rs1, rs2, imm",rd ← rs1 << [rs2+imm]
+SHL64,10,0x2,0x0E,0x038A,M,"rd, rs1, rs2, imm",rd ← rs1 << [rs2+imm]
+SHRR32,01,0x2,0x10,0x0409,R,"rd, rs1, rs2",rd ← rs1 >> rs2（論理）
+SHRR64,10,0x2,0x10,0x040A,R,"rd, rs1, rs2",rd ← rs1 >> rs2（論理）
+SHRI32,01,0x2,0x11,0x0449,I,"rd, rs1, imm",rd ← rs1 >> imm（論理）
+SHRI64,10,0x2,0x11,0x044A,I,"rd, rs1, imm",rd ← rs1 >> imm（論理）
+SHR32,01,0x2,0x12,0x0489,M,"rd, rs1, rs2, imm",rd ← rs1 >> [rs2+imm]（論理）
+SHR64,10,0x2,0x12,0x048A,M,"rd, rs1, rs2, imm",rd ← rs1 >> [rs2+imm]（論理）
+SARR32,01,0x2,0x14,0x0509,R,"rd, rs1, rs2",rd ← rs1 >> rs2（算術）
+SARR64,10,0x2,0x14,0x050A,R,"rd, rs1, rs2",rd ← rs1 >> rs2（算術）
+SARI32,01,0x2,0x15,0x0549,I,"rd, rs1, imm",rd ← rs1 >> imm（算術）
+SARI64,10,0x2,0x15,0x054A,I,"rd, rs1, imm",rd ← rs1 >> imm（算術）
+SAR32,01,0x2,0x16,0x0589,M,"rd, rs1, rs2, imm",rd ← rs1 >> [rs2+imm]（算術）
+SAR64,10,0x2,0x16,0x058A,M,"rd, rs1, rs2, imm",rd ← rs1 >> [rs2+imm]（算術）
+CLZ32,01,0x2,0x18,0x0609,U,"rd, rs1",rd ← rs1 の先頭の0の個数
+CLZ64,10,0x2,0x18,0x060A,U,"rd, rs1",rd ← rs1 の先頭の0の個数
+POPCNT32,01,0x2,0x1C,0x0709,U,"rd, rs1",rd ← rs1 の1の個数
+POPCNT64,10,0x2,0x1C,0x070A,U,"rd, rs1",rd ← rs1 の1の個数
+CMPEQR32,01,0x3,0x00,0x000D,R,"p, rs1, rs2",p ← (rs1 == rs2)
+CMPEQR64,10,0x3,0x00,0x000E,R,"p, rs1, rs2",p ← (rs1 == rs2)
+CMPEQI32,01,0x3,0x01,0x004D,I,"p, rs1, imm",p ← (rs1 == imm)
+CMPEQI64,10,0x3,0x01,0x004E,I,"p, rs1, imm",p ← (rs1 == imm)
+CMPEQ32,01,0x3,0x02,0x008D,M,"p, rs1, rs2, imm",p ← (rs1 == [rs2+imm])
+CMPEQ64,10,0x3,0x02,0x008E,M,"p, rs1, rs2, imm",p ← (rs1 == [rs2+imm])
+CMPNER32,01,0x3,0x04,0x010D,R,"p, rs1, rs2",p ← (rs1 != rs2)
+CMPNER64,10,0x3,0x04,0x010E,R,"p, rs1, rs2",p ← (rs1 != rs2)
+CMPNEI32,01,0x3,0x05,0x014D,I,"p, rs1, imm",p ← (rs1 != imm)
+CMPNEI64,10,0x3,0x05,0x014E,I,"p, rs1, imm",p ← (rs1 != imm)
+CMPNE32,01,0x3,0x06,0x018D,M,"p, rs1, rs2, imm",p ← (rs1 != [rs2+imm])
+CMPNE64,10,0x3,0x06,0x018E,M,"p, rs1, rs2, imm",p ← (rs1 != [rs2+imm])
+CMPLTR32,01,0x3,0x08,0x020D,R,"p, rs1, rs2",p ← (rs1 < rs2)（符号付き）
+CMPLTR64,10,0x3,0x08,0x020E,R,"p, rs1, rs2",p ← (rs1 < rs2)（符号付き）
+CMPLTI32,01,0x3,0x09,0x024D,I,"p, rs1, imm",p ← (rs1 < imm)（符号付き）
+CMPLTI64,10,0x3,0x09,0x024E,I,"p, rs1, imm",p ← (rs1 < imm)（符号付き）
+CMPLT32,01,0x3,0x0A,0x028D,M,"p, rs1, rs2, imm",p ← (rs1 < [rs2+imm])（符号付き）
+CMPLT64,10,0x3,0x0A,0x028E,M,"p, rs1, rs2, imm",p ← (rs1 < [rs2+imm])（符号付き）
+CMPLTUR32,01,0x3,0x0C,0x030D,R,"p, rs1, rs2",p ← (rs1 < rs2)（符号なし）
+CMPLTUR64,10,0x3,0x0C,0x030E,R,"p, rs1, rs2",p ← (rs1 < rs2)（符号なし）
+CMPLTUI32,01,0x3,0x0D,0x034D,I,"p, rs1, imm",p ← (rs1 < imm)（符号なし）
+CMPLTUI64,10,0x3,0x0D,0x034E,I,"p, rs1, imm",p ← (rs1 < imm)（符号なし）
+CMPLTU32,01,0x3,0x0E,0x038D,M,"p, rs1, rs2, imm",p ← (rs1 < [rs2+imm])（符号なし）
+CMPLTU64,10,0x3,0x0E,0x038E,M,"p, rs1, rs2, imm",p ← (rs1 < [rs2+imm])（符号なし）
+CMPGER32,01,0x3,0x10,0x040D,R,"p, rs1, rs2",p ← (rs1 >= rs2)（符号付き）
+CMPGER64,10,0x3,0x10,0x040E,R,"p, rs1, rs2",p ← (rs1 >= rs2)（符号付き）
+CMPGEI32,01,0x3,0x11,0x044D,I,"p, rs1, imm",p ← (rs1 >= imm)（符号付き）
+CMPGEI64,10,0x3,0x11,0x044E,I,"p, rs1, imm",p ← (rs1 >= imm)（符号付き）
+CMPGE32,01,0x3,0x12,0x048D,M,"p, rs1, rs2, imm",p ← (rs1 >= [rs2+imm])（符号付き）
+CMPGE64,10,0x3,0x12,0x048E,M,"p, rs1, rs2, imm",p ← (rs1 >= [rs2+imm])（符号付き）
+CMPGEUR32,01,0x3,0x14,0x050D,R,"p, rs1, rs2",p ← (rs1 >= rs2)（符号なし）
+CMPGEUR64,10,0x3,0x14,0x050E,R,"p, rs1, rs2",p ← (rs1 >= rs2)（符号なし）
+CMPGEUI32,01,0x3,0x15,0x054D,I,"p, rs1, imm",p ← (rs1 >= imm)（符号なし）
+CMPGEUI64,10,0x3,0x15,0x054E,I,"p, rs1, imm",p ← (rs1 >= imm)（符号なし）
+CMPGEU32,01,0x3,0x16,0x058D,M,"p, rs1, rs2, imm",p ← (rs1 >= [rs2+imm])（符号なし）
+CMPGEU64,10,0x3,0x16,0x058E,M,"p, rs1, rs2, imm",p ← (rs1 >= [rs2+imm])（符号なし）
+SEL32,01,0x3,0x18,0x060D,SEL,"rd, rs1, rs2, p",rd ← p ? rs1 : rs2（p の番号は即値の下位6bit）
+SEL64,10,0x3,0x18,0x060E,SEL,"rd, rs1, rs2, p",rd ← p ? rs1 : rs2（p の番号は即値の下位6bit）
+LOAD8U_32,01,0x4,0x00,0x0011,L,"rd, rs1, imm",rd ← [rs1+imm]（8bit・ゼロ拡張）
+LOAD8U_64,10,0x4,0x00,0x0012,L,"rd, rs1, imm",rd ← [rs1+imm]（8bit・ゼロ拡張）
+LOAD8S_32,01,0x4,0x01,0x0051,L,"rd, rs1, imm",rd ← [rs1+imm]（8bit・符号拡張）
+LOAD8S_64,10,0x4,0x01,0x0052,L,"rd, rs1, imm",rd ← [rs1+imm]（8bit・符号拡張）
+LOAD16U_32,01,0x4,0x02,0x0091,L,"rd, rs1, imm",rd ← [rs1+imm]（16bit・ゼロ拡張）
+LOAD16U_64,10,0x4,0x02,0x0092,L,"rd, rs1, imm",rd ← [rs1+imm]（16bit・ゼロ拡張）
+LOAD16S_32,01,0x4,0x03,0x00D1,L,"rd, rs1, imm",rd ← [rs1+imm]（16bit・符号拡張）
+LOAD16S_64,10,0x4,0x03,0x00D2,L,"rd, rs1, imm",rd ← [rs1+imm]（16bit・符号拡張）
+LOAD32_32,01,0x4,0x04,0x0111,L,"rd, rs1, imm",rd ← [rs1+imm]（32bit）
+LOAD32U_64,10,0x4,0x04,0x0112,L,"rd, rs1, imm",rd ← [rs1+imm]（32bit・ゼロ拡張）
+LOAD32S_64,10,0x4,0x05,0x0152,L,"rd, rs1, imm",rd ← [rs1+imm]（32bit・符号拡張）
+LOAD64_64,10,0x4,0x06,0x0192,L,"rd, rs1, imm",rd ← [rs1+imm]（64bit）
+STORE8_32,01,0x4,0x10,0x0411,ST,"rs2, rs1, imm",[rs1+imm] ← rs2 の下位8bit
+STORE8_64,10,0x4,0x10,0x0412,ST,"rs2, rs1, imm",[rs1+imm] ← rs2 の下位8bit
+STORE16_32,01,0x4,0x11,0x0451,ST,"rs2, rs1, imm",[rs1+imm] ← rs2 の下位16bit
+STORE16_64,10,0x4,0x11,0x0452,ST,"rs2, rs1, imm",[rs1+imm] ← rs2 の下位16bit
+STORE32_32,01,0x4,0x12,0x0491,ST,"rs2, rs1, imm",[rs1+imm] ← rs2 の下位32bit
+STORE32_64,10,0x4,0x12,0x0492,ST,"rs2, rs1, imm",[rs1+imm] ← rs2 の下位32bit
+STORE64_64,10,0x4,0x13,0x04D2,ST,"rs2, rs1, imm",[rs1+imm] ← rs2（64bit）
+SWAP32,01,0x4,0x20,0x0811,SW,"rd, rs1, rs2, imm",不可分に rd ← [rs1+imm]、[rs1+imm] ← rs2
+SWAP64,10,0x4,0x20,0x0812,SW,"rd, rs1, rs2, imm",不可分に rd ← [rs1+imm]、[rs1+imm] ← rs2
+JMP32,01,0x5,0x00,0x0015,B,imm,imm へ
+JMP64,10,0x5,0x00,0x0016,B,imm,imm へ
+BR32,01,0x5,0x01,0x0055,B,"p, imm",p が1なら imm へ（p は rs1 欄）
+BR64,10,0x5,0x01,0x0056,B,"p, imm",p が1なら imm へ（p は rs1 欄）
+CALL32,01,0x5,0x02,0x0095,B,imm,LR ← 次の命令、imm へ
+CALL64,10,0x5,0x02,0x0096,B,imm,LR ← 次の命令、imm へ
+RET32,01,0x5,0x03,0x00D5,B,,LR へ
+RET64,10,0x5,0x03,0x00D6,B,,LR へ
+JMPR32,01,0x5,0x04,0x0115,B,rs1,rs1 の番地へ
+JMPR64,10,0x5,0x04,0x0116,B,rs1,rs1 の番地へ
+CALLR32,01,0x5,0x05,0x0155,B,rs1,LR ← 次の命令、rs1 の番地へ
+CALLR64,10,0x5,0x05,0x0156,B,rs1,LR ← 次の命令、rs1 の番地へ
+EXT32TO64U,10,0x6,0x00,0x001A,X,"rd, rs1",64bit rd ← 32bit rs1（ゼロ拡張）
+EXT32TO64S,10,0x6,0x01,0x005A,X,"rd, rs1",64bit rd ← 32bit rs1（符号拡張）
+TRUNC64TO32,01,0x6,0x02,0x0099,X,"rd, rs1",32bit rd ← 64bit rs1 の下位
+BTOI32,01,0x6,0x03,0x00D9,X,"rd, p",rd ← p（0か1）
+BTOI64,10,0x6,0x03,0x00DA,X,"rd, p",rd ← p（0か1）
