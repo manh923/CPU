@@ -144,6 +144,8 @@ start:
         CALL32 puts
         HLT
 
+; ---- ここから UART に出す部分（テストはシミュレータと命令の順番を比べない。送信を待つ回数が違う） ----
+io_begin:
 ; result()：r24（間違いの数）が 0 なら OK、でなければ NG
 result:
         ADDR32 r20, lr, r0
@@ -218,6 +220,8 @@ putdec:
         CMPNEI32 p1, r21, decbuf
         BR32 p1, .out
         JMPR32 r22
+
+io_end:
 
 ; ---- ここから SDRAM（CODE）に写して動かす ----
         .align 16

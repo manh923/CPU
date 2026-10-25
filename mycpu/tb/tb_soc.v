@@ -1,11 +1,12 @@
 // SoC 全体のテストベンチ（Icarus Verilog 用）。test/run.js から使う。
-//   コンパイル時：-Ptb.ROM_HEX="prog.hex" -Ptb.FONT_HEX="font8x16.hex"
+//   コンパイル時：-Ptb.ROM_EVEN_HEX="prog_even.hex" -Ptb.ROM_ODD_HEX="prog_odd.hex" -Ptb.FONT_HEX="font8x16.hex"
 //   実行時：+uart=出力 +regs=出力 [+rx=入力] [+ppm=出力] [+max=クロック数]
 // 止まったら（HLT など）レジスタ一覧を lib/cpu.js の dumpRegs と同じ書式で書く。
 // +ppm があれば、止まった後の 1 フレームを表示回路から取り込んで PPM にする。
 `timescale 1ns / 1ps
 module tb;
-  parameter ROM_HEX  = "";
+  parameter ROM_EVEN_HEX = "";
+  parameter ROM_ODD_HEX  = "";
   parameter FONT_HEX = "";
   parameter SD_HEX   = "";        // SD カードの中身（空ならカードなし）
   parameter integer SD_SECTORS = 8192;
@@ -33,7 +34,7 @@ module tb;
     .clk(dr_clk), .cke(dr_cke), .cs_n(dr_cs_n), .ras_n(dr_ras_n), .cas_n(dr_cas_n), .we_n(dr_we_n),
     .ba(dr_ba), .a(dr_a), .dqm(dr_dqm), .dq(dr_dq)
   );
-  mycpu_soc #(.CLK_HZ(CLK_HZ), .BAUD(BAUD), .ROM_HEX(ROM_HEX), .SDRAM_HZ(27_000_000)) soc (
+  mycpu_soc #(.CLK_HZ(CLK_HZ), .BAUD(BAUD), .ROM_EVEN_HEX(ROM_EVEN_HEX), .ROM_ODD_HEX(ROM_ODD_HEX), .SDRAM_HZ(27_000_000)) soc (
     .clk(clk), .rst(rst), .uart_rxd(rxd), .uart_txd(txd), .led(led),
     .sd_sclk(sd_sclk), .sd_mosi(sd_mosi), .sd_miso(sd_miso), .sd_cs_n(sd_cs_n),
     .sdram_clk(dr_clk), .sdram_cke(dr_cke), .sdram_cs_n(dr_cs_n), .sdram_ras_n(dr_ras_n), .sdram_cas_n(dr_cas_n),
@@ -74,15 +75,13 @@ module tb;
     end
   endtask
 
-  // +trace：命令を実行するたびに番地を出す（lib/cpu.js の --trace と比べる用）
-  reg trace;
-  initial trace = $test$plusargs("trace");
-  reg [3:0] prev_state;
-  always @(posedge clk) begin
-    prev_state <= soc.cpu.state;
-    if (trace && soc.cpu.state == 4'd4 && prev_state != 4'd4 && prev_state != 4'd5)
-      $display("%08x %08x %08x", soc.cpu.pc, soc.cpu.ir, soc.cpu.imm);
+  // +trace=ファイル：命令を実行するたびに番地を書く（lib/cpu.js の trace と比べる用）
+  integer ft;
+  initial begin
+    ft = 0;
+    if ($value$plusargs("trace=%s", path)) ft = $fopen(path, "w");
   end
+  always @(posedge clk) if (ft && soc.cpu.x_trace) $fwrite(ft, "%08x\n", soc.cpu.pc);
 
   task dump_regs;
     begin
@@ -129,6 +128,7 @@ module tb;
     else $display("tb: 停止 halt_code=%0d（%0d クロック）", halt_code, cycles);
     $display("tb: SDRAM 読み出し %0d 回・書き込み %0d 回、タイミング違反 %0d 件", sdram.reads, sdram.writes, sdram.errors);
     if (fr) begin dump_regs; $fclose(fr); end
+    if (ft) $fclose(ft);
     if (fu) $fclose(fu);
 
     if ($value$plusargs("ppm=%s", path)) begin

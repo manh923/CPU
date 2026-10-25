@@ -66,7 +66,7 @@ module top_tangnano20k (
   wire [5:0]  led;
   wire        halted;
   wire [1:0]  halt_code;
-  mycpu_soc #(.CLK_HZ(27_000_000), .BAUD(115_200), .ROM_HEX("rom.hex")) soc (
+  mycpu_soc #(.CLK_HZ(27_000_000), .BAUD(115_200), .ROM_EVEN_HEX("rom_even.hex"), .ROM_ODD_HEX("rom_odd.hex")) soc (
     .clk(clk27), .rst(rst), .uart_rxd(uart_rx), .uart_txd(uart_tx),
     .sd_sclk(sd_clk), .sd_mosi(sd_cmd), .sd_miso(sd_dat0), .sd_cs_n(sd_dat3),
     .sdram_clk(O_sdram_clk), .sdram_cke(O_sdram_cke), .sdram_cs_n(O_sdram_cs_n), .sdram_ras_n(O_sdram_ras_n),

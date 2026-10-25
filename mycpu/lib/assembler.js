@@ -404,10 +404,12 @@
     return { image: image, end: end, symbols: symbols, listing: listing.join('\n') + '\n' };
   }
 
-  // $readmemh 用：32bit ワードを 1 行ずつ（ROM の大きさまで）
-  function toReadmemh(image, words) {
+  // $readmemh 用：32bit ワードを 1 行ずつ（ROM の大きさまで）。
+  // bank が 0 / 1 なら、偶数番目 / 奇数番目のワードだけ（Verilog の ROM は 2 つに分けてある。rtl/soc.v）
+  function toReadmemh(image, words, bank) {
     var out = [];
     for (var i = 0; i < words; i++) {
+      if (bank != null && (i & 1) !== bank) continue;
       var a = i * 4;
       var w = (image[a] | 0) | ((image[a + 1] | 0) << 8) | ((image[a + 2] | 0) << 16) | ((image[a + 3] | 0) << 24);
       out.push(hex(w >>> 0, 8));
