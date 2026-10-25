@@ -15,11 +15,14 @@ int __syscall(int n, int a, int b, int c);
 #define SYS_PUTG    8
 #define SYS_SETATTR 9
 #define SYS_KBHIT   10
+#define SYS_GOTOXY  11
+#define SYS_GETXY   12
 #define SYS_OPEN    16
 #define SYS_CLOSE   17
 #define SYS_READ    18
 #define SYS_WRITE   19
 #define SYS_DELETE  20
 #define SYS_RENAME  21
+#define SYS_SEEK    22
 
 #endif

@@ -66,10 +66,13 @@ function split(asm) {
 function buildAsm(files, opts = {}) {
   const libc = fs.readdirSync(LIBC).filter((f) => f.endsWith('.c')).sort().map((f) => path.join(LIBC, f));
   const parts = [...files, ...libc].map((f) => ({ name: path.relative(ROOT, f), ...split(compileFile(f, opts.includes)) }));
+  // crt0.s を先頭に、ほかの libc/*.s（setjmp など）はその後ろに
+  const asms = fs.readdirSync(LIBC).filter((f) => f.endsWith('.s') && f !== 'crt0.s').sort();
   const out = [
     `; ${files.map((f) => path.basename(f)).join(' ')} — tools/cc.js が作ったアセンブリ（C ライブラリ込み）`,
     `        .org 0x${BASE.toString(16)}`,
     fs.readFileSync(path.join(LIBC, 'crt0.s'), 'utf8'),
+    ...asms.map((f) => fs.readFileSync(path.join(LIBC, f), 'utf8')),
   ];
   for (const p of parts) out.push(`; ---- ${p.name} ----`, p.text);
   out.push('', '; ---- データ ----', '        .align 64');

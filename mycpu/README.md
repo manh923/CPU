@@ -72,8 +72,15 @@ node test/cctest.js                              # コンパイラのテスト�
 ```
 
 - コンパイラは `cc/`（chibicc の改造版）。`gcc` と `make` で自動でビルドされる。`int`・`long`・ポインタは 32bit、`long long` は 64bit。`float`・`double` はまだない
-- C ライブラリ（`libc/`）：`stdio.h`（`printf` の仲間・`puts`・`putchar`・`getchar`）、`stdlib.h`（`malloc`・`free`・`exit`・`atoi`・`strtol`・`qsort`・`rand`）、`string.h`、`ctype.h`、`stdarg.h`、`stddef.h`、`stdbool.h`、`mycpu.h`（MyDOS の SYSCALL）
+- C ライブラリ（`libc/`）：
+  - `stdio.h`：`FILE`（`fopen`・`fread`・`fwrite`・`fgets`・`fputs`・`fseek`・`ftell`・`fprintf` …。書くファイルは後ろに足すだけなので、`fseek` できるのは読むファイル）、`stdin`（1 行ずつ）・`stdout`・`stderr`、`printf` の仲間（`%lld` も）、`remove`・`rename`・`perror`
+  - `stdlib.h`（`malloc`・`free`・`realloc`・`exit`・`strtol`・`qsort`・`rand`）、`string.h`、`ctype.h`、`errno.h`、`limits.h`、`stdint.h`、`inttypes.h`、`assert.h`、`setjmp.h`、`time.h`（時計がないので 2026-01-01 から起動後の秒数）、`stdarg.h`・`stddef.h`・`stdbool.h`
+  - `conio.h`：`clrscr`・`gotoxy`・`textattr`・`getch`（矢印・Home・End・PgUp・PgDn・Delete・F1〜F4 を 1 つのキーに）・`kbhit`
+  - `mycpu.h`：MyDOS の SYSCALL を直接呼ぶ
+  - テストは `test/libtest.c`（MyDOS の上で動かす）
 - `disk/` に `NAME.c` を置くと、mkdisk・`sim.js --sd disk/`・ブラウザ版の SD カードに `NAME.EXE` も入る（`disk/primes.c` → `PRIMES.EXE`）。ブラウザではコンパイルできないので、ブラウザ版で `.c` を書き換えても `.EXE` は変わらない
+- **`AS`**（`disk/as.c`）：C で書いたアセンブラ。MyDOS の上で `AS -o OUT.EXE FILE.S ...` と使う（`-bin` でそのままのバイト列、`-b 番地` で最初の番地）。書き方は `lib/assembler.js` と同じで、同じバイト列を作る（テストで比べている）。ファイルをいくつも渡すと、コードとデータを分けて並べ直してつなぐ（リンカの代わり。C のプログラムなら `-b 0x1000000`）。命令の表 `disk/asops.h` は `tools/gen.js` が作る
+- **`EDIT 名前`**（`disk/edit.c`）：全画面のテキストエディタ。80 桁 × 24 行なので、UART の端末でもそのまま使える。矢印・Home・End・PgUp・PgDn・Backspace・Delete・Tab、**Ctrl-S で保存、Ctrl-X で終わり**（保存していなければ聞く）。保存は CRLF
 
 ## BIOS と MyDOS
 

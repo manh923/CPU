@@ -1,6 +1,28 @@
 // 文字列とメモリ
 #include <string.h>
 #include <stdlib.h>
+#include <errno.h>
+
+int errno;
+
+char *strerror(int e) {
+  switch (e) {
+  case 0: return "No error";
+  case EPERM: return "Operation not permitted";
+  case ENOENT: return "File not found";
+  case EIO: return "Disk error";
+  case EBADF: return "Bad file handle";
+  case ENOMEM: return "Out of memory";
+  case EACCES: return "Access denied";
+  case EEXIST: return "File exists";
+  case EINVAL: return "Invalid argument";
+  case EMFILE: return "Too many open files";
+  case ENOSPC: return "Disk full";
+  case EDOM: return "Domain error";
+  case ERANGE: return "Result out of range";
+  }
+  return "Unknown error";
+}
 
 size_t strlen(const char *s) {
   const char *p = s;
@@ -135,4 +157,60 @@ void *memchr(const void *s, int c, size_t n) {
     if (*p == (unsigned char)c)
       return (void *)p;
   return 0;
+}
+
+size_t strnlen(const char *s, size_t n) {
+  size_t i = 0;
+  while (i < n && s[i])
+    i++;
+  return i;
+}
+
+char *strndup(const char *s, size_t n) {
+  n = strnlen(s, n);
+  char *p = malloc(n + 1);
+  if (p) {
+    memcpy(p, s, n);
+    p[n] = 0;
+  }
+  return p;
+}
+
+size_t strspn(const char *s, const char *accept) {
+  size_t n = 0;
+  while (s[n] && strchr(accept, s[n]))
+    n++;
+  return n;
+}
+
+size_t strcspn(const char *s, const char *reject) {
+  size_t n = 0;
+  while (s[n] && !strchr(reject, s[n]))
+    n++;
+  return n;
+}
+
+char *strpbrk(const char *s, const char *accept) {
+  s += strcspn(s, accept);
+  return *s ? (char *)s : 0;
+}
+
+char *strtok(char *s, const char *delim) {
+  static char *next;
+  if (!s)
+    s = next;
+  if (!s)
+    return 0;
+  s += strspn(s, delim);
+  if (!*s) {
+    next = 0;
+    return 0;
+  }
+  char *end = s + strcspn(s, delim);
+  if (*end)
+    *end++ = 0;
+  else
+    end = 0;
+  next = end;
+  return s;
 }

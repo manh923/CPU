@@ -18,6 +18,7 @@
 ;   16 open(名前, モード) → ハンドル（モード 0 = 読む、1 = 新しく書く、2 = 後ろに足す）
 ;   17 close(ハンドル)   18 read(ハンドル, 置き場所, 長さ) → 読んだ長さ（0 で終わり）
 ;   19 write(ハンドル, データ, 長さ) → 書いた長さ          20 delete(名前)     21 rename(前の名前, 新しい名前)
+;   22 seek(ハンドル, 位置, 基準) → 新しい位置（基準 0 = 先頭、1 = 今の位置、2 = 終わり。書くファイルは終わりだけ）
 ;   エラーは負の数：-1 番号がない・ハンドルが違う、-2 ファイルがない、-3 開きすぎ、-4 空きがない、
 ;   -5 できない（ディレクトリ・読み出し専用・同じ名前がある）、-6 名前が正しくない、-7 カードが読めない
 ; 呼び出し規約は 8 章どおり：r16〜r23 は壊れてよい、r24〜r31 は保存する。
@@ -133,6 +134,7 @@ dos_vectors:                            ; SYSCALL の表に入れる MyDOS の�
         .word 19, f_write
         .word 20, f_delete
         .word 21, f_rename
+        .word 22, f_seek
         .word -1
 
 ; ==================================================================
@@ -1898,6 +1900,52 @@ f_read:
         LOAD32_32 r26, sp, 12
         LOAD32_32 r27, sp, 16
         ADDI32 sp, sp, 24
+        RET32
+
+; f_seek(r16 = ハンドル, r17 = 位置, r18 = 基準) → r16 = 新しい位置（負ならエラー）。SYSCALL 22
+;   基準 0 = 先頭から、1 = 今の位置から、2 = 終わりから。0 ≦ 新しい位置 ≦ 大きさ。
+;   読むファイルはどこへでも（seek_clus が位置からクラスタを求め直す）。書くファイルは後ろに足すだけなので、終わりだけ
+f_seek:
+        ADDI32 sp, sp, -16
+        STORE32_32 lr, sp, 0
+        STORE32_32 r24, sp, 4
+        STORE32_32 r25, sp, 8
+        ADDR32 r24, r17, r0             ; 位置
+        ADDR32 r25, r18, r0             ; 基準
+        CALL32 h_check
+        CMPEQI32 p1, r16, 0
+        BR32 p1, .bad
+        CMPEQI32 p1, r25, 1
+        BR32 p1, .cur
+        CMPEQI32 p1, r25, 2
+        BR32 p1, .end
+        CMPEQI32 p1, r25, 0
+        BR32 p1, .set
+        JMP32 .inval
+.cur:   LOAD32_32 r17, r16, H_POS
+        ADDR32 r24, r24, r17
+        JMP32 .set
+.end:   LOAD32_32 r17, r16, H_SIZE
+        ADDR32 r24, r24, r17
+.set:   LOAD32_32 r17, r16, H_SIZE      ; 大きさを超える（負も符号なしで大きい）のはだめ
+        CMPLTUR32 p1, r17, r24
+        BR32 p1, .inval
+        LOAD32_32 r17, r16, H_MODE
+        CMPEQI32 p1, r17, 1             ; 読むファイル
+        BR32 p1, .ok
+        LOAD32_32 r17, r16, H_POS       ; 書くファイルは今の位置（終わり）だけ
+        CMPNER32 p1, r24, r17
+        BR32 p1, .inval
+.ok:    STORE32_32 r24, r16, H_POS
+        ADDR32 r16, r24, r0
+        JMP32 .ret
+.inval: ADDI32 r16, r0, -5
+        JMP32 .ret
+.bad:   ADDI32 r16, r0, -1
+.ret:   LOAD32_32 lr, sp, 0
+        LOAD32_32 r24, sp, 4
+        LOAD32_32 r25, sp, 8
+        ADDI32 sp, sp, 16
         RET32
 
 ; f_write(r16 = ハンドル, r17 = データ, r18 = 長さ) → r16 = 書いた長さ（負ならエラー）。後ろに足すだけ。SYSCALL 19

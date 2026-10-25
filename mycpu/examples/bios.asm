@@ -78,6 +78,8 @@ reset:  JMP32 bios_start
         JMP32 bios_sd_write             ; 0x68 sd_write(r16 = セクタ番号, r17 = 512 バイト) → r16 = 0 なら成功
         JMP32 bios_kbhit                ; 0x70 kbhit() → r16 = キーが来ていれば 1
         JMP32 bios_setattr              ; 0x78 setattr(r16 = 色) → r16 = 前の色
+        JMP32 bios_gotoxy               ; 0x80 gotoxy(r16 = 桁, r17 = 行)：カーソルを動かす（UART には ESC [ 行 ; 桁 H）
+        JMP32 bios_getxy                ; 0x88 getxy() → r16 = 桁 + 行 × 65536
 
 bios_start:
         ADDI32 sp, r0, STACK_TOP
@@ -351,6 +353,8 @@ bios_vectors:                           ; BIOS が SYSCALL の表に登録する
         .word 8, bios_putg
         .word 9, bios_setattr
         .word 10, bios_kbhit
+        .word 11, bios_gotoxy
+        .word 12, bios_getxy
         .word -1
 
 ; ==================================================================
@@ -438,7 +442,89 @@ bios_cls:
         BR32 p1, .l
         STORE32_32 r0, r0, CUR_X
         STORE32_32 r0, r0, CUR_Y
+        ADDI32 r18, r0, 27              ; UART の端末も消す：ESC [ 2 J ESC [ H
+        CALL32 uart_raw
+        ADDI32 r18, r0, '['
+        CALL32 uart_raw
+        ADDI32 r18, r0, '2'
+        CALL32 uart_raw
+        ADDI32 r18, r0, 'J'
+        CALL32 uart_raw
+        ADDI32 r18, r0, 27
+        CALL32 uart_raw
+        ADDI32 r18, r0, '['
+        CALL32 uart_raw
+        ADDI32 r18, r0, 'H'
+        CALL32 uart_raw
         JMPR32 r20
+
+; gotoxy(r16 = 桁, r17 = 行)：カーソルを動かす。画面の外は端にそろえる。UART の端末には ESC [ 行 ; 桁 H（1 から数える）
+bios_gotoxy:
+        ADDI32 sp, sp, -8
+        STORE32_32 lr, sp, 0
+        ADDI32 r18, r0, COLS - 1
+        CMPLTI32 p1, r16, COLS
+        SEL32 r16, r16, r18, p1
+        CMPLTI32 p1, r16, 0
+        SEL32 r16, r0, r16, p1
+        ADDI32 r18, r0, ROWS - 1
+        CMPLTI32 p1, r17, ROWS
+        SEL32 r17, r17, r18, p1
+        CMPLTI32 p1, r17, 0
+        SEL32 r17, r0, r17, p1
+        STORE32_32 r16, r0, CUR_X
+        STORE32_32 r17, r0, CUR_Y
+        ADDI32 r18, r0, 27
+        CALL32 uart_raw
+        ADDI32 r18, r0, '['
+        CALL32 uart_raw
+        LOAD32_32 r16, r0, CUR_Y
+        ADDI32 r16, r16, 1
+        CALL32 uart_dec
+        ADDI32 r18, r0, ';'
+        CALL32 uart_raw
+        LOAD32_32 r16, r0, CUR_X
+        ADDI32 r16, r16, 1
+        CALL32 uart_dec
+        ADDI32 r18, r0, 'H'
+        CALL32 uart_raw
+        LOAD32_32 lr, sp, 0
+        ADDI32 sp, sp, 8
+        RET32
+
+; getxy() → r16 = 桁 + 行 × 65536
+bios_getxy:
+        LOAD32_32 r16, r0, CUR_Y
+        SHLI32 r16, r16, 16
+        LOAD32_32 r17, r0, CUR_X
+        ORR32 r16, r16, r17
+        RET32
+
+; uart_dec(r16 = 0〜999)：10 進で UART へ。r16〜r21 を壊す
+uart_dec:
+        ADDR32 r21, lr, r0
+        ADDI32 r20, r0, 0               ; もう数字を出したか
+        DIVUI32 r18, r16, 100
+        CMPEQI32 p1, r18, 0
+        BR32 p1, .tens
+        ADDI32 r18, r18, '0'
+        CALL32 uart_raw
+        ADDI32 r20, r0, 1
+.tens:  REMUI32 r16, r16, 100
+        DIVUI32 r18, r16, 10
+        CMPNEI32 p1, r18, 0
+        CMPNEI32 p2, r20, 0
+        BTOI32 r19, p1
+        BTOI32 r20, p2
+        ORR32 r19, r19, r20
+        CMPEQI32 p1, r19, 0
+        BR32 p1, .ones
+        ADDI32 r18, r18, '0'
+        CALL32 uart_raw
+.ones:  REMUI32 r18, r16, 10
+        ADDI32 r18, r18, '0'
+        CALL32 uart_raw
+        JMPR32 r21
 
 ; scroll()：画面を 1 行上へずらし、最後の行を消す
 scroll:
@@ -589,34 +675,33 @@ bios_puthex:
 
 ; getc() → r16：キーが来るまでカーソルを点滅させて待つ
 bios_getc:
-        ADDI32 sp, sp, -8
+        ADDI32 sp, sp, -16
         STORE32_32 lr, sp, 0
         STORE32_32 r24, sp, 4
+        STORE32_32 r25, sp, 8
         CALL32 cell_ptr
         ADDR32 r24, r17, r0
+        LOAD16U_32 r25, r24, 0          ; カーソルの下にある文字（と色）。キーが来たら元に戻す
 .w:     LOAD32_32 r16, r0, UART_STATUS
         ANDI32 r16, r16, 2
         CMPNEI32 p1, r16, 0
         BR32 p1, .got
-        LOAD32_32 r16, r0, TIMER_COUNT  ; 約 0.26 秒ごとに '_' と空白を入れ替える
+        LOAD32_32 r16, r0, TIMER_COUNT  ; 約 0.26 秒ごとに '_' と元の文字を入れ替える
         SHRI32 r16, r16, 18
         ANDI32 r16, r16, 1
         CMPNEI32 p1, r16, 0
         LOAD32_32 r17, r0, ATTR
         SHLI32 r17, r17, 8
         ADDI32 r18, r17, '_'
-        ORI32 r17, r17, ' '
-        SEL32 r17, r18, r17, p1
+        SEL32 r17, r18, r25, p1
         STORE16_32 r17, r24, 0
         JMP32 .w
-.got:   LOAD32_32 r17, r0, ATTR
-        SHLI32 r17, r17, 8
-        ORI32 r17, r17, ' '
-        STORE16_32 r17, r24, 0
+.got:   STORE16_32 r25, r24, 0
         LOAD32_32 r16, r0, UART_RX
         LOAD32_32 lr, sp, 0
         LOAD32_32 r24, sp, 4
-        ADDI32 sp, sp, 8
+        LOAD32_32 r25, sp, 8
+        ADDI32 sp, sp, 16
         RET32
 
 ; getline(r16 = 置き場所, r17 = 最大の長さ) → r16 = 長さ。Enter で終わり、Backspace で消す

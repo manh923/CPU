@@ -19,5 +19,12 @@ void *memmove(void *dst, const void *src, size_t n);
 void *memset(void *p, int c, size_t n);
 int memcmp(const void *a, const void *b, size_t n);
 void *memchr(const void *s, int c, size_t n);
+char *strerror(int e);
+size_t strspn(const char *s, const char *accept);
+size_t strcspn(const char *s, const char *reject);
+char *strpbrk(const char *s, const char *accept);
+char *strtok(char *s, const char *delim);
+char *strndup(const char *s, size_t n);
+size_t strnlen(const char *s, size_t n);
 
 #endif
