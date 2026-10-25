@@ -28,6 +28,7 @@
     this.XM = mask(this.xlen);
     this.onTx = opts.onTx || function () {};
     this.onLed = opts.onLed || function () {};
+    this.sd = opts.sd || null;   // SD カード（lib/sdcard.js）。なければ何も挿していない
     // 時間（µs）。既定は 1 命令 = 1µs で決定的。ブラウザでは実時間を渡す
     this.clock = opts.clock || null;
     this.trace = opts.trace || null;
@@ -54,23 +55,33 @@
     this.rx = [];
     this.timerBase = 0; this.timerCmp = 0; this.timerEn = false;
     this.led = 0;
+    this.sdCtrl = 0; this.sdRx = 0xFF;
     this.steps = 0;
     this.ticks = 0;
     this.wfi = false;
     this.halted = null;
   };
 
-  // プログラムを番地 0 から置く（ROM を超えた分はその番地のメモリへ）
+  // プログラムを番地 0 から置く（ROM を超えた分はその番地のメモリへ）。
+  // .org で飛ばしたすき間（メモリのない番地の 0）は読み飛ばす。戻り値は「番地 0 に命令があるか」
   CPU.prototype.load = function (image, base) {
     base = base || 0;
     for (var i = 0; i < image.length; i++) {
       var r = this.region(base + i, 1);
-      if (!r || !r.mem) throw new Error('0x' + (base + i).toString(16) + ' にはプログラムを置けない');
+      if (!r || !r.mem) {
+        if (image[i] === 0) continue;
+        throw new Error('0x' + (base + i).toString(16) + ' にはメモリがないので、プログラムを置けない');
+      }
       r.mem[r.off] = image[i];
     }
     this.vramDirty.fill(1);
     this.vramChanged = true;
+    return (this.rom[0] | this.rom[1] | this.rom[2] | this.rom[3]) !== 0;
   };
+
+  // 番地 0 に何もないときの説明（リセット後は番地 0 から実行するので、すぐ HLT で止まる）
+  CPU.NO_RESET_CODE = '番地 0（リセット後に実行を始める場所）に何もないので、すぐ HLT で止まる。' +
+    '.org 0x20000 で書いたプログラムは、bios.asm の BIOS から UART 起動で読み込んで使う（tools/mkboot.js）。';
 
   CPU.prototype.pushRx = function (bytes) {
     for (var i = 0; i < bytes.length; i++) this.rx.push(bytes[i] & 0xff);
@@ -155,6 +166,9 @@
       case IO.TIMER_CMP: return this.timerCmp;
       case IO.TIMER_CTRL: return (this.timerEn ? 1 : 0) | (this.timerPending() ? 2 : 0);
       case IO.LED: return this.led;
+      case IO.SD_DATA: return this.sdRx;
+      case IO.SD_CTRL: return this.sdCtrl;
+      case IO.SD_STATUS: return 0;   // 送受信は一瞬で終わる
       default: return 0;
     }
   };
@@ -165,6 +179,14 @@
       case IO.TIMER_CMP: this.timerCmp = v >>> 0; break;
       case IO.TIMER_CTRL: this.timerEn = !!(v & 1); break;
       case IO.LED: this.led = v & 0x3f; this.onLed(this.led); break;
+      case IO.SD_DATA:
+        // CS を選んでいるときだけカードが応える。挿していなければ 0xFF が返る
+        this.sdRx = this.sd && (this.sdCtrl & 1) ? this.sd.exchange(v & 0xFF) : 0xFF;
+        break;
+      case IO.SD_CTRL:
+        if ((this.sdCtrl & 1) && !(v & 1) && this.sd) this.sd.deselect();
+        this.sdCtrl = v & 0xFF01;
+        break;
     }
   };
 

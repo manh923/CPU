@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// UART 起動（examples/mydos.asm の BIOS で U キー）で送るファイルを作る
+// UART 起動（examples/bios.asm の BIOS で U キー）で送るファイルを作る
 //   node tools/mkboot.js prog.asm|prog.bin [-o 出力] [--base 0x20000]
 // 中身：'M' 'C'、長さ（4 バイト、リトルエンディアン）、番地 base からのプログラム。
 // プログラムは .org 0x20000 で書いておく。できたファイルは端末ソフトのバイナリ送信で送るか、
@@ -8,7 +8,7 @@
 const fs = require('fs');
 const { assemble, AsmError } = require('../lib/assembler.js');
 
-const OS_MAX = 0x7000;
+const OS_MAX = 0xB000;
 
 function main(argv) {
   let input = null, out = null, base = 0x20000;

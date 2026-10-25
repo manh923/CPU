@@ -43,6 +43,14 @@
   <h1>MyCPU シミュレータ</h1>
   <select id="example" title="例題"></select>
   <select id="xlen" title="CPU の bit 数"><option value="32">32bit CPU</option><option value="64">64bit CPU</option></select>
+  <select id="sdsel" title="SD カード（MyDOS の C: ドライブ）">
+    <option value="disk16">SD：disk/ の中身（FAT16）</option>
+    <option value="disk32">SD：disk/ の中身（FAT32）</option>
+    <option value="none">SD：なし</option>
+    <option value="img">SD：.img ファイルを選ぶ…</option>
+  </select>
+  <input type="file" id="sdfile" accept=".img,.bin" hidden>
+  <button id="sdsave" title="今の SD カードの中身（MyDOS で書いたものも）を .img で保存">SD を保存</button>
   <button id="run" class="primary">アセンブルして実行</button>
   <button id="pause">一時停止</button>
   <button id="step">1 命令</button>
@@ -71,6 +79,9 @@
 <script src="../lib/font.js"></script>
 <script src="../lib/video.js"></script>
 <script src="../lib/examples.js"></script>
+<script src="../lib/fat.js"></script>
+<script src="../lib/disk.js"></script>
+<script src="../lib/sdcard.js"></script>
 <script>
 (function () {
   'use strict';
@@ -90,13 +101,16 @@
     src.value = M.EXAMPLES[i].source;
     $('xlen').value = /selftest64/.test(M.EXAMPLES[i].name) ? '64' : '32';
   }
-  var start = M.EXAMPLES.findIndex(function (e) { return e.name === 'mydos.asm'; });
+  var start = M.EXAMPLES.findIndex(function (e) { return e.name === 'bios.asm'; });
   $('example').value = String(Math.max(start, 0));
   loadExample(Math.max(start, 0));
   $('example').onchange = function () { loadExample(+this.value); };
 
+  var uartCR = false;   // \r の後は、次の文字で今の行を書き直す（端末と同じ）
   function onTx(b) {
-    if (b === 13) return;
+    if (b === 13) { uartCR = true; return; }
+    if (uartCR && b !== 10) uartText = uartText.slice(0, uartText.lastIndexOf('\n') + 1);
+    uartCR = false;
     if (b === 8) uartText = uartText.slice(0, -1);
     else uartText += String.fromCharCode(b);
     if (uartText.length > 20000) uartText = uartText.slice(-15000);
@@ -108,6 +122,37 @@
     for (var i = 0; i < leds.length; i++) leds[i].classList.toggle('on', !!(v & (1 << i)));
   }
 
+  // SD カード：disk/ の中身から FAT のイメージを作るか、選んだ .img を使う
+  var imgDisk = null, builtDisks = {};
+  function sdDisk() {
+    var v = $('sdsel').value;
+    if (v === 'none') return null;
+    if (v === 'img') return imgDisk;
+    if (!builtDisks[v]) builtDisks[v] = M.disk.makeDisk(M.DISK, { type: v === 'disk32' ? 'fat32' : 'fat16' });
+    return builtDisks[v];
+  }
+  $('sdsel').addEventListener('change', function () { if (this.value === 'img') $('sdfile').click(); });
+  $('sdfile').addEventListener('change', function () {
+    var f = this.files[0];
+    if (!f) return;
+    f.arrayBuffer().then(function (buf) {
+      imgDisk = M.fat.bufferDisk(new Uint8Array(buf));
+      $('sdsel').options[3].textContent = 'SD：' + f.name;
+    });
+  });
+
+  // SD カードの中身を .img で保存（同じページで続けて実行すると、書いた中身は残る）
+  $('sdsave').addEventListener('click', function () {
+    var d;
+    try { d = sdDisk(); } catch (e) { errors.textContent = 'SD カード：' + e.message; return; }
+    if (!d) { errors.textContent = 'SD カードがない'; return; }
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([d.toBuffer ? d.toBuffer() : d.buffer], { type: 'application/octet-stream' }));
+    a.download = 'sdcard.img';
+    a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+  });
+
   function build() {
     errors.textContent = '';
     var result;
@@ -118,12 +163,16 @@
       return false;
     }
     var t0 = performance.now();
+    var disk;
+    try { disk = sdDisk(); } catch (e) { errors.textContent = 'SD カード：' + e.message; return false; }
     cpu = new M.CPU({
-      xlen: +$('xlen').value, onTx: onTx, onLed: onLed,
+      xlen: +$('xlen').value, onTx: onTx, onLed: onLed, sd: disk ? new M.SDCard(disk) : null,
       clock: function () { return Math.floor((performance.now() - t0) * 1000); },
     });
-    try { cpu.load(result.image); } catch (e) { errors.textContent = e.message; return false; }
-    uartText = ''; uart.textContent = '';
+    try {
+      if (!cpu.load(result.image)) errors.textContent = '注意: ' + M.CPU.NO_RESET_CODE;
+    } catch (e) { errors.textContent = e.message; return false; }
+    uartText = ''; uart.textContent = ''; uartCR = false;
     onLed(0);
     stepsAtSecond = 0; secondStart = performance.now();
     redraw(true);

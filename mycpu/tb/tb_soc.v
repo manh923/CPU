@@ -7,8 +7,10 @@
 module tb;
   parameter ROM_HEX  = "";
   parameter FONT_HEX = "";
-  // シミュレーションを速くするため、クロック 4MHz・UART 1Mbps（1 bit = 4 クロック）とみなす
-  localparam integer CLK_HZ = 4_000_000, BAUD = 1_000_000, BIT = CLK_HZ / BAUD;
+  parameter SD_HEX   = "";        // SD カードの中身（空ならカードなし）
+  parameter integer SD_SECTORS = 8192;
+  // シミュレーションを速くするため、クロック 1MHz（タイマーの 1µs = 1 クロック）・UART 250kbps（1 bit = 4 クロック）とみなす
+  localparam integer CLK_HZ = 1_000_000, BAUD = 250_000, BIT = CLK_HZ / BAUD;
 
   reg clk = 1'b0, vclk = 1'b0, rst = 1'b1, rxd = 1'b1;
   always #5 clk = ~clk;
@@ -19,8 +21,11 @@ module tb;
   wire [5:0]  led;
   wire [11:0] vaddr;
   wire [31:0] vdata;
+  wire sd_sclk, sd_mosi, sd_miso, sd_cs_n;
+  sd_model #(.DISK_HEX(SD_HEX), .SECTORS(SD_SECTORS)) sd (.sclk(sd_sclk), .mosi(sd_mosi), .cs_n(sd_cs_n), .miso(sd_miso));
   mycpu_soc #(.CLK_HZ(CLK_HZ), .BAUD(BAUD), .ROM_HEX(ROM_HEX)) soc (
     .clk(clk), .rst(rst), .uart_rxd(rxd), .uart_txd(txd), .led(led),
+    .sd_sclk(sd_sclk), .sd_mosi(sd_mosi), .sd_miso(sd_miso), .sd_cs_n(sd_cs_n),
     .halted(halted), .halt_code(halt_code), .vclk(vclk), .vaddr(vaddr), .vdata(vdata)
   );
   wire [7:0] r, g, b;

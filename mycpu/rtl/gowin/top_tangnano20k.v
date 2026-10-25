@@ -9,6 +9,12 @@ module top_tangnano20k (
   input  wire       uart_rx,     // USB-UART（BL616）から
   output wire       uart_tx,
   output wire [5:0] led_n,       // LED（0 で点灯）
+  output wire       sd_clk,      // microSD（SPI モードで使う）
+  output wire       sd_cmd,      //   MOSI
+  input  wire       sd_dat0,     //   MISO
+  output wire       sd_dat3,     //   CS
+  output wire       sd_dat1,     //   SPI では使わない（1 にしておく）
+  output wire       sd_dat2,
   output wire       tmds_clk_p, tmds_clk_n,
   output wire [2:0] tmds_d_p, tmds_d_n
 );
@@ -50,9 +56,13 @@ module top_tangnano20k (
   wire [1:0]  halt_code;
   mycpu_soc #(.CLK_HZ(27_000_000), .BAUD(115_200), .ROM_HEX("rom.hex")) soc (
     .clk(clk27), .rst(rst), .uart_rxd(uart_rx), .uart_txd(uart_tx),
+    .sd_sclk(sd_clk), .sd_mosi(sd_cmd), .sd_miso(sd_dat0), .sd_cs_n(sd_dat3),
     .led(led), .halted(halted), .halt_code(halt_code),
     .vclk(clk_pix), .vaddr(vaddr), .vdata(vdata)
   );
+  assign sd_dat1 = 1'b1;
+  assign sd_dat2 = 1'b1;
+
   // 止まったら LED5・LED4 に理由を出す（01 = HLT、10 = 不正命令、11 = バスエラー）
   assign led_n = ~(halted ? {halt_code, led[3:0]} : led);
 
