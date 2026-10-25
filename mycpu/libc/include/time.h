@@ -17,5 +17,8 @@ clock_t clock(void);
 struct tm *localtime(const time_t *t);
 struct tm *gmtime(const time_t *t);
 size_t strftime(char *buf, size_t n, const char *fmt, const struct tm *tm);
+char *asctime(const struct tm *tm);
+char *ctime(const time_t *t);
+char *ctime_r(const time_t *t, char *buf);
 
 #endif

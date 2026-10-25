@@ -8,6 +8,9 @@
 #define RAND_MAX 0x7fffffff
 
 void exit(int status);
+int atexit(void (*fn)(void));
+char *getenv(const char *name);
+int mkstemp(char *tmpl);                        // libc/posix.c（いつも失敗）
 void abort(void);
 void *malloc(size_t size);
 void *calloc(size_t n, size_t size);

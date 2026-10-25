@@ -23,7 +23,29 @@ static int set_errno(int r) {
   return -1;
 }
 
-FILE *fopen(const char *name, const char *mode) {
+// MyDOS の名前にする：ディレクトリ（/ \ :）を捨て、名前は 8 文字・拡張子は 3 文字までに縮める。
+// MyDOS にはディレクトリがないので、"sys/stat.h" → "STAT.H"、"preprocess.c" → "PREPROCE.C"（大文字は MyDOS がする）
+static const char *dosname(const char *path, char *out) {
+  const char *p = path;
+  for (const char *s = path; *s; s++)
+    if (*s == '/' || *s == '\\' || *s == ':')
+      p = s + 1;
+  const char *dot = strrchr(p, '.');
+  int n = 0;
+  for (const char *s = p; *s && s != dot && n < 8; s++)
+    out[n++] = *s;
+  if (dot) {
+    out[n++] = '.';
+    for (int i = 1; dot[i] && i <= 3; i++)
+      out[n++] = dot[i];
+  }
+  out[n] = 0;
+  return out;
+}
+
+FILE *fopen(const char *path, const char *mode) {
+  char name[13];
+  dosname(path, name);
   int m;                                 // MyDOS：0 = 読む、1 = 新しく書く、2 = 後ろに足す
   if (mode[0] == 'r' && !strchr(mode, '+'))
     m = 0;
@@ -57,7 +79,52 @@ FILE *fopen(const char *name, const char *mode) {
   return fp;
 }
 
+// メモリに書く FILE。fflush・fclose で *bufp・*sizep に今の中身（最後に 0 を付ける）を知らせる
+FILE *open_memstream(char **bufp, size_t *sizep) {
+  FILE *fp = calloc(1, sizeof(FILE));
+  if (!fp)
+    return 0;
+  fp->fd = -3;
+  fp->mode = 'w';
+  fp->ungot = -1;
+  fp->len = 256;
+  fp->buf = malloc(fp->len);
+  fp->mbuf = bufp;
+  fp->msize = sizep;
+  fp->buf[0] = 0;
+  *bufp = (char *)fp->buf;
+  *sizep = 0;
+  return fp;
+}
+
+// 1 バイト書く（ためて、いっぱいなら MyDOS へ。メモリの FILE なら大きくする）
+static int put_byte(FILE *fp, int c) {
+  if (fp->fd == -3) {
+    if (fp->pos + 1 >= fp->len) {
+      unsigned char *nb = realloc(fp->buf, fp->len * 2);
+      if (!nb) {
+        fp->err = 1;
+        return EOF;
+      }
+      fp->buf = nb;
+      fp->len *= 2;
+    }
+    fp->buf[fp->pos++] = c;
+    return c & 0xff;
+  }
+  fp->buf[fp->pos++] = c;
+  if (fp->pos == BUFSIZ && fflush(fp) < 0)
+    return EOF;
+  return c & 0xff;
+}
+
 int fflush(FILE *fp) {
+  if (fp && fp->fd == -3) {
+    fp->buf[fp->pos] = 0;
+    *fp->mbuf = (char *)fp->buf;
+    *fp->msize = fp->pos;
+    return 0;
+  }
   if (!fp || fp->fd < 0 || fp->mode != 'w' || fp->pos == 0)
     return 0;
   int r = __syscall(SYS_WRITE, fp->fd, (int)fp->buf, fp->pos);
@@ -70,6 +137,11 @@ int fflush(FILE *fp) {
 }
 
 int fclose(FILE *fp) {
+  if (fp->fd == -3) {                    // 中身は呼んだ側のもの（free しない）
+    fflush(fp);
+    free(fp);
+    return 0;
+  }
   if (fp->fd < 0)
     return 0;
   int r = fflush(fp);
@@ -135,10 +207,7 @@ int fputc(int c, FILE *fp) {
   }
   if (fp->mode != 'w')
     return EOF;
-  fp->buf[fp->pos++] = c;
-  if (fp->pos == BUFSIZ && fflush(fp) < 0)
-    return EOF;
-  return c & 0xff;
+  return put_byte(fp, c);
 }
 
 int putc(int c, FILE *fp) { return fputc(c, fp); }
@@ -224,11 +293,9 @@ size_t fwrite(const void *p, size_t size, size_t n, FILE *fp) {
   }
   if (fp->mode != 'w')
     return 0;
-  for (size_t i = 0; i < want; i++) {
-    fp->buf[fp->pos++] = s[i];
-    if (fp->pos == BUFSIZ && fflush(fp) < 0)
+  for (size_t i = 0; i < want; i++)
+    if (put_byte(fp, s[i]) == EOF)
       return size ? i / size : 0;
-  }
   return n;
 }
 
@@ -275,13 +342,15 @@ void rewind(FILE *fp) {
   clearerr(fp);
 }
 
-int remove(const char *name) {
-  int r = __syscall(SYS_DELETE, (int)name, 0, 0);
+int remove(const char *path) {
+  char name[13];
+  int r = __syscall(SYS_DELETE, (int)dosname(path, name), 0, 0);
   return r < 0 ? set_errno(r) : 0;
 }
 
-int rename(const char *from, const char *to) {
-  int r = __syscall(SYS_RENAME, (int)from, (int)to, 0);
+int rename(const char *path1, const char *path2) {
+  char from[13], to[13];
+  int r = __syscall(SYS_RENAME, (int)dosname(path1, from), (int)dosname(path2, to), 0);
   return r < 0 ? set_errno(r) : 0;
 }
 

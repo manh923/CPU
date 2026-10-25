@@ -92,3 +92,16 @@ size_t strftime(char *buf, size_t n, const char *fmt, const struct tm *tm) {
     buf[len] = 0;
   return len;
 }
+
+// "Thu Jan  1 00:00:00 2026\n" の形
+char *asctime(const struct tm *tm) {
+  static char buf[32];
+  static const char *wd = "SunMonTueWedThuFriSat", *mn = "JanFebMarAprMayJunJulAugSepOctNovDec";
+  snprintf(buf, sizeof(buf), "%.3s %.3s %2d %02d:%02d:%02d %d\n", wd + tm->tm_wday * 3, mn + tm->tm_mon * 3,
+           tm->tm_mday, tm->tm_hour, tm->tm_min, tm->tm_sec, tm->tm_year + 1900);
+  return buf;
+}
+
+char *ctime(const time_t *t) { return asctime(localtime(t)); }
+
+char *ctime_r(const time_t *t, char *buf) { return strcpy(buf, ctime(t)); }

@@ -4,11 +4,30 @@
 #include <ctype.h>
 #include <mycpu.h>
 
-void exit(int status) {
+// atexit で登録した関数を、登録の逆順に呼んでから終わる
+static void (*exit_funcs[32])(void);
+static int n_exit_funcs;
+
+int atexit(void (*fn)(void)) {
+  if (n_exit_funcs == 32)
+    return -1;
+  exit_funcs[n_exit_funcs++] = fn;
+  return 0;
+}
+
+void _exit(int status) {
   __syscall(SYS_EXIT, status, 0, 0);
   for (;;)
     ;
 }
+
+void exit(int status) {
+  while (n_exit_funcs > 0)
+    exit_funcs[--n_exit_funcs]();
+  _exit(status);
+}
+
+char *getenv(const char *name) { return 0; }   // MyDOS には環境変数がない
 
 void abort(void) {
   __syscall(SYS_PUTS, (int)"abort\n", 0, 0);

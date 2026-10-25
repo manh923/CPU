@@ -6,7 +6,7 @@
 
 #define EOF (-1)
 #define BUFSIZ 512
-#define FILENAME_MAX 13          // MyDOS は 8.3 の名前だけ
+#define FILENAME_MAX 13          // MyDOS は 8.3 の名前だけ（長い名前・ディレクトリ付きは libc が縮める）
 #define FOPEN_MAX 4              // MyDOS が同時に開けるファイルの数
 #define SEEK_SET 0
 #define SEEK_CUR 1
@@ -20,11 +20,14 @@ typedef struct __FILE {
   int ungot;                     // ungetc した文字（-1 = なし）
   unsigned char *buf;            // BUFSIZ バイト
   int pos, len;                  // 読む：buf の中の位置と長さ。書く：たまった長さ（pos）
+  char **mbuf;                   // open_memstream：知らせる先（fd = -3。buf は大きくしていく、len は確保した大きさ）
+  size_t *msize;
 } FILE;
 
 extern FILE *stdin, *stdout, *stderr;
 
 FILE *fopen(const char *name, const char *mode);
+FILE *open_memstream(char **bufp, size_t *sizep);
 int fclose(FILE *fp);
 size_t fread(void *p, size_t size, size_t n, FILE *fp);
 size_t fwrite(const void *p, size_t size, size_t n, FILE *fp);

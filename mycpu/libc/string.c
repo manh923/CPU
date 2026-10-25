@@ -20,6 +20,8 @@ char *strerror(int e) {
   case ENOSPC: return "Disk full";
   case EDOM: return "Domain error";
   case ERANGE: return "Result out of range";
+  case ECHILD: return "No child process";
+  case ENOSYS: return "Not supported";
   }
   return "Unknown error";
 }
