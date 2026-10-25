@@ -14,11 +14,13 @@
 // Represents a deleted hash entry
 #define TOMBSTONE ((void *)-1)
 
-static uint64_t fnv_hash(char *s, int len) {
-  uint64_t hash = 0xcbf29ce484222325;
+// MyCPU：32bit の FNV-1a。表の大きさはいつも 2 の累乗なので、% の代わりに & で場所を決める
+// （64bit の余りはこの CPU ではソフトウェアの割り算になって遅い。場所の決め方が変わるだけで、結果は同じ）
+static uint32_t fnv_hash(char *s, int len) {
+  uint32_t hash = 2166136261u;
   for (int i = 0; i < len; i++) {
-    hash *= 0x100000001b3;
     hash ^= (unsigned char)s[i];
+    hash *= 16777619u;
   }
   return hash;
 }
@@ -61,10 +63,10 @@ static HashEntry *get_entry(HashMap *map, char *key, int keylen) {
   if (!map->buckets)
     return NULL;
 
-  uint64_t hash = fnv_hash(key, keylen);
+  uint32_t hash = fnv_hash(key, keylen);
 
   for (int i = 0; i < map->capacity; i++) {
-    HashEntry *ent = &map->buckets[(hash + i) % map->capacity];
+    HashEntry *ent = &map->buckets[(hash + i) & (map->capacity - 1)];
     if (match(ent, key, keylen))
       return ent;
     if (ent->key == NULL)
@@ -81,10 +83,10 @@ static HashEntry *get_or_insert_entry(HashMap *map, char *key, int keylen) {
     rehash(map);
   }
 
-  uint64_t hash = fnv_hash(key, keylen);
+  uint32_t hash = fnv_hash(key, keylen);
 
   for (int i = 0; i < map->capacity; i++) {
-    HashEntry *ent = &map->buckets[(hash + i) % map->capacity];
+    HashEntry *ent = &map->buckets[(hash + i) & (map->capacity - 1)];
 
     if (match(ent, key, keylen))
       return ent;
