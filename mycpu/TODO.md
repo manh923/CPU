@@ -83,7 +83,10 @@ MyDOS の上で C コンパイラを動かし、C のプログラム（コンパ
   `%lld`・`%lf` などの長さ、幅、`*`（読み飛ばし）。数の変換は今ある strtol・strtod を使う。PC の glibc の sscanf と比べるテストも
 - **カードを作るときにサブディレクトリに分ける**（下の MyDOS のサブディレクトリができてから）：tools/cc.js の diskSources・mkdisk・
   ブラウザ版のカードで、ヘッダは `INCLUDE\`、chibicc のソースは `SRC\CC\`、CRT0.S・LIBC.* は `LIB\` に。
-  CC はヘッダを `INCLUDE\` から探し、BUILD.BAT・SELFHOST.BAT もパスを付けて呼ぶ。libc の fopen のディレクトリを捨てる処理はやめる
+  BUILD.BAT・SELFHOST.BAT もパスを付けて呼ぶ。MyDOS のサブディレクトリだけ作っても、次の 3 つがないと CC は読めない：
+  1. libc の fopen：ディレクトリを捨てずにそのまま渡す（/ は \ に、ディレクトリ名も 1 つずつ 8.3 に縮める）
+  2. CC のヘッダの探し場所を `C:\INCLUDE` に決め打ち（MyDOS では CC.EXE の場所が分からない。argv[0] は PROG）
+  3. MyDOS のパス：`.`・`..`、`/` と `\` の両方（chibicc は「今のファイルのディレクトリ/名前」で探すので）
 
 - MyDOS のサブディレクトリ：今はルートだけ。パス（`C:\INCLUDE\STDIO.H`）・`MKDIR`・`RMDIR`・`CD`・`DIR` の中身、
   プログラムを今のディレクトリ → ルートの順に探す。mkdisk もサブディレクトリに。そうしたらヘッダを `INCLUDE\`、
