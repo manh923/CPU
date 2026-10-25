@@ -550,6 +550,13 @@ static void cc1(void) {
 
   Obj *prog = parse(tok);
 
+#ifdef __MYCPU__
+  // MyCPU：メモリ（SDRAM 8MB）が足りなくなるので、アセンブリはためずにファイルへ直接書く
+  FILE *out = open_file(output_file);
+  codegen(prog, out);
+  if (fclose(out) != 0)
+    error("cannot write output file: %s", output_file);
+#else
   // Open a temporary output buffer.
   char *buf;
   size_t buflen;
@@ -563,6 +570,7 @@ static void cc1(void) {
   FILE *out = open_file(output_file);
   fwrite(buf, buflen, 1, out);
   fclose(out);
+#endif
 }
 
 static void assemble(char *input, char *output) {

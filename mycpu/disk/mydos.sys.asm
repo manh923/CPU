@@ -581,12 +581,27 @@ dos_fault:
         JMP32 run_prog.back
 .halt:  HLT
 
-; run_batch()：name83 の .BAT を 1 行ずつ実行する。
+; run_batch()：name83 の .BAT を 1 行ずつ実行する。行の中の %1〜%9 は、.BAT に渡した引数の 1〜9 番目の語に置き換える。
 ; 途中で別の .BAT を実行すると、そちらへ移って元には戻らない（MS-DOS と同じ）
 run_batch:
         ADDI32 sp, sp, -8
         STORE32_32 lr, sp, 0
         STORE32_32 r24, sp, 4
+        LOAD32_32 r16, r0, args         ; 引数を batargs へ写す（linebuf は 1 行ごとに書き換わるので）
+        ADDI32 r17, r0, batargs
+        ADDI32 r18, r0, batargs + 127
+        CMPEQI32 p1, r16, 0
+        BR32 p1, .acp
+.ac:    LOAD8U_32 r19, r16, 0
+        CMPEQI32 p1, r19, 0
+        BR32 p1, .acp
+        CMPGEUR32 p1, r17, r18
+        BR32 p1, .acp
+        STORE8_32 r19, r17, 0
+        ADDI32 r16, r16, 1
+        ADDI32 r17, r17, 1
+        JMP32 .ac
+.acp:   STORE8_32 r0, r17, 0
         ADDI32 r16, r0, 0
         CALL32 f_open83
         CMPLTI32 p1, r16, 0
@@ -619,7 +634,19 @@ run_batch:
         BR32 p1, .eol
         CMPEQI32 p1, r19, 13
         BR32 p1, .c
-        CMPGEUR32 p1, r18, r20
+        CMPNEI32 p1, r19, '%'           ; %1〜%9
+        BR32 p1, .put
+        CMPGEUR32 p1, r16, r17
+        BR32 p1, .put
+        LOAD8U_32 r21, r16, 0
+        ADDI32 r21, r21, -'1'
+        CMPGEUI32 p1, r21, 9
+        BR32 p1, .put
+        ADDI32 r16, r16, 1
+        ADDI32 r21, r21, 1
+        CALL32 bat_arg
+        JMP32 .c
+.put:   CMPGEUR32 p1, r18, r20
         BR32 p1, .c
         STORE8_32 r19, r18, 0
         ADDI32 r18, r18, 1
@@ -648,6 +675,39 @@ run_batch:
         LOAD32_32 r24, sp, 4
         ADDI32 sp, sp, 8
         RET32
+
+; bat_arg(r21 = n)：batargs の n 番目の語を r18 へ足す（r20 まで）。r18 を進める。r19・r21・r22 を壊す
+bat_arg:
+        ADDI32 r22, r0, batargs
+.sp:    LOAD8U_32 r19, r22, 0           ; 空白を飛ばす
+        CMPNEI32 p1, r19, ' '
+        BR32 p1, .word
+        ADDI32 r22, r22, 1
+        JMP32 .sp
+.word:  CMPEQI32 p1, r19, 0
+        BR32 p1, .ret
+        ADDI32 r21, r21, -1
+        CMPEQI32 p1, r21, 0
+        BR32 p1, .cp
+.skip:  CMPEQI32 p1, r19, 0             ; この語を飛ばす
+        BR32 p1, .ret
+        CMPEQI32 p1, r19, ' '
+        BR32 p1, .sp
+        ADDI32 r22, r22, 1
+        LOAD8U_32 r19, r22, 0
+        JMP32 .skip
+.cp:    CMPEQI32 p1, r19, 0
+        BR32 p1, .ret
+        CMPEQI32 p1, r19, ' '
+        BR32 p1, .ret
+        CMPGEUR32 p1, r18, r20
+        BR32 p1, .ret
+        STORE8_32 r19, r18, 0
+        ADDI32 r18, r18, 1
+        ADDI32 r22, r22, 1
+        LOAD8U_32 r19, r22, 0
+        JMP32 .cp
+.ret:   RET32
 
 ; ==================================================================
 ; 画面への出力（リダイレクト中はファイルへ）
@@ -3034,6 +3094,7 @@ vol_label:  .reserve 12
 numbuf:     .reserve 12
 cbuf:       .reserve 4
 linebuf:    .reserve 128
+batargs:    .reserve 128
 cmdbuf:     .reserve 128
 conbuf:     .reserve 128
 bss_end:

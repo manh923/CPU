@@ -20,9 +20,18 @@ Programs
   BIG.EXE      Runs from SDRAM (with its stack there too).
   CRASH.EXE    Divides by zero on purpose.
   DEMO.BAT     A batch file that runs some of the above.
+  PRIMES.EXE   Prime numbers (written in C).
+  EDIT.EXE     A full-screen text editor. EDIT NOTE.TXT (Ctrl-S, Ctrl-X).
+
+The C compiler is on this card too:
+  CC.EXE       chibicc, compiled for this CPU. CC FILE.C writes FILE.S.
+  AS.EXE       The assembler. Links FILE.S with CRT0.S and LIBC.S.
+  BUILD.BAT    BUILD NAME = CC NAME.C, then AS. Makes NAME.EXE.
+  Try: EDIT HI.C, write a main(), BUILD HI, then HI.
+  The headers (STDIO.H ...) and chibicc's own source are here as well.
 
 Try writing: COPY CON NOTE.TXT, DIR > LIST.TXT, REN, DEL.
 
-Make your own: write it with .org 0x26000 (or .org 0x1000000 for a
+Or in assembly: write it with .org 0x26000 (or .org 0x1000000 for a
 big .EXE in SDRAM), then tools/mkdisk.js turns
 NAME.exe.asm into NAME.EXE (or NAME.com.asm into NAME.COM).

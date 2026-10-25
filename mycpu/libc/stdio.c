@@ -87,7 +87,7 @@ FILE *open_memstream(char **bufp, size_t *sizep) {
   fp->fd = -3;
   fp->mode = 'w';
   fp->ungot = -1;
-  fp->len = 256;
+  fp->len = 28;                          // 最初は小さく（足りなければ 2 倍ずつ）
   fp->buf = malloc(fp->len);
   fp->mbuf = bufp;
   fp->msize = sizep;
@@ -229,14 +229,33 @@ int puts(const char *s) {
   return putchar('\n') == EOF ? EOF : 0;
 }
 
+// ためてある分から改行までをまとめて写す（1 文字ずつ fgetc を呼ぶと遅いので）
 char *fgets(char *s, int n, FILE *fp) {
   int i = 0;
+  if (n <= 0)
+    return 0;
+  if (fp->ungot >= 0 && n > 1) {
+    s[i++] = fp->ungot;
+    fp->ungot = -1;
+    if (s[0] == '\n') {
+      s[1] = 0;
+      return s;
+    }
+  }
   while (i < n - 1) {
-    int c = fgetc(fp);
-    if (c == EOF)
+    if (fp->pos >= fp->len && (fp->mode != 'r' || fp->eof || !fill(fp)))
       break;
-    s[i++] = c;
-    if (c == '\n')
+    unsigned char *b = fp->buf + fp->pos;
+    int k = fp->len - fp->pos;
+    if (k > n - 1 - i)
+      k = n - 1 - i;
+    unsigned char *nl = memchr(b, '\n', k);
+    if (nl)
+      k = nl - b + 1;
+    memcpy(s + i, b, k);
+    i += k;
+    fp->pos += k;
+    if (nl)
       break;
   }
   if (i == 0)
@@ -367,19 +386,17 @@ void __assert_fail(const char *expr, const char *file, int line) {
 
 // 書式の出力先：文字列（n バイトまで）か FILE
 typedef struct {
-  char *buf;      // NULL なら fp へ
+  char *buf;      // fp が NULL のとき、ここへ（NULL なら長さを数えるだけ）
   size_t n;       // buf の大きさ
   size_t len;     // 出した文字数（入りきらなかった分も数える）
   FILE *fp;
 } Out;
 
 static void out_c(Out *o, int c) {
-  if (o->buf) {
-    if (o->len + 1 < o->n)
-      o->buf[o->len] = c;
-  } else {
+  if (o->fp)
     fputc(c, o->fp);
-  }
+  else if (o->len + 1 < o->n)          // 文字列へ（vsnprintf(NULL, 0, …) で長さだけ測るときは書かない）
+    o->buf[o->len] = c;
   o->len++;
 }
 

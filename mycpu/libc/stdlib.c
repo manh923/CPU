@@ -34,33 +34,42 @@ void abort(void) {
   exit(1);
 }
 
-// malloc：プログラムの後ろ（__heap_start。tools/cc.js が置く）から確保する。
-// 各ブロックの前に大きさ（4 バイト）を置き、free したものは大きさごとの連結リストで使い回す
-extern char __heap_start[];
+// malloc：プログラムの後ろ（___heap_start。リンクの最後に置かれ、crt0.s → __start が __mycpu_heap に入れる）から確保する。
+// 各ブロックの前に大きさの番号 k（4 バイト）を置き、free したものは番号ごとの連結リストで使い回す。
+//   k = 0〜63：8 × (k + 1) バイト（512 バイトまでは 8 バイト刻み。小さいものをたくさん作るプログラムでも無駄が少ない）
+//   k = 64〜 ：512 × 2^(k − 63) バイト（大きいものは 2 倍ずつ。realloc で大きくしていくものは使い回しやすい）
+char *__mycpu_heap;
 static char *heap_top;
-static void *free_list[32];          // 8 × 2^k バイトのブロック
+static void *free_list[96];
+
+static size_t class_bytes(int k) {
+  return k < 64 ? (size_t)8 * (k + 1) : (size_t)512 << (k - 63);
+}
 
 static int size_class(size_t size) {
-  int k = 0;
-  while (((size_t)8 << k) < size + 4)
+  size_t total = (size + 4 + 7) & ~(size_t)7;
+  if (total <= 512)
+    return total / 8 - 1;
+  int k = 64;
+  while (class_bytes(k) < total)
     k++;
   return k;
 }
 
 void *malloc(size_t size) {
-  int k = size_class(size);
-  if (k >= 32)
+  if (size > 0x7FFFFFF0)
     return 0;
+  int k = size_class(size);
   if (free_list[k]) {
     void *p = free_list[k];
     free_list[k] = *(void **)p;
     return p;
   }
   if (!heap_top)
-    heap_top = (char *)(((unsigned)__heap_start + 7) & ~7);
+    heap_top = (char *)(((unsigned)__mycpu_heap + 7) & ~7);
   char *sp_guess = (char *)&k - 65536;          // スタックのために 64KB 空けておく
-  size_t bytes = (size_t)8 << k;
-  if (heap_top + bytes > sp_guess)
+  size_t bytes = class_bytes(k);
+  if (heap_top > sp_guess || bytes > (size_t)(sp_guess - heap_top))
     return 0;
   char *p = heap_top;
   heap_top += bytes;
@@ -87,7 +96,7 @@ void *realloc(void *p, size_t size) {
   if (!p)
     return malloc(size);
   int k = *(int *)((char *)p - 4);
-  size_t have = ((size_t)8 << k) - 4;
+  size_t have = class_bytes(k) - 4;
   if (size <= have)
     return p;
   void *q = malloc(size);

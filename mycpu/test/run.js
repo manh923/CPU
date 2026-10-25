@@ -264,7 +264,9 @@ const cases = [];
     r.out.split('MyCPU BIOS').length === 3 && r.out.includes("safe to turn off"), r.out.slice(-400));
 
   // Verilog 用の小さい FAT16（1 クラスタ 1 セクタ、パーティションは 32 から）
-  const small = () => makeDisk(diskSources, { type: 'fat16', spc: 1, partStart: 32, totalSectors: 4300 });
+  // Verilog 用の小さいカード（約 2MB）には、C コンパイラ一式（CC.EXE・LIBC.S など）は入れない
+  const compilerNames = new Set(require('../tools/cc.js').compilerFiles().map((f) => f.name));
+  const small = () => makeDisk(diskSources.filter((f) => !compilerNames.has(f.name)), { type: 'fat16', spc: 1, partStart: 32, totalSectors: 4300 });
   cases.push(
     { name: 'mydos-sd', file: 'bios.asm', disk: small(), max: 60_000_000,
       input: ' hello rtl\rcopy con a.txt\rwritten by rtl\r\x1a\rtype a.txt\rren a.txt b.txt\rtype b.txt\rdel b.txt\rcrash\rbig\rprimes\rshutdown\r' },
@@ -329,7 +331,7 @@ if (spawnSync('gcc', ['--version']).error) {
   if (!results) console.log('  --   gcc がないので、C のアセンブラ（disk/as.c）の比較は飛ばす');
   else {
     const bad = results.filter((r) => !r.ok);
-    check(`C のアセンブラ（disk/as.c を gcc で）：JS と同じバイト列 ${results.length - 2} 本、別々のファイルのリンクも tools/cc.js と同じ`,
+    check(`C のアセンブラ（disk/as.c を gcc で）：JS と同じバイト列 ${results.length - 3} 本、別々のファイルのリンクも tools/cc.js と同じ、-lib LIBC でつないだものが動く`,
       bad.length === 0, bad.map((r) => `${r.name}：${r.why}`).join('\n'));
   }
 }

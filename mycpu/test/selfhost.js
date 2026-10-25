@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 // セルフホストの実験：MyDOS（JS のシミュレータ）の上で CC.EXE（chibicc をこの CPU 向けにコンパイルしたもの）を動かす
-//   node test/selfhost.js "cc hello.c;as -b 0x1000000 -o hello.exe crt0.s hello.s libc.s;hello" hello.c ...
+//   node test/selfhost.js "build hello;hello" hello.c ...
 //     コマンドは ; で区切る。後ろに並べたファイルもカードに入れる（名前は 8.3 に縮める）
 //   PROF=1 node test/selfhost.js "cc hello.c" hello.c   … 最初のコマンドで、997 命令ごとに PC を見て関数ごとに数える
-// カードには MYDOS.SYS・CC.EXE・AS.EXE・ヘッダ（cc/include・libc/include）・CRT0.S・LIBC.S（libc をコンパイルしてつないだもの）を入れる。
+//   （PROF=as なら AS.EXE の関数の名前で）
+// カードは disk/ から作るもの（MYDOS.SYS・CC.EXE・AS.EXE・ヘッダ・CRT0.S・LIBC.S・BUILD.BAT など。tools/cc.js の diskSources）。
 // 終わった後のカード（パーティションの中身）は一時フォルダの selfhost.img（mtools で読める）
 'use strict';
 const fs = require('fs'), os = require('os'), path = require('path');
@@ -12,27 +13,13 @@ const CPU = require('../lib/cpu.js');
 const SDCard = require('../lib/sdcard.js');
 const { assemble } = require('../lib/assembler.js');
 const { makeDisk } = require('../lib/disk.js');
-const { buildAsm, compileFile } = require('../tools/cc.js');
+const { buildAsm, diskSources, dosName } = require('../tools/cc.js');
 
-const short = (n) => { const m = /^([^.]*)(\.?.*)$/.exec(n); return (m[1].slice(0, 8) + m[2].slice(0, 4)).toUpperCase(); };
 const cmds = (process.argv[2] || 'cc hello.c').split(';');
-
+// カードは disk/ と同じもの（C コンパイラ一式も入る）に、後ろに並べたファイルを足す
+const srcs = diskSources(path.join(ROOT, 'disk'));
 const ccAsm = buildAsm(fs.readdirSync(path.join(ROOT, 'cc')).filter((f) => f.endsWith('.c')).map((f) => path.join(ROOT, 'cc', f)));
-const srcs = [
-  { name: 'mydos.sys.asm', contents: fs.readFileSync(path.join(ROOT, 'disk/mydos.sys.asm'), 'utf8') },
-  { name: 'cc.exe.asm', contents: ccAsm },
-  { name: 'as.exe.asm', contents: buildAsm([path.join(ROOT, 'disk/as.c')]) },
-  { name: 'CRT0.S', contents: fs.readFileSync(path.join(ROOT, 'libc/crt0.s')) },
-];
-// LIBC.S：libc の .s（crt0 以外）と、.c をコンパイルしたものをつなげる
-const L = path.join(ROOT, 'libc');
-const libc = [];
-for (const f of fs.readdirSync(L).sort()) if (f.endsWith('.s') && f !== 'crt0.s') libc.push(fs.readFileSync(path.join(L, f), 'utf8'));
-for (const f of fs.readdirSync(L).sort()) if (f.endsWith('.c')) libc.push(compileFile(path.join(L, f)));
-srcs.push({ name: 'LIBC.S', contents: libc.join('\n') });
-for (const d of ['cc/include', 'libc/include', 'libc/include/sys'])
-  for (const f of fs.readdirSync(path.join(ROOT, d))) if (f.endsWith('.h')) srcs.push({ name: short(f), contents: fs.readFileSync(path.join(ROOT, d, f)) });
-for (const f of process.argv.slice(3)) srcs.push({ name: short(path.basename(f)), contents: fs.readFileSync(f) });
+for (const f of process.argv.slice(3)) srcs.push({ name: dosName(path.basename(f)), contents: fs.readFileSync(f) });
 
 const disk = makeDisk(srcs, { type: 'fat32' });
 let out = '';
@@ -46,7 +33,8 @@ const max = Number(process.env.MAX || 5e9);
 const log = [];
 if (process.env.PROF) {
   // 関数の名前（C の大域の名前・static な関数）を番地の順に
-  const syms = [...assemble(ccAsm).symbols].filter(([n]) => /^(_|L[0-9a-f]{8}_)/.test(n))
+  const profAsm = process.env.PROF === 'as' ? buildAsm([path.join(ROOT, 'disk/as.c')]) : ccAsm;
+  const syms = [...assemble(profAsm).symbols].filter(([n]) => /^(_|L[0-9a-f]{8}_)/.test(n))
     .map(([n, v]) => [Number(v), n]).sort((a, b) => a[0] - b[0]);
   while (prompts() < 1) cpu.run(1e5);
   const hist = new Map();
@@ -75,5 +63,15 @@ if (process.env.PROF) {
   }
 }
 console.log(out.slice(out.indexOf('C:\\>')));
+// 最後のプログラムが使ったヒープ（libc/stdlib.c の heap_top − ___heap_start）
+{
+  const syms = assemble(ccAsm).symbols;
+  const top = [...syms].find(([n]) => /^L[0-9a-f]{8}_heap_top$/.test(n));
+  if (top) {
+    const used = Number(cpu.read(BigInt(top[1]), 4)) - Number(syms.get('___heap_start'));
+    log.push(`CC.EXE のヒープ：${(used / 1e6).toFixed(2)}MB（最後に動いたのが CC.EXE なら）`);
+  }
+}
+if (cpu.halted) log.unshift(`CPU が止まった：${cpu.halted.kind} ${cpu.halted.message}`);
 console.log(`\n[${(cpu.steps / 1e6).toFixed(0)}M 命令, ${(Date.now() - t) / 1000} 秒]\n` + log.join('\n'));
 fs.writeFileSync(path.join(os.tmpdir(), 'selfhost.img'), disk.toBuffer().subarray(disk.info.partStart * 512));

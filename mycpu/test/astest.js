@@ -3,6 +3,7 @@
 //   node test/astest.js
 //   1. 手元のアセンブリ全部（例題・BIOS・MyDOS・C から作ったもの）が、JS と 1 バイトも違わない
 //   2. crt0・ライブラリ・プログラムを別々のファイルのまま渡しても（リンカの代わり）、tools/cc.js の .EXE と同じ
+//   3. -lib LIBC（先にアセンブルした C ライブラリ）でつないだ .EXE が動く（MyDOS の BUILD.BAT と同じつなぎ方）
 // test/run.js からは run() を呼ぶ（gcc がなければ null）
 'use strict';
 const fs = require('fs');
@@ -11,7 +12,8 @@ const path = require('path');
 const { execFileSync, spawnSync } = require('child_process');
 const { assemble } = require('../lib/assembler.js');
 const { makeFile } = require('../lib/disk.js');
-const { buildAsm, compileFile } = require('../tools/cc.js');
+const { buildAsm, buildLib, compileFile } = require('../tools/cc.js');
+const CPU = require('../lib/cpu.js');
 
 const ROOT = path.join(__dirname, '..');
 
@@ -61,6 +63,28 @@ function run() {
       const ok = r.status === 0 && fs.readFileSync(exe).equals(want);
       results.push({ name: 'link ' + prog, ok, why: ok ? '' : (r.stderr || 'バイト列が違う').split('\n')[0] });
     }
+
+    // 3. -lib LIBC：LIBC.BIN・LIBC.SYM を作り、プログラムだけアセンブルしてつなぐ。cctest の小さなカーネルで動かす
+    const lib = buildLib();
+    fs.writeFileSync(path.join(tmp, 'LIBC.BIN'), lib.bin);
+    fs.writeFileSync(path.join(tmp, 'LIBC.SYM'), lib.sym);
+    fs.copyFileSync(path.join(libc, 'crt0.s'), path.join(tmp, 'CRT0.S'));
+    fs.writeFileSync(path.join(tmp, 'PRIMES.S'), compileFile(path.join(ROOT, 'disk/primes.c')));
+    const r3 = spawnSync(as, ['-lib', 'LIBC', '-o', 'PRIMES.EXE', 'CRT0.S', 'PRIMES.S'], { cwd: tmp, encoding: 'utf8' });
+    let out = '';
+    if (r3.status === 0) {
+      const exe = fs.readFileSync(path.join(tmp, 'PRIMES.EXE'));
+      const load = exe.readUInt32LE(4), entry = exe.readUInt32LE(8), size = exe.readUInt32LE(12);
+      const kernel = fs.readFileSync(path.join(__dirname, 'cctest.js'), 'utf8').match(/const KERNEL = `([\s\S]*?)`;/)[1];
+      const img = new Uint8Array(load + size);
+      img.set(assemble(kernel.replace('JMP32 start', 'JMP32 0x' + entry.toString(16))).image, 0);
+      img.set(exe.subarray(16, 16 + size), load);
+      const cpu = new CPU({ xlen: 32, onTx: (b) => { out += String.fromCharCode(b); } });
+      cpu.load(img);
+      cpu.run(50_000_000);
+    }
+    const ok3 = /Total primes: 168/.test(out);
+    results.push({ name: 'as -lib LIBC（primes.c）', ok: ok3, why: ok3 ? '' : (r3.stderr || out.slice(-200)).split('\n')[0] });
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
