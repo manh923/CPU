@@ -128,6 +128,11 @@ node sim/sim.js examples/bios.asm --sd disk.img --sd-save after.img   # 書い�
 
 ブラウザ版は、上の「SD：」から disk/ の中身（FAT16 / FAT32）、なし、手元の `.img` を選べる。同じページで続けて実行すると、書いた中身は残る。「SD を保存」で `.img` として保存できる。
 
+ブラウザ版の左の欄で書けるのは 2 種類。いちばん左の選択で切り替える：
+
+- **ROM に入れる**（`examples/`）：選んだものが ROM になる。MyDOS を動かすなら `bios.asm`
+- **SD カードのファイル**（`disk/`）：`hello.exe.asm`・`mydos.sys.asm`・`AUTOEXEC.BAT` など。書き換えると、次の実行で SD カードを作り直して入れる（ROM は最後に選んだもののまま）。「新しいファイル」で `PROG.exe.asm` などを足せる（ひな形つき）。アセンブルのエラーはファイル名つきで出る
+
 ### BIOS の入口
 
 カーネルモードのもの（MyDOS など）は、ROM の決まった番地を `CALL32` しても BIOS を使える。

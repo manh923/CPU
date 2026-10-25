@@ -23,7 +23,8 @@
     var m = /^(.+)\.(exe|com|sys)\.asm$/i.exec(name);
     if (!m) return { name: name.toUpperCase(), data: toBytes(contents) };
     var source = typeof contents === 'string' ? contents : new TextDecoder().decode(contents);
-    var r = Assembler.assemble(source);
+    var r;
+    try { r = Assembler.assemble(source); } catch (e) { e.message = name + '：' + e.message; e.file = name; throw e; }
     var kind = m[2].toLowerCase(), base = kind === 'sys' ? SYS_BASE : TPA;
     if (r.image.length <= base) throw new Error(name + '：.org 0x' + base.toString(16) + ' から書く');
     var body = r.image.subarray(base);

@@ -41,7 +41,8 @@
 <body>
 <header>
   <h1>MyCPU シミュレータ</h1>
-  <select id="example" title="例題"></select>
+  <select id="example" title="書くもの：ROM に入れるプログラムか、SD カードのファイル"></select>
+  <button id="newfile" title="SD カードに新しいファイルを作る（NAME.exe.asm・NAME.com.asm・NAME.TXT など）">新しいファイル</button>
   <select id="xlen" title="CPU の bit 数"><option value="32">32bit CPU</option><option value="64">64bit CPU</option></select>
   <select id="sdsel" title="SD カード（MyDOS の C: ドライブ）">
     <option value="disk16">SD：disk/ の中身（FAT16）</option>
@@ -94,17 +95,77 @@
   var stepsAtSecond = 0, secondStart = 0, mips = 0;
 
   for (var i = 0; i < 6; i++) { var d = document.createElement('div'); d.className = 'led'; $('leds').appendChild(d); }
-  M.EXAMPLES.forEach(function (ex, i) {
-    var o = document.createElement('option'); o.value = i; o.textContent = ex.name; $('example').appendChild(o);
+  // 書くもの：ROM に入れるプログラム（examples/）か、SD カードのファイル（disk/）。
+  // SD カードのファイルを書いているときは、ROM は最後に選んだもの（ふつうは bios.asm）のまま。
+  // 書き換えたファイルは、次の実行のときに SD カードを作り直して入れる
+  var romSrc = M.EXAMPLES.map(function (e) { return e.source; });
+  var diskFiles = M.DISK.map(function (f) {
+    var bytes = new Uint8Array(f.contents.length);
+    for (var i = 0; i < bytes.length; i++) bytes[i] = f.contents.charCodeAt(i) & 0xFF;
+    return { name: f.name, bytes: bytes };
   });
-  function loadExample(i) {
-    src.value = M.EXAMPLES[i].source;
-    $('xlen').value = /selftest64/.test(M.EXAMPLES[i].name) ? '64' : '32';
+  var romIdx = Math.max(M.EXAMPLES.findIndex(function (e) { return e.name === 'bios.asm'; }), 0);
+  var editing = 'r' + romIdx, diskDirty = false;
+  var dec = new TextDecoder(), enc = new TextEncoder();
+
+  function fillEditList() {
+    var sel = $('example');
+    sel.textContent = '';
+    var g1 = document.createElement('optgroup'), g2 = document.createElement('optgroup');
+    g1.label = 'ROM に入れる（examples/）';
+    g2.label = 'SD カードのファイル（disk/）';
+    M.EXAMPLES.forEach(function (ex, i) {
+      var o = document.createElement('option'); o.value = 'r' + i; o.textContent = ex.name; g1.appendChild(o);
+    });
+    diskFiles.forEach(function (f, i) {
+      var o = document.createElement('option'); o.value = 'd' + i; o.textContent = 'SD: ' + f.name; g2.appendChild(o);
+    });
+    sel.appendChild(g1); sel.appendChild(g2);
+    sel.value = editing;
   }
-  var start = M.EXAMPLES.findIndex(function (e) { return e.name === 'bios.asm'; });
-  $('example').value = String(Math.max(start, 0));
-  loadExample(Math.max(start, 0));
-  $('example').onchange = function () { loadExample(+this.value); };
+  function saveEditing() {
+    var i = +editing.slice(1);
+    if (editing[0] === 'r') { romSrc[i] = src.value; return; }
+    var f = diskFiles[i], old = dec.decode(f.bytes), text = src.value;
+    if (/\r\n/.test(old)) text = text.replace(/\r?\n/g, '\r\n');
+    if (text !== old) { f.bytes = enc.encode(text); diskDirty = true; }
+  }
+  function openEditing(v) {
+    editing = v;
+    var i = +v.slice(1);
+    if (v[0] === 'r') {
+      romIdx = i;
+      src.value = romSrc[i];
+      $('xlen').value = /selftest64/.test(M.EXAMPLES[i].name) ? '64' : '32';
+    } else {
+      src.value = dec.decode(diskFiles[i].bytes).replace(/\r\n/g, '\n');
+    }
+  }
+  fillEditList();
+  openEditing(editing);
+  $('example').onchange = function () { saveEditing(); openEditing(this.value); };
+  $('newfile').addEventListener('click', function () {
+    var name = prompt('ファイル名（8.3 形式。PROG.exe.asm は PROG.EXE、PROG.com.asm は PROG.COM にアセンブルされる）', 'PROG.exe.asm');
+    if (!name) return;
+    var m = /^([^.]+)\.(exe|com)\.asm$/i.exec(name);
+    try { M.fat.shortName(m ? m[1] + '.' + m[2] : name); } catch (e) { alert(e.message); return; }
+    if (diskFiles.some(function (f) { return f.name.toUpperCase() === name.toUpperCase(); })) { alert('同じ名前がある'); return; }
+    var text = m ? '; ' + name + '：MyDOS で動くプログラム。ユーザーモードで動くので、OS を呼ぶのは SYSCALL だけ\n' +
+      '; r23 = 機能番号（2 = puts、0 = 終了。一覧は README の「SYSCALL」）。r16 に引数の文字列が来る\n' +
+      '        .org 0x26000\n' +
+      'start:  ADDI32 r16, r0, msg\n' +
+      '        ADDI32 r23, r0, 2\n' +
+      '        SYSCALL\n' +
+      '        ADDI32 r23, r0, 0\n' +
+      '        SYSCALL\n' +
+      'msg:    .asciz "Hello from ' + m[1].toUpperCase() + '!\\n"\n' : '';
+    saveEditing();
+    diskFiles.push({ name: name, bytes: enc.encode(text) });
+    diskDirty = true;
+    editing = 'd' + (diskFiles.length - 1);
+    fillEditList();
+    openEditing(editing);
+  });
 
   var uartCR = false;   // \r の後は、次の文字で今の行を書き直す（端末と同じ）
   function onTx(b) {
@@ -128,7 +189,12 @@
     var v = $('sdsel').value;
     if (v === 'none') return null;
     if (v === 'img') return imgDisk;
-    if (!builtDisks[v]) builtDisks[v] = M.disk.makeDisk(M.DISK, { type: v === 'disk32' ? 'fat32' : 'fat16' });
+    if (diskDirty) { builtDisks = {}; diskDirty = false; }
+    if (!builtDisks[v]) {
+      builtDisks[v] = M.disk.makeDisk(diskFiles.map(function (f) {
+        return { name: f.name, contents: f.bytes };
+      }), { type: v === 'disk32' ? 'fat32' : 'fat16' });
+    }
     return builtDisks[v];
   }
   $('sdsel').addEventListener('change', function () { if (this.value === 'img') $('sdfile').click(); });
@@ -144,7 +210,7 @@
   // SD カードの中身を .img で保存（同じページで続けて実行すると、書いた中身は残る）
   $('sdsave').addEventListener('click', function () {
     var d;
-    try { d = sdDisk(); } catch (e) { errors.textContent = 'SD カード：' + e.message; return; }
+    try { d = sdDisk(); } catch (e) { errors.textContent = errText(e.file ? 'SD: ' + e.file : 'SD カード', e); return; }
     if (!d) { errors.textContent = 'SD カードがない'; return; }
     var a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([d.toBuffer ? d.toBuffer() : d.buffer], { type: 'application/octet-stream' }));
@@ -153,18 +219,24 @@
     setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
   });
 
+  function errText(where, e) {
+    if (!e.errors) return where + '：' + (e.message || String(e));
+    return e.errors.map(function (x) { return where + ' ' + x.line + ' 行目: ' + x.message; }).join('\n');
+  }
+
   function build() {
     errors.textContent = '';
     var result;
     try {
-      result = M.Assembler.assemble(src.value);
+      saveEditing();
+      result = M.Assembler.assemble(romSrc[romIdx]);
     } catch (e) {
-      errors.textContent = e.errors ? e.errors.map(function (x) { return x.line + ' 行目: ' + x.message; }).join('\n') : String(e);
+      errors.textContent = errText(M.EXAMPLES[romIdx].name, e);
       return false;
     }
     var t0 = performance.now();
     var disk;
-    try { disk = sdDisk(); } catch (e) { errors.textContent = 'SD カード：' + e.message; return false; }
+    try { disk = sdDisk(); } catch (e) { errors.textContent = errText(e.file ? 'SD: ' + e.file : 'SD カード', e); return false; }
     cpu = new M.CPU({
       xlen: +$('xlen').value, onTx: onTx, onLed: onLed, sd: disk ? new M.SDCard(disk) : null,
       clock: function () { return Math.floor((performance.now() - t0) * 1000); },
