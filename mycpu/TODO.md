@@ -22,7 +22,8 @@ MyDOS の上で C コンパイラを動かし、C のプログラム（コンパ
 4.6. ~~AS.EXE（C で書いたアセンブラ）~~ 済み（`disk/as.c`。JS 版と同じバイト列、リンカの代わりも。MyDOS の上で動いた）
 4.5. ~~EDIT.EXE~~ 済み（`disk/edit.c`。BIOS に gotoxy・getxy の SYSCALL 11・12、CLS は端末も消す、getc はカーソルの下の文字を壊さない）
 5. C で Hello, World → 実機で表示：シミュレータ・Verilog では `disk/primes.c`（`PRIMES.EXE`）が MyDOS で動いた。あとは実機
-6. chibicc 自身をこの CPU 向けにコンパイルして、MyDOS の上で動かす（セルフホスト）
+6. ~~chibicc 自身をこの CPU 向けにコンパイルして、MyDOS の上で動かす（セルフホスト）~~ 済み：カードに CC.EXE・LIBC・ヘッダ・chibicc のソース。
+   `BUILD 名前` で C → .EXE（AS -lib LIBC）、`SELFHOST CC CC2` → `SELFHOST CC2 CC3` で CC2.EXE と CC3.EXE が 1 バイトも違わない（シミュレータで確かめた）
 7. ~~浮動小数点（ソフトウェア）~~ 済み：float 32bit・double 64bit（long double も 64bit）、IEEE 754。
    四則・比較・変換は `libc/softfloat.c`、printf の %f・%e・%g と strtod は `libc/fltio.c`（正しく丸める）、
    `math.h` は `libc/math.c`。どれも PC の gcc・glibc とビット単位で比べるテストがある（`test/floattest.c`・`fltiotest.c`・`mathtest.c`・`cfloat.c`）
@@ -52,7 +53,7 @@ MyDOS の上で C コンパイラを動かし、C のプログラム（コンパ
 
 - グラフィックの画面：**320×200・256 色（パレット）**、フレームバッファは SDRAM（64KB）。表示回路が 1 行ずつバーストで読み、
   3 倍に拡大して 720p の真ん中に（960×600、まわりは枠）。帯域は 1 秒に約 4MB で SDRAM（最大 54MB）に余裕がある。
-  テキスト画面と切り替え。isa-spec.md の 7.3（720p・16bit 色）は帯域が足りない（1 秒に約 110MB 要る）ので、こちらに直す
+  テキスト画面と切り替え（isa-spec.md の 7.3。720p・16bit 色は帯域が足りないのでやめた）
 - **DOOM を移植する**：解像度・色数が元の DOOM（320×200・256 色）とぴったり同じ。doomgeneric を使えば、
   画面に描く・キーを読む・時間を測る、の数個の関数を書くだけ。DOOM は固定小数点（整数）なので softfloat は要らない。
   必要なメモリは 4MB ほど（SDRAM 8MB で足りる）、WAD（体験版 doom1.wad 約 4MB）は SD カードに。
