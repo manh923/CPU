@@ -263,7 +263,7 @@
     if ((this.status & 2n) && this.irqPending()) {
       var bits = this.irqPending(), n = 0;
       while (!(bits & (1 << n))) n++;
-      this.enter((1n << BigInt(this.xlen - 1)) | BigInt(n), this.pc);
+      this.enter(0x80000000n | BigInt(n), this.pc); // 割り込みの印は bit 数によらず bit31（6.3）
     }
     var pc = this.pc;
     this.curPc = pc;

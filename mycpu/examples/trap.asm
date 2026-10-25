@@ -48,7 +48,7 @@ user_entry:
 ; ---- 例外ハンドラ ----
 handler:
         ADDR32 r22, cause, r0
-        CMPLTI32 p5, r22, 0             ; 最上位 bit が 1 なら外部割り込み
+        CMPLTI32 p5, r22, 0             ; bit31 が 1 なら外部割り込み（64bit CPU でも同じ）
         BR32 p5, .irq
         CMPEQI32 p5, r22, 3
         BR32 p5, .syscall

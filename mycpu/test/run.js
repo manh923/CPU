@@ -104,6 +104,10 @@ const cases = [];
   check('trap：例外・ユーザーモード・タイマー割り込み',
     r.out === 'reset\nsyscall\ndivzero\nalign\nuser\nsyscall\npriv\ntimer\ndone\n', JSON.stringify(r.out));
 
+  r = runSim(src('trap.asm'), { xlen: 64 });
+  check('trap を 64bit CPU でも（割り込みの印は bit31。6.3）',
+    r.out === 'reset\nsyscall\ndivzero\nalign\nuser\nsyscall\npriv\ntimer\ndone\n', JSON.stringify(r.out.slice(0, 120)));
+
   r = runSim(src('fib.asm'), { max: 10_000_000 });
   check('fib：再帰とスタック', r.out.endsWith('fib(19) = 4181\r\nfib(20) = 6765\r\n') && r.cpu.halted.kind === 'hlt', r.out.slice(-40));
 
