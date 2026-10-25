@@ -105,7 +105,8 @@ function gc(parts, roots) {
 
 // .c の並び → プログラム全体のアセンブリ（crt0・C ライブラリ込み）
 //   opts.includes はインクルードを探すフォルダ。opts.gc = false なら、使わない関数・変数も捨てない
-//   （disk/as.c は捨てないので、比べるテストはこれを使う）
+//   （disk/as.c は捨てないので、比べるテストはこれを使う）。
+//   opts.lib なら C ライブラリだけ（crt0 なし、捨てない、最後は ___heap_start でなく ___libc_end）：buildLib が使う
 function buildAsm(files, opts = {}) {
   const includes = opts.includes || [];
   const libc = fs.readdirSync(LIBC).filter((f) => f.endsWith('.c')).sort().map((f) => path.join(LIBC, f));
@@ -113,9 +114,9 @@ function buildAsm(files, opts = {}) {
   const parts = [...files, ...libc].map((f) => ({ name: path.relative(ROOT, f), ...split(compileCached(f, includes)) }));
   // crt0.s を先頭に、ほかの libc/*.s（setjmp など）はその後ろに
   const asms = fs.readdirSync(LIBC).filter((f) => f.endsWith('.s') && f !== 'crt0.s').sort();
-  const asmText = ['crt0.s', ...asms].map((f) => fs.readFileSync(path.join(LIBC, f), 'utf8'));
+  const asmText = [...(opts.lib ? [] : ['crt0.s']), ...asms].map((f) => fs.readFileSync(path.join(LIBC, f), 'utf8'));
   let keep = null;
-  if (opts.gc !== false) {
+  if (opts.gc !== false && !opts.lib) {
     const roots = [];
     for (const t of asmText) for (const m of t.replace(/;.*/g, '').matchAll(/[A-Za-z_][\w.]*/g)) roots.push(m[0]);
     keep = gc(parts, roots.filter((n) => parts.some((p) => [...p.text, ...p.data].some((c) => c.name === n))));
@@ -144,8 +145,23 @@ function buildAsm(files, opts = {}) {
     }
   }
   for (const [name, c] of common) if (!defined.has(name) && (!keep || keepCommon(name, parts))) out.push(`        .align ${c.align}`, `${name}:`, `        .space ${c.size}`);
-  out.push('        .align 8', '___heap_start:', '');
+  if (opts.lib) out.push('        .align 64', '___libc_end:', '');
+  else out.push('        .align 8', '___heap_start:', '');
   return out.join('\n');
+}
+
+// 先にアセンブルしておく C ライブラリ（AS -lib LIBC 用）：0x1000000 から置く LIBC.BIN と、名前と番地の表 LIBC.SYM
+//   LIBC.SYM：「@base 16 進」「@end 16 進」（LIBC.BIN の終わり。プログラムはここから）、「名前 16 進」（大域の名前だけ）
+function buildLib() {
+  const { assemble } = require('../lib/assembler.js');
+  const r = assemble(buildAsm([], { lib: true }));
+  const end = Number(r.symbols.get('___libc_end'));
+  const bin = Buffer.from(r.image.subarray(BASE, end));
+  const lines = ['; LIBC.SYM — LIBC.BIN（C ライブラリ）の名前と番地（tools/cc.js が作る。AS -lib LIBC が読む）',
+    `@base ${BASE.toString(16)}`, `@end ${end.toString(16)}`];
+  for (const [name, v] of [...r.symbols].sort((a, b) => Number(a[1]) - Number(b[1])))
+    if (name.startsWith('_') && !name.includes('.') && name !== '___libc_end') lines.push(`${name} ${Number(v).toString(16)}`);
+  return { bin, sym: lines.join('\r\n') + '\r\n' };
 }
 
 // 初期値なしの大域変数が、残したコードかデータから使われているか
@@ -162,7 +178,7 @@ function dosName(name) {
 
 // MyDOS の上の C コンパイラ一式（disk/ のカードに入れる）：
 //   CC.EXE（cc/ を この CPU 向けにコンパイルしたもの。アセンブル済みのバイト列）、CRT0.S と LIBC.S（リンク用。
-//   libc をコンパイルしてつないだもの）、ヘッダ（cc/include・libc/include・libc/include/sys を 8.3 の名前で）、
+//   libc をコンパイルしてつないだもの）、LIBC.BIN・LIBC.SYM（LIBC.S を先にアセンブルしたもの。AS -lib LIBC で速くつなぐ）、ヘッダ（cc/include・libc/include・libc/include/sys を 8.3 の名前で）、
 //   chibicc のソース（セルフホスト用。preprocess.c → PREPROCE.C）
 let compilerCache = null;
 function compilerFiles() {
@@ -183,6 +199,8 @@ function compilerFiles() {
   for (const f of libs) if (f.endsWith('.s') && f !== 'crt0.s') libc.push(fs.readFileSync(path.join(LIBC, f), 'utf8'));
   for (const f of libs) if (f.endsWith('.c')) libc.push(compileCached(path.join(LIBC, f), []));
   out.push({ name: 'LIBC.S', contents: Buffer.from(libc.join('\n')) });
+  const lib = buildLib();
+  out.push({ name: 'LIBC.BIN', contents: lib.bin }, { name: 'LIBC.SYM', contents: Buffer.from(lib.sym) });
   const seen = new Set(out.map((f) => f.name));
   for (const d of incs) {
     for (const f of fs.readdirSync(d).filter((f) => f.endsWith('.h')).sort()) {
@@ -264,4 +282,4 @@ function usage() {
 
 if (require.main === module) main(process.argv);
 
-module.exports = { buildAsm, diskSources, compilerFiles, dosName, compileFile, CcError };
+module.exports = { buildAsm, buildLib, diskSources, compilerFiles, dosName, compileFile, CcError };

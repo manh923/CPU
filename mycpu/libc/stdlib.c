@@ -34,9 +34,9 @@ void abort(void) {
   exit(1);
 }
 
-// malloc：プログラムの後ろ（__heap_start。tools/cc.js が置く）から確保する。
+// malloc：プログラムの後ろ（___heap_start。リンクの最後に置かれ、crt0.s → __start が __mycpu_heap に入れる）から確保する。
 // 各ブロックの前に大きさ（4 バイト）を置き、free したものは大きさごとの連結リストで使い回す
-extern char __heap_start[];
+char *__mycpu_heap;
 static char *heap_top;
 static void *free_list[32];          // 8 × 2^k バイトのブロック
 
@@ -57,7 +57,7 @@ void *malloc(size_t size) {
     return p;
   }
   if (!heap_top)
-    heap_top = (char *)(((unsigned)__heap_start + 7) & ~7);
+    heap_top = (char *)(((unsigned)__mycpu_heap + 7) & ~7);
   char *sp_guess = (char *)&k - 65536;          // スタックのために 64KB 空けておく
   size_t bytes = (size_t)8 << k;
   if (heap_top + bytes > sp_guess)

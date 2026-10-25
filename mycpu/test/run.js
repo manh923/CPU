@@ -331,7 +331,7 @@ if (spawnSync('gcc', ['--version']).error) {
   if (!results) console.log('  --   gcc がないので、C のアセンブラ（disk/as.c）の比較は飛ばす');
   else {
     const bad = results.filter((r) => !r.ok);
-    check(`C のアセンブラ（disk/as.c を gcc で）：JS と同じバイト列 ${results.length - 2} 本、別々のファイルのリンクも tools/cc.js と同じ`,
+    check(`C のアセンブラ（disk/as.c を gcc で）：JS と同じバイト列 ${results.length - 3} 本、別々のファイルのリンクも tools/cc.js と同じ、-lib LIBC でつないだものが動く`,
       bad.length === 0, bad.map((r) => `${r.name}：${r.why}`).join('\n'));
   }
 }

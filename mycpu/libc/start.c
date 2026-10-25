@@ -1,12 +1,14 @@
 // C のプログラムの始まり：MyDOS から受け取った引数の文字列を空白で分けて main を呼ぶ
+// （crt0.s が main の番地とヒープの始まりを渡す。libc から main を直接呼ばない）
 #include <stdlib.h>
 
-int main(int argc, char **argv);
+extern char *__mycpu_heap;             // libc/stdlib.c の malloc が使う
 
 static char args_buf[128];
 static char *argv_buf[33];
 
-int __start(char *args) {
+int __start(int (*main)(int, char **), char *heap, char *args) {
+  __mycpu_heap = heap;
   int argc = 0;
   argv_buf[argc++] = "PROG";          // MyDOS はプログラムの名前を渡さない
 

@@ -1,8 +1,11 @@
 // AS.EXE — この CPU のアセンブラ（C で書いたもの。lib/assembler.js と同じ書き方で、同じバイト列を作る）
-//   AS [-o OUT.EXE] [-b 番地] [-bin OUT.BIN] FILE.S ...
+//   AS [-o OUT.EXE] [-b 番地] [-bin OUT.BIN] [-lib 名前] FILE.S ...
 //     -o    .EXE（MZ ヘッダ。読み込む番地 = いちばん小さい番地、開始番地 = ラベル start）を作る
 //     -bin  そのままのバイト列（いちばん小さい番地から）を作る
 //     -b    最初の番地（なければ 0。C のプログラムは 0x1000000 = SDRAM）
+//     -lib  先にアセンブルしてあるライブラリ（名前.BIN と、名前と番地の表 名前.SYM。tools/cc.js が作る）を使う：
+//           表の名前を知っている状態でアセンブルし、名前.BIN の後ろ（-b がなければそこから）にプログラムを置いて、
+//           .EXE・-bin には名前.BIN も入れる。プログラムで同じ名前を定義すれば、プログラムの方を使う
 // ファイルをいくつも渡すと、1 つのプログラムにまとめる（リンカの代わり。tools/cc.js と同じ並べ方）：
 //   「; @text」「; @data」の行で分けてあれば、全部のファイルのコードを前に、データを後ろにまとめ、
 //   「; @common 名前 大きさ 揃え」（初期値なしの大域変数）は、どこにも定義がなければ 1 つだけ置き、
@@ -39,6 +42,7 @@ static void err(const char *fmt, const char *arg) {
 typedef struct {
   char *name;
   i64 value;
+  int lib;                       // -lib の表から（プログラムで定義し直してよい）
 } Sym;
 
 static Sym *syms;
@@ -82,6 +86,11 @@ static void define(const char *name, i64 value) {
   if ((nsyms + 1) * 2 > cap_syms)
     grow_syms();
   Sym *s = find_slot(name);
+  if (s->name && s->lib) {         // ライブラリの名前は、プログラムの定義で置き換える
+    s->value = value;
+    s->lib = 0;
+    return;
+  }
   if (s->name) {
     err("duplicate symbol: %s", name);
     return;
@@ -937,6 +946,80 @@ static void run_pass(int p) {
   flush_labels();
 }
 
+// ---- -lib ----
+static char *lib_name;
+static i64 lib_base = -1, lib_end;
+
+// 名前.SYM を読む：「@base 16 進」「@end 16 進」と「名前 16 進」の行（; で始まる行は飛ばす）
+static int load_lib_syms(void) {
+  char path[64];
+  snprintf(path, sizeof(path), "%s.SYM", lib_name);
+  FILE *fp = fopen(path, "r");
+  if (!fp) {
+    fprintf(stderr, "%s: cannot open\n", path);
+    return 0;
+  }
+  while (fgets(line, sizeof(line), fp)) {
+    char *p = line, *name = line;
+    if (*p == ';' || *p == '\n' || *p == '\r' || !*p)
+      continue;
+    while (*p && *p != ' ')
+      p++;
+    if (!*p)
+      continue;
+    *p++ = 0;
+    i64 v = (i64)strtoul(p, 0, 16);
+    if (!strcmp(name, "@base"))
+      lib_base = v;
+    else if (!strcmp(name, "@end"))
+      lib_end = v;
+    else {
+      define(name, v);
+      lookup_sym(name)->lib = 1;
+    }
+  }
+  fclose(fp);
+  if (lib_base < 0 || lib_end < lib_base) {
+    fprintf(stderr, "%s: no @base / @end\n", path);
+    return 0;
+  }
+  return 1;
+}
+
+// 名前.BIN をそのまま fp へ写す（lib_end − lib_base バイトのはず）
+static int copy_lib_bin(FILE *fp) {
+  char path[64];
+  snprintf(path, sizeof(path), "%s.BIN", lib_name);
+  FILE *in = fopen(path, "rb");
+  if (!in) {
+    fprintf(stderr, "%s: cannot open\n", path);
+    return 0;
+  }
+  i64 n = 0;
+  int k;
+  while ((k = fread(line, 1, sizeof(line), in)) > 0) {
+    fwrite(line, 1, k, fp);
+    n += k;
+  }
+  fclose(in);
+  if (n != lib_end - lib_base) {
+    fprintf(stderr, "%s: wrong size\n", path);
+    return 0;
+  }
+  return 1;
+}
+
+// ライブラリ・すき間（0）・プログラムを書く
+static int write_image(FILE *fp) {
+  if (lib_name) {
+    if (!copy_lib_bin(fp))
+      return 0;
+    for (i64 a = lib_end; a < lo; a++)
+      fputc(0, fp);
+  }
+  return fwrite(image, 1, hi - lo, fp) == (size_t)(hi - lo);
+}
+
 static void put_le32(FILE *fp, unsigned v) {
   for (int i = 0; i < 4; i++) {
     fputc(v & 0xff, fp);
@@ -946,13 +1029,17 @@ static void put_le32(FILE *fp, unsigned v) {
 
 int main(int argc, char **argv) {
   char *out_exe = 0, *out_bin = 0;
+  int base_set = 0;
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "-o") && i + 1 < argc)
       out_exe = argv[++i];
     else if (!strcmp(argv[i], "-bin") && i + 1 < argc)
       out_bin = argv[++i];
-    else if (!strcmp(argv[i], "-b") && i + 1 < argc)
+    else if (!strcmp(argv[i], "-b") && i + 1 < argc) {
       base = (i64)strtoul(argv[++i], 0, 0);
+      base_set = 1;
+    } else if (!strcmp(argv[i], "-lib") && i + 1 < argc)
+      lib_name = argv[++i];
     else if (argv[i][0] == '-') {
       fprintf(stderr, "unknown option: %s\n", argv[i]);
       return 2;
@@ -960,8 +1047,18 @@ int main(int argc, char **argv) {
       files[nfiles++] = argv[i];
   }
   if (!nfiles || (!out_exe && !out_bin)) {
-    fprintf(stderr, "usage: AS [-o OUT.EXE] [-bin OUT.BIN] [-b ADDR] FILE.S ...\n");
+    fprintf(stderr, "usage: AS [-o OUT.EXE] [-bin OUT.BIN] [-b ADDR] [-lib NAME] FILE.S ...\n");
     return 2;
+  }
+  if (lib_name) {
+    if (!load_lib_syms())
+      return 1;
+    if (!base_set)
+      base = lib_end;
+    if (base < lib_end) {
+      fprintf(stderr, "-b must be after the library (%x)\n", (unsigned)lib_end);
+      return 1;
+    }
   }
 
   run_pass(1);
@@ -982,7 +1079,7 @@ int main(int argc, char **argv) {
 
   if (out_bin) {
     FILE *fp = fopen(out_bin, "wb");
-    if (!fp || fwrite(image, 1, hi - lo, fp) != (size_t)(hi - lo) || fclose(fp)) {
+    if (!fp || !write_image(fp) || fclose(fp)) {
       fprintf(stderr, "%s: cannot write\n", out_bin);
       return 1;
     }
@@ -998,14 +1095,15 @@ int main(int argc, char **argv) {
     fputc('Z', fp);
     fputc(16, fp);
     fputc(0, fp);
-    put_le32(fp, (unsigned)lo);
+    i64 start = lib_name ? lib_base : lo;
+    put_le32(fp, (unsigned)start);
     put_le32(fp, (unsigned)(st ? st->value : lo));
-    put_le32(fp, (unsigned)(hi - lo));
-    if (fwrite(image, 1, hi - lo, fp) != (size_t)(hi - lo) || fclose(fp)) {
+    put_le32(fp, (unsigned)(hi - start));
+    if (!write_image(fp) || fclose(fp)) {
       fprintf(stderr, "%s: cannot write\n", out_exe);
       return 1;
     }
-    printf("%s: %d bytes\n", out_exe, (int)(hi - lo + 16));
+    printf("%s: %d bytes\n", out_exe, (int)(hi - start + 16));
   }
   return 0;
 }
