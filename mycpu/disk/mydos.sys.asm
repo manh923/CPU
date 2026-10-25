@@ -44,6 +44,7 @@ BDA          = 0x0002B000               ; BIOS の変数
 ATTR         = BDA + 8
 SD_TYPE      = BDA + 16
 USER_FAULT   = BDA + 24
+SDRAM_KB     = BDA + 28                 ; BIOS が調べた SDRAM の大きさ（KB）
 VEC          = 0x0002B100               ; SYSCALL の表
 SECBUF       = 0x0002B200               ; セクタの置き場（1 つだけ覚えておく。書いたら後でまとめて書き戻す）
 FATBUF       = 0x0002B400               ; FAT のセクタの置き場（同じく）
@@ -2159,8 +2160,21 @@ cmd_ver:
         ADDI32 r16, r0, s_ver
         JMP32 puts
 cmd_mem:
+        ADDI32 sp, sp, -8
+        STORE32_32 lr, sp, 0
         ADDI32 r16, r0, s_mem
-        JMP32 puts
+        CALL32 puts
+        LOAD32_32 r16, r0, SDRAM_KB     ; BIOS が調べた SDRAM の大きさ（0 ならなし）
+        CMPEQI32 p1, r16, 0
+        BR32 p1, .ret
+        SHLI32 r16, r16, 10
+        ADDI32 r17, r0, 8
+        CALL32 putdec_w
+        ADDI32 r16, r0, s_mem_sdram
+        CALL32 puts
+.ret:   LOAD32_32 lr, sp, 0
+        ADDI32 sp, sp, 8
+        RET32
 cmd_reboot:
         CALL32 close_all
         JMP32 BIOS_REBOOT
@@ -2856,6 +2870,7 @@ s_mem:      .ascii "\n   49152 bytes total memory\n"
             .ascii "   24576 bytes for MyDOS    (0x20000-0x25FFF)\n"
             .ascii "   20480 bytes for programs (0x26000-0x2AFFF)\n"
             .asciz "    4096 bytes for BIOS     (0x2B000-0x2BFFF)\n"
+s_mem_sdram: .asciz " bytes SDRAM        (0x1000000-0x17FFFFF, free for programs)\n"
 s_uptime:   .asciz "Uptime: "
 s_sec:      .asciz " seconds\n"
 s_color_usage: .asciz "Usage: COLOR xy  (x = background, y = text, 0-F)\n"

@@ -8,6 +8,7 @@ The ROM holds only the BIOS. It loads MYDOS.SYS from this SD card
 
 Programs run in user mode and talk to MyDOS with SYSCALL (like INT 21h).
 If a program crashes, MyDOS stops it and comes back to C:\>.
+Programs may use the 8 MB SDRAM (0x1000000-0x17FFFFF) freely.
 
 Programs
   HELLO.EXE    Says hello. Try HELLO yourname.
@@ -15,6 +16,7 @@ Programs
   MANDEL.EXE   The Mandelbrot set in color.
   KITT.COM     Runs the board LEDs back and forth.
   TOUPPER.EXE  TOUPPER README.TXT UP.TXT writes an upper-case copy.
+  SIEVE.EXE    Counts primes below 1,000,000 using 1 MB of SDRAM.
   CRASH.EXE    Divides by zero on purpose.
   DEMO.BAT     A batch file that runs some of the above.
 

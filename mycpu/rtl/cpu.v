@@ -1,21 +1,35 @@
-// 自作CPU 32bit 版（isa-spec.md v0.6）
-// パイプラインなしで、1 命令を何クロックかに分けて順番に処理する。
-//   取り出し（ヘッダ）→ 解読 → 取り出し（即値）→ 実行 →（メモリ）→ 次の命令
-// 動作の基準は lib/cpu.js（シミュレータ）。食い違いはテストで見つける。
+// 自作CPU 32bit 版（isa-spec.md v0.8）
+// 3 段のパイプライン：
+//   F（命令を読む）：命令の口に番地を出す。メモリは 1 クロック後に 8 バイト（ヘッダと即値）を返す
+//   E（実行）：解読・レジスタの読み出し・演算・分岐。演算の結果はこのクロックの終わりにレジスタへ書く。
+//              分岐はここで決まる。飛ぶときは、先に読んでいた命令を捨てて飛び先から読み直す（1 クロックの損）
+//   M（メモリ）：E で出した読み出しの返事を受け取り、レジスタに書く。そのレジスタを使う命令は 1 クロック待つ
+// 掛け算は 1 クロック、割り算は 32 クロック。M 形式（メモリの値で演算）と SWAP は返事が来るまで E で待つ。
+// 動作の基準は lib/cpu.js（シミュレータ）。食い違いはテストで見つける（UART・レジスタ・実行した命令の順番）。
 //
-// バス：bus_valid を立てて待ち、bus_ready が 1 クロック立ったら完了。
-//   bus_addr は 4 バイト単位（下位 2bit は 0）。bus_wstrb が 0 なら読み出し、それ以外は書き込み。
-//   bus_fault はつながっていない番地や ROM への書き込み（このとき CPU は止まる）。
+// 命令の口：i_req と i_addr（4 バイト単位）を出し、i_gnt が 1 なら受け付けられた。
+//   返事は後のクロックで i_rvalid が 1 になったとき：i_rdata = {i_addr+4 の 4 バイト, i_addr の 4 バイト}、
+//   i_err[0]・[1] はそれぞれが読めなかった印（つながっていない番地）。同時に待てる要求は 1 つ。
+// データの口：d_req・d_addr（4 バイト単位）・d_wstrb（0 なら読み出し）・d_wdata を出し、d_gnt で受け付け。
+//   d_err はつながっていない番地か ROM への書き込み（同じクロックで分かる。このとき CPU は止まる）。
+//   返事は後のクロックで d_rvalid（書き込みも返事が来る）。同時に待てる要求は 1 つ。
 module mycpu_cpu (
   input  wire        clk,
   input  wire        rst,
-  output reg  [31:0] bus_addr,
-  output reg  [31:0] bus_wdata,
-  output reg  [3:0]  bus_wstrb,
-  output reg         bus_valid,
-  input  wire        bus_ready,
-  input  wire [31:0] bus_rdata,
-  input  wire        bus_fault,
+  output reg         i_req,
+  output reg  [31:0] i_addr,
+  input  wire        i_gnt,
+  input  wire        i_rvalid,
+  input  wire [63:0] i_rdata,
+  input  wire [1:0]  i_err,
+  output reg         d_req,
+  output reg  [31:0] d_addr,
+  output reg  [3:0]  d_wstrb,
+  output reg  [31:0] d_wdata,
+  input  wire        d_gnt,
+  input  wire        d_err,
+  input  wire        d_rvalid,
+  input  wire [31:0] d_rdata,
   input  wire [7:0]  irq,        // 外部割り込み 8 本（レベル）
   output wire        halted,
   output reg  [1:0]  halt_code   // 1 = HLT、2 = 不正命令、3 = バスエラー
@@ -26,18 +40,36 @@ module mycpu_cpu (
   localparam [31:0] CAUSE_RESET = 32'h0000_FFFF;  // 6.3
   localparam [31:0] C_ALIGN = 32'd1, C_PRIV = 32'd2, C_SYSCALL = 32'd3, C_DIVZERO = 32'd4;
 
-  localparam [3:0] S_FETCH = 4'd0, S_FETCH_W = 4'd1, S_DECODE = 4'd2, S_IMM_W = 4'd3,
-                   S_EXEC = 4'd4, S_MEM_W = 4'd5, S_STORE_W = 4'd6, S_SWAP_W = 4'd7,
-                   S_DIV = 4'd8, S_WFI = 4'd9, S_HALT = 4'd10, S_LOAD = 4'd11;
-  reg [3:0] state;
-  assign halted = state == S_HALT;
+  // E の状態
+  localparam [2:0] E_RUN = 3'd0, E_MWAIT = 3'd1, E_MEXEC = 3'd2, E_SWAP1 = 3'd3, E_SWAP2 = 3'd4,
+                   E_DIV = 3'd5, E_WFI = 3'd6, E_HALT = 3'd7;
+  reg [2:0] es;
+  assign halted = es == E_HALT;
 
   // ---- レジスタ ----
   reg [31:0] gpr [0:15];   // r16〜r31
   reg [7:1]  pr;           // r1〜r7（1bit）
-  reg [31:0] pc, sp, lr, epc, cause, evec, status;
-  reg [31:0] ir, imm, mem_data;
-  reg        have_mem;     // M 形式で、メモリの値を読み終えた
+  reg [31:0] sp, lr, epc, cause, evec, status;
+  reg [31:0] mem_data;     // M 形式・SWAP で読んだ値
+
+  // E にいる命令（pc はその命令の番地）
+  reg        e_valid, e_badpc, e_seen;
+  reg [31:0] pc, ir, imm;
+  reg [1:0]  e_ferr;       // 読めなかった印（[0] ヘッダ、[1] 即値）
+
+  // F：読み終えて E が空くのを待っている命令（1 つまで）と、返事待ちの要求
+  reg        q_valid;
+  reg [31:0] q_pc;
+  reg [63:0] q_data;
+  reg [1:0]  q_err;
+  reg        f_out, f_kill;      // 返事待ちの要求がある・その返事は捨てる
+  reg [31:0] f_aout, f_next;     // 返事待ちの要求の番地・次に読む番地
+
+  // M：返事待ちの読み出し・書き込み
+  reg        m_load, m_store;
+  reg [5:0]  m_rd;
+  reg [2:0]  m_op;
+  reg [1:0]  m_lo;
 
   // ---- 命令のフィールド（2.1） ----
   wire [1:0]  width = ir[1:0];
@@ -206,10 +238,11 @@ module mycpu_cpu (
   wire [1:0]  ls_size = is_swap ? 2'd2 : is_store ? (op[1:0] == 2'd0 ? 2'd0 : op[1:0] == 2'd1 ? 2'd1 : 2'd2)
                                        : (op[2:1] == 2'd0 ? 2'd0 : op[2:1] == 2'd1 ? 2'd1 : 2'd2); // 0=1B 1=2B 2=4B
   wire ls_misaligned = (ls_size == 2'd1 && ls_addr[0]) || (ls_size == 2'd2 && ls_addr[1:0] != 2'd0);
-  wire [31:0] ld_shift = mem_data >> {ls_addr[1:0], 3'b000};
+  // M：読み出しの返事を、大きさと符号に合わせてそろえる
+  wire [31:0] ld_shift = d_rdata >> {m_lo, 3'b000};
   reg  [31:0] ld_val;
   always @* begin
-    case (op[2:0])
+    case (m_op)
       3'd0: ld_val = {24'd0, ld_shift[7:0]};
       3'd1: ld_val = {{24{ld_shift[7]}}, ld_shift[7:0]};
       3'd2: ld_val = {16'd0, ld_shift[15:0]};
@@ -241,7 +274,159 @@ module mycpu_cpu (
   wire [31:0] div_rres = div_negr ? -div_r[31:0] : div_r[31:0];
   wire        div_signed = num == 6'd5 || num == 6'd7;
 
-  // ---- 書き込み ----
+  // ---- 待つ条件（ハザード） ----
+  // M の読み出しが終わっていないとき：その結果のレジスタを読む・書く命令（特殊レジスタなら全部）は待つ。
+  // データの口を使う命令も、前の読み書きの返事が来るまで待つ（返事が来るクロックには出してよい）
+  wire uses_d = is_mform || grp == 4'd4;
+  wire m_dep  = m_load && m_rd != 6'd0 && (m_rd == rs1 || m_rd == rs2 || m_rd == rd || m_rd >= 6'd48);
+  wire haz    = m_dep || ((m_load || m_store) && !d_rvalid && uses_d);
+
+  // ---- データの口に出す要求（下の E の動きと同じ順に調べる。d_gnt・d_err を見ないので別に書く） ----
+  wire e_ready = es == E_RUN && e_valid && !haz && !(status[1] && irq_m != 8'd0) && !e_badpc && !e_ferr[0] &&
+                 insn_ok && !(width == 2'd1 && e_ferr[1]) && !(priv_dest && user);
+  always @* begin
+    d_req = 1'b0; d_addr = 32'd0; d_wstrb = 4'd0; d_wdata = 32'd0;
+    if (e_ready && is_mform && m_addr[1:0] == 2'd0) begin
+      d_req = 1'b1; d_addr = {m_addr[31:2], 2'b00};
+    end else if (e_ready && grp == 4'd4 && !ls_misaligned) begin
+      d_req = 1'b1; d_addr = {ls_addr[31:2], 2'b00};
+      if (is_store) begin d_wstrb = st_strb; d_wdata = st_data; end
+    end else if (es == E_SWAP2) begin
+      d_req = 1'b1; d_addr = {ls_addr[31:2], 2'b00}; d_wstrb = 4'b1111; d_wdata = bR;
+    end
+  end
+
+  // ---- E の動き（組み合わせ）：このクロックで何をするか ----
+  reg        x_adv;              // 命令が E を出る（E が空のときも 1）
+  reg        x_redir;            // 飛ぶ（読んであった命令を捨てて x_rpc から読む）
+  reg [31:0] x_rpc;
+  reg        x_rhold;            // 飛び先をこのクロックには読まない（自分を書き換えたとき）
+  reg        x_wr;               // レジスタに書く
+  reg [5:0]  x_wi;
+  reg [31:0] x_wv;
+  reg        x_exc;              // 例外・割り込みに入る
+  reg [31:0] x_cause;
+  reg        x_eret, x_halt, x_div, x_mload, x_mstore, x_latch, x_trace;
+  reg [1:0]  x_hc;
+  reg [2:0]  x_es;
+
+  // 自分を書き換えるコード：書く 4 バイトが、読んである（読んでいる）命令の 8 バイトに重なるか
+  wire [29:0] st_w = d_addr[31:2];
+  function hit8(input [31:0] a, input [29:0] w);
+    hit8 = a[31:2] == w || a[31:2] + 30'd1 == w;
+  endfunction
+  wire arr = i_rvalid && f_out && !f_kill;                         // 読んだ命令が届いた
+  wire [31:0] seq_next = arr ? f_aout + (i_rdata[1:0] == 2'd0 ? 32'd4 : 32'd8) : f_next;
+  wire st_hit = (q_valid && hit8(q_pc, st_w)) || (f_out && !f_kill && hit8(f_aout, st_w)) || hit8(seq_next, st_w);
+
+  task t_fin;                    begin x_adv = 1'b1; x_es = E_RUN; end endtask
+  task t_jump(input [31:0] t);   begin x_adv = 1'b1; x_es = E_RUN; x_redir = 1'b1; x_rpc = t; end endtask
+  // 注意：always @* の中で呼ぶタスクは、引数でない信号を読まない（読んでも @* の対象にならない）
+  task t_exc(input [31:0] c, input [31:0] vec); begin t_jump(vec); x_exc = 1'b1; x_cause = c; end endtask
+  task t_halt(input [1:0] c);    begin x_halt = 1'b1; x_hc = c; x_es = E_HALT; end endtask
+  task t_wr(input [5:0] n, input [31:0] v); begin x_wr = 1'b1; x_wi = n; x_wv = v; end endtask
+  task t_stored(input hit, input [31:0] np);   // 書き込みを受け付けた：自分を書き換えていたら次の命令から読み直す
+    begin
+      x_mstore = 1'b1;
+      if (hit) begin t_jump(np); x_rhold = 1'b1; end
+      else t_fin;
+    end
+  endtask
+
+  always @* begin
+    x_adv = 1'b0; x_redir = 1'b0; x_rpc = 32'd0; x_rhold = 1'b0; x_wr = 1'b0; x_wi = 6'd0; x_wv = 32'd0;
+    x_exc = 1'b0; x_cause = 32'd0; x_eret = 1'b0; x_halt = 1'b0; x_hc = 2'd0; x_div = 1'b0;
+    x_mload = 1'b0; x_mstore = 1'b0; x_latch = 1'b0; x_trace = 1'b0; x_es = es;
+    case (es)
+      E_RUN:
+        if (!e_valid) x_adv = 1'b1;
+        else if (haz) ;
+        else if (status[1] && irq_m != 8'd0) t_exc(32'h8000_0000 | irq_n, evec);   // 割り込みの印は bit31（6.3）
+        else if (e_badpc) t_exc(C_ALIGN, evec);
+        else if (e_ferr[0]) t_halt(2'd3);
+        else if (!insn_ok) t_halt(2'd2);
+        else if (width == 2'd1 && e_ferr[1]) t_halt(2'd3);
+        else begin
+          x_trace = !e_seen;
+          if (priv_dest && user) t_exc(C_PRIV, evec);
+          else case (grp)
+            4'd0: begin  // システム（5.2）
+              if (user && op != 8'h01 && op != 8'h03) t_exc(C_PRIV, evec);
+              else case (op)
+                8'h00: t_halt(2'd1);
+                8'h01: t_fin;
+                8'h02: begin x_eret = 1'b1; t_jump(epc); end
+                8'h03: t_exc(C_SYSCALL, evec);
+                default: x_es = E_WFI;
+              endcase
+            end
+            4'd1, 4'd2, 4'd3: begin
+              if (is_mform) begin
+                if (m_addr[1:0] != 2'd0) t_exc(C_ALIGN, evec);
+                else begin
+                  if (d_err) t_halt(2'd3);
+                  else if (d_gnt) x_es = E_MWAIT;
+                end
+              end else if (is_sel && imm[5:0] > 6'd7) t_halt(2'd2);
+              else if (is_div) begin
+                if (b == 32'd0) t_exc(C_DIVZERO, evec);
+                else begin x_div = 1'b1; x_es = E_DIV; end
+              end else begin t_wr(rd, alu); t_fin; end
+            end
+            4'd4: begin  // ロード・ストア（5.6）
+              if (ls_misaligned) t_exc(C_ALIGN, evec);
+              else begin
+                if (d_err) t_halt(2'd3);
+                else if (d_gnt) begin
+                  if (is_swap) x_es = E_SWAP1;
+                  else if (is_store) t_stored(st_hit, next_pc);
+                  else begin x_mload = 1'b1; t_fin; end
+                end
+              end
+            end
+            4'd5: begin  // 分岐・呼び出し（5.7）
+              case (op)
+                8'h00: t_jump(imm);
+                8'h01: if (pr[rs1[2:0]] && rs1 != 6'd0) t_jump(imm); else t_fin;
+                8'h02: begin t_wr(6'd50, next_pc); t_jump(imm); end
+                8'h03: t_jump(lr);
+                8'h04: t_jump(a);
+                default: begin t_wr(6'd50, next_pc); t_jump(a); end  // CALLR（飛び先は書き換え前の値）
+              endcase
+            end
+            default: begin  // 幅変換（5.8）。32bit CPU で使えるのは TRUNC64TO32（r0 だけ）と BTOI32
+              t_wr(rd, op == 8'h03 ? a : 32'd0);
+              t_fin;
+            end
+          endcase
+        end
+      E_MWAIT: if (d_rvalid) begin x_latch = 1'b1; x_es = E_MEXEC; end
+      E_MEXEC: begin           // M 形式：読んだ値（mem_data）で演算する
+        if (is_div) begin
+          if (b == 32'd0) t_exc(C_DIVZERO, evec);
+          else begin x_div = 1'b1; x_es = E_DIV; end
+        end else begin t_wr(rd, alu); t_fin; end
+      end
+      E_SWAP1: if (d_rvalid) begin x_latch = 1'b1; x_es = E_SWAP2; end
+      E_SWAP2: begin
+        if (d_err) t_halt(2'd3);
+        else if (d_gnt) begin t_wr(rd, mem_data); t_stored(st_hit, next_pc); end
+      end
+      E_DIV: if (div_cnt == 6'd0) begin t_wr(rd, div_rem ? div_rres : div_qres); t_fin; end
+      E_WFI: if (irq_m != 8'd0) t_fin;
+      default: ;  // E_HALT
+    endcase
+  end
+
+  // ---- F の動き（組み合わせ） ----
+  // 次に E に入る命令は q か届いたもの。q が空くとわかっているときだけ次を読みに行く（返事の置き場があるように）
+  wire q_nv = x_redir ? 1'b0 : x_adv ? (q_valid && arr) : (q_valid || arr);
+  always @* begin
+    i_addr = x_redir ? x_rpc : seq_next;
+    i_req  = !halted && !x_halt && (!f_out || i_rvalid) && !q_nv && !x_rhold && i_addr[1:0] == 2'd0;
+  end
+
+  // ---- レジスタへの書き込み ----
   task write_reg(input [5:0] n, input [31:0] v);
     begin
       if (n >= 6'd1 && n <= 6'd7) pr[n[2:0]] <= v != 32'd0;
@@ -258,187 +443,80 @@ module mycpu_cpu (
     end
   endtask
 
-  // 例外・割り込みに入る：EPC・CAUSE を書き、特権と割り込み許可を退避して EVEC へ
-  task enter(input [31:0] c, input [31:0] ret);
-    begin
-      epc <= ret;
-      cause <= c;
-      status <= (status & ~32'hF) | {28'd0, status[1:0], 2'b00};
-      pc <= evec;
-      state <= S_FETCH;
-    end
-  endtask
-
-  task halt(input [1:0] code);
-    begin
-      halt_code <= code;
-      state <= S_HALT;
-    end
-  endtask
-
-  task bus_read(input [31:0] addr, input [3:0] next);
-    begin
-      bus_addr <= {addr[31:2], 2'b00};
-      bus_wstrb <= 4'd0;
-      bus_valid <= 1'b1;
-      state <= next;
-    end
-  endtask
-
-  task finish;   // 次の命令へ
-    begin
-      pc <= next_pc;
-      state <= S_FETCH;
-    end
-  endtask
-
   integer i;
   always @(posedge clk) begin
     if (rst) begin
-      state <= S_FETCH;
-      pc <= 32'd0; sp <= 32'd0; lr <= 32'd0; epc <= 32'd0;
+      es <= E_RUN;
+      sp <= 32'd0; lr <= 32'd0; epc <= 32'd0;
       cause <= CAUSE_RESET; evec <= 32'd0; status <= 32'd0;
       pr <= 7'd0;
       for (i = 0; i < 16; i = i + 1) gpr[i] <= 32'd0;
-      bus_valid <= 1'b0; bus_wstrb <= 4'd0; bus_addr <= 32'd0; bus_wdata <= 32'd0;
       halt_code <= 2'd0;
-      have_mem <= 1'b0;
+      e_valid <= 1'b0; e_badpc <= 1'b0; e_seen <= 1'b0; pc <= 32'd0; ir <= 32'd0; imm <= 32'd0; e_ferr <= 2'b00;
+      q_valid <= 1'b0; q_pc <= 32'd0; q_data <= 64'd0; q_err <= 2'b00;
+      f_out <= 1'b0; f_kill <= 1'b0; f_aout <= 32'd0; f_next <= 32'd0;
+      m_load <= 1'b0; m_store <= 1'b0; m_rd <= 6'd0; m_op <= 3'd0; m_lo <= 2'd0;
+      mem_data <= 32'd0;
     end else begin
-      case (state)
-        S_FETCH: begin
-          have_mem <= 1'b0;
-          if (status[1] && irq_m != 8'd0) enter(32'h8000_0000 | irq_n, pc);
-          else if (pc[1:0] != 2'd0) enter(C_ALIGN, pc);
-          else bus_read(pc, S_FETCH_W);
-        end
-        S_FETCH_W: if (bus_ready) begin
-          bus_valid <= 1'b0;
-          if (bus_fault) halt(2'd3);
-          else begin ir <= bus_rdata; imm <= 32'd0; state <= S_DECODE; end
-        end
-        S_DECODE: begin
-          if (!insn_ok) halt(2'd2);
-          else if (width == 2'd1) bus_read(pc + 32'd4, S_IMM_W);
-          else state <= S_EXEC;
-        end
-        S_IMM_W: if (bus_ready) begin
-          bus_valid <= 1'b0;
-          if (bus_fault) halt(2'd3);
-          else begin imm <= bus_rdata; state <= S_EXEC; end
-        end
-        S_EXEC: begin
-          if (priv_dest && user) enter(C_PRIV, pc);
-          else case (grp)
-            4'd0: begin  // システム（5.2）
-              if (user && op != 8'h01 && op != 8'h03) enter(C_PRIV, pc);
-              else case (op)
-                8'h00: halt(2'd1);
-                8'h01: finish;
-                8'h02: begin
-                  status <= (status & ~32'h3) | {30'd0, status[3:2]};
-                  pc <= epc;
-                  state <= S_FETCH;
-                end
-                8'h03: enter(C_SYSCALL, pc);
-                default: begin pc <= next_pc; state <= S_WFI; end   // WFI
-              endcase
-            end
-            4'd1, 4'd2, 4'd3: begin
-              if (is_mform && !have_mem) begin
-                if (m_addr[1:0] != 2'd0) enter(C_ALIGN, pc);
-                else bus_read(m_addr, S_MEM_W);
-              end else if (is_sel && imm[5:0] > 6'd7) halt(2'd2);
-              else if (is_div) begin
-                if (b == 32'd0) enter(C_DIVZERO, pc);
-                else begin
-                  div_q <= div_signed && a[31] ? -a : a;
-                  div_b <= div_signed && b[31] ? -b : b;
-                  div_r <= 33'd0;
-                  div_cnt <= 6'd32;
-                  div_negq <= div_signed && (a[31] ^ b[31]);
-                  div_negr <= div_signed && a[31];
-                  div_rem <= num >= 6'd7;
-                  state <= S_DIV;
-                end
-              end else begin
-                write_reg(rd, alu);
-                finish;
-              end
-            end
-            4'd4: begin  // ロード・ストア（5.6）
-              if (ls_misaligned) enter(C_ALIGN, pc);
-              else if (is_store) begin
-                bus_addr <= {ls_addr[31:2], 2'b00};
-                bus_wdata <= st_data;
-                bus_wstrb <= st_strb;
-                bus_valid <= 1'b1;
-                state <= S_STORE_W;
-              end else bus_read(ls_addr, S_MEM_W);
-            end
-            4'd5: begin  // 分岐・呼び出し（5.7）
-              state <= S_FETCH;
-              case (op)
-                8'h00: pc <= imm;
-                8'h01: pc <= pr[rs1[2:0]] && rs1 != 6'd0 ? imm : next_pc;
-                8'h02: begin lr <= next_pc; pc <= imm; end
-                8'h03: pc <= lr;
-                8'h04: pc <= a;
-                default: begin lr <= next_pc; pc <= a; end  // CALLR（飛び先は書き換え前の値）
-              endcase
-            end
-            default: begin  // 幅変換（5.8）。32bit CPU で使えるのは TRUNC64TO32（r0 だけ）と BTOI32
-              write_reg(rd, op == 8'h03 ? a : 32'd0);
-              finish;
-            end
-          endcase
-        end
-        S_MEM_W: if (bus_ready) begin
-          bus_valid <= 1'b0;
-          if (bus_fault) halt(2'd3);
-          else if (is_swap) begin
-            mem_data <= bus_rdata;
-            bus_wdata <= bR;
-            bus_wstrb <= 4'b1111;
-            bus_valid <= 1'b1;
-            state <= S_SWAP_W;
-          end else if (is_load) begin
-            mem_data <= bus_rdata;
-            state <= S_LOAD;
-          end else begin
-            mem_data <= bus_rdata;
-            have_mem <= 1'b1;
-            state <= S_EXEC;      // M 形式：読んだ値で演算する
-          end
-        end
-        S_LOAD: begin
-          write_reg(rd, ld_val);
-          finish;
-        end
-        S_STORE_W: if (bus_ready) begin
-          bus_valid <= 1'b0;
-          bus_wstrb <= 4'd0;
-          if (bus_fault) halt(2'd3);
-          else finish;
-        end
-        S_SWAP_W: if (bus_ready) begin
-          bus_valid <= 1'b0;
-          bus_wstrb <= 4'd0;
-          if (bus_fault) halt(2'd3);
-          else begin write_reg(rd, mem_data); finish; end
-        end
-        S_DIV: begin
-          if (div_cnt != 6'd0) begin
-            div_r <= div_ge ? div_try - {1'b0, div_b} : div_try;
-            div_q <= {div_q[30:0], div_ge};
-            div_cnt <= div_cnt - 6'd1;
-          end else begin
-            write_reg(rd, div_rem ? div_rres : div_qres);
-            finish;
-          end
-        end
-        S_WFI: if (irq_m != 8'd0) state <= S_FETCH;
-        default: ;  // S_HALT
-      endcase
+      // M：読み出しの返事をレジスタへ（E の書き込みより先に書く。同じレジスタはハザードで起きない）
+      if (m_load && d_rvalid) write_reg(m_rd, ld_val);
+      if (x_mload) begin m_load <= 1'b1; m_rd <= rd; m_op <= op[2:0]; m_lo <= ls_addr[1:0]; end
+      else if (d_rvalid) m_load <= 1'b0;
+      if (x_mstore) m_store <= 1'b1;
+      else if (d_rvalid) m_store <= 1'b0;
+
+      // E
+      es <= x_es;
+      if (x_trace) e_seen <= 1'b1;
+      if (x_wr) write_reg(x_wi, x_wv);
+      if (x_latch) mem_data <= d_rdata;
+      if (x_halt) halt_code <= x_hc;
+      if (x_exc) begin
+        epc <= pc;
+        cause <= x_cause;
+        status <= (status & ~32'hF) | {28'd0, status[1:0], 2'b00};
+      end
+      if (x_eret) status <= (status & ~32'h3) | {30'd0, status[3:2]};
+      if (x_div) begin
+        div_q <= div_signed && a[31] ? -a : a;
+        div_b <= div_signed && b[31] ? -b : b;
+        div_r <= 33'd0;
+        div_cnt <= 6'd32;
+        div_negq <= div_signed && (a[31] ^ b[31]);
+        div_negr <= div_signed && a[31];
+        div_rem <= num >= 6'd7;
+      end else if (es == E_DIV && div_cnt != 6'd0) begin
+        div_r <= div_ge ? div_try - {1'b0, div_b} : div_try;
+        div_q <= {div_q[30:0], div_ge};
+        div_cnt <= div_cnt - 6'd1;
+      end
+
+      // E に入る命令：飛ぶなら（飛び先がずれていれば、整列違反を起こす印だけの命令）、でなければ q か届いたもの
+      if (x_redir) begin
+        e_valid <= x_rpc[1:0] != 2'd0;
+        e_badpc <= 1'b1; e_seen <= 1'b0; pc <= x_rpc; e_ferr <= 2'b00;
+      end else if (x_adv) begin
+        e_badpc <= 1'b0; e_seen <= 1'b0;
+        if (q_valid) begin
+          e_valid <= 1'b1; pc <= q_pc; ir <= q_data[31:0];
+          imm <= q_data[1:0] == 2'd0 ? 32'd0 : q_data[63:32]; e_ferr <= q_err;
+        end else if (arr) begin
+          e_valid <= 1'b1; pc <= f_aout; ir <= i_rdata[31:0];
+          imm <= i_rdata[1:0] == 2'd0 ? 32'd0 : i_rdata[63:32]; e_ferr <= i_err;
+        end else e_valid <= 1'b0;
+      end
+
+      // q
+      if (x_redir) q_valid <= 1'b0;
+      else if (x_adv ? (q_valid && arr) : (!q_valid && arr)) begin
+        q_valid <= 1'b1; q_pc <= f_aout; q_data <= i_rdata; q_err <= i_err;
+      end else if (x_adv) q_valid <= 1'b0;
+
+      // F
+      if (i_rvalid && f_out) begin f_out <= 1'b0; f_kill <= 1'b0; end
+      if (i_req && i_gnt) begin f_out <= 1'b1; f_kill <= 1'b0; f_aout <= i_addr; end
+      else if (x_redir && f_out && !i_rvalid) f_kill <= 1'b1;
+      f_next <= i_addr;
     end
   end
 endmodule

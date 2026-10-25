@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // アセンブラ（コマンドライン）
 //   node asm/asm.js prog.asm [-o 出力名]
-// 出力: 出力名.bin（番地 0 からの生バイナリ）、.lst（確認用リスト）、.hex（ROM 用 $readmemh）
+// 出力: 出力名.bin（番地 0 からの生バイナリ）、.lst（確認用リスト）、.hex（ROM 用 $readmemh）、
+//       _even.hex・_odd.hex（Verilog の ROM 用。偶数番目・奇数番目の 4 バイト）
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -30,10 +31,12 @@ function main(argv) {
   fs.writeFileSync(out + '.bin', result.image);
   fs.writeFileSync(out + '.lst', result.listing);
   fs.writeFileSync(out + '.hex', toReadmemh(result.image, MAP.ROM_SIZE / 4));
+  fs.writeFileSync(out + '_even.hex', toReadmemh(result.image, MAP.ROM_SIZE / 4, 0));
+  fs.writeFileSync(out + '_odd.hex', toReadmemh(result.image, MAP.ROM_SIZE / 4, 1));
   if (result.image.length > MAP.ROM_SIZE) {
     console.error(`注意: ROM（${MAP.ROM_SIZE} バイト）の外まで書いている。.hex には ROM の分だけ入る`);
   }
-  console.log(`${path.basename(input)}: ${result.image.length} バイト → ${out}.bin / .lst / .hex`);
+  console.log(`${path.basename(input)}: ${result.image.length} バイト → ${out}.bin / .lst / .hex / _even.hex / _odd.hex`);
 }
 
 function usage() {

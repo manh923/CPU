@@ -2,6 +2,7 @@
 //   CPU は 27MHz の水晶をそのまま使う。画面は PLL で 371.25MHz を作り、5 分周した 74.25MHz を画素クロックにする。
 //   HDMI 端子からは DVI 信号（音声なし）を出す。HDMI モニタにそのまま映る。
 // Gowin 専用の部品（rPLL・CLKDIV・OSER10・ELVDS_OBUF）を使うのはこのファイルだけ。
+// SDRAM（チップの中の 64Mbit）は CPU と同じ 27MHz で動かす（rtl/sdram.v）。
 // ※ボードでの動作確認はまだ。PLL の設定値とピンは Sipeed の HDMI 例と同じ値にしてある。
 module top_tangnano20k (
   input  wire       clk27,       // 27MHz
@@ -16,7 +17,18 @@ module top_tangnano20k (
   output wire       sd_dat1,     //   SPI では使わない（1 にしておく）
   output wire       sd_dat2,
   output wire       tmds_clk_p, tmds_clk_n,
-  output wire [2:0] tmds_d_p, tmds_d_n
+  output wire [2:0] tmds_d_p, tmds_d_n,
+  // チップの中の SDRAM（64Mbit）。Gowin はこの名前でつなぐので、.cst にピンは書かない
+  output wire        O_sdram_clk,
+  output wire        O_sdram_cke,
+  output wire        O_sdram_cs_n,
+  output wire        O_sdram_cas_n,
+  output wire        O_sdram_ras_n,
+  output wire        O_sdram_wen_n,
+  inout  wire [31:0] IO_sdram_dq,
+  output wire [10:0] O_sdram_addr,
+  output wire [1:0]  O_sdram_ba,
+  output wire [3:0]  O_sdram_dqm
 );
   // ---- クロック ----
   wire clk_ser, pll_lock, clk_pix;
@@ -54,9 +66,12 @@ module top_tangnano20k (
   wire [5:0]  led;
   wire        halted;
   wire [1:0]  halt_code;
-  mycpu_soc #(.CLK_HZ(27_000_000), .BAUD(115_200), .ROM_HEX("rom.hex")) soc (
+  mycpu_soc #(.CLK_HZ(27_000_000), .BAUD(115_200), .ROM_EVEN_HEX("rom_even.hex"), .ROM_ODD_HEX("rom_odd.hex")) soc (
     .clk(clk27), .rst(rst), .uart_rxd(uart_rx), .uart_txd(uart_tx),
     .sd_sclk(sd_clk), .sd_mosi(sd_cmd), .sd_miso(sd_dat0), .sd_cs_n(sd_dat3),
+    .sdram_clk(O_sdram_clk), .sdram_cke(O_sdram_cke), .sdram_cs_n(O_sdram_cs_n), .sdram_ras_n(O_sdram_ras_n),
+    .sdram_cas_n(O_sdram_cas_n), .sdram_we_n(O_sdram_wen_n), .sdram_a(O_sdram_addr), .sdram_ba(O_sdram_ba),
+    .sdram_dqm(O_sdram_dqm), .sdram_dq(IO_sdram_dq),
     .led(led), .halted(halted), .halt_code(halt_code),
     .vclk(clk_pix), .vaddr(vaddr), .vdata(vdata)
   );

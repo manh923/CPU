@@ -31,11 +31,13 @@ function src(name) { return fs.readFileSync(path.join(ROOT, 'examples', name), '
 // シミュレータで動かす
 function runSim(source, opts = {}) {
   let out = '';
-  const cpu = new CPU({ xlen: opts.xlen || 32, onTx: (b) => { out += String.fromCharCode(b); }, sd: opts.disk ? new SDCard(opts.disk) : null });
+  const trace = opts.trace ? [] : null;
+  const cpu = new CPU({ xlen: opts.xlen || 32, onTx: (b) => { out += String.fromCharCode(b); }, sd: opts.disk ? new SDCard(opts.disk) : null,
+    trace: trace ? (pc) => trace.push(Number(pc)) : null });
   cpu.load(assemble(source).image);
   if (opts.input) cpu.pushRx(Buffer.from(opts.input, 'latin1'));
   cpu.run(opts.max || 5_000_000);
-  return { cpu, out };
+  return { cpu, out, trace };
 }
 
 // ---- 1 ----
@@ -189,7 +191,7 @@ const cases = [];
       o.includes(nl('C:\\>type\nRequired parameter missing\n')) && o.includes(nl('C:\\>del nofile\nFile not found\n')) &&
       o.includes(nl('C:\\>ren renamed.txt hello.exe\nDuplicate file name or file not found\n')), '');
     check(`MyDOS（${type}）：COPY CON・COPY・リダイレクト・TOUPPER`, o.includes(nl('^Z\n        1 file(s) copied\n')) &&
-      o.includes(nl('978 bytes converted\n')) && /RENAMED  TXT +32 01-01-26  12:00a/.test(o) && o.includes(nl('fib(3) = 2\n\nC:\\>')), '');
+      o.includes(nl(`${readme.length} bytes converted\n`)) && /RENAMED  TXT +32 01-01-26  12:00a/.test(o) && o.includes(nl('fib(3) = 2\n\nC:\\>')), '');
     check(`MyDOS（${type}）：.BAT から .BAT、シャットダウン`, o.includes(nl('C:\\>FIB 10\nfib(0) = 0\n')) &&
       o.includes("safe to turn off") && r.cpu.halted.kind === 'hlt', o.slice(-300));
     if (mtoolsOk) {
@@ -248,6 +250,8 @@ const cases = [];
       input: ' hello rtl\rcopy con a.txt\rwritten by rtl\r\x1a\rtype a.txt\rren a.txt b.txt\rtype b.txt\rdel b.txt\rcrash\rshutdown\r' },
     { name: 'mydos-uart', file: 'bios.asm', input: bootInput, disk: small(), max: 60_000_000 },
     { name: 'hello', file: 'hello.asm' },
+    { name: 'sdram', file: 'sdram.asm', sdram: true, trace: true },
+    { name: 'pipeline', file: 'pipeline.asm', trace: true },
     { name: 'selftest32', file: 'selftest32.asm' },
     { name: 'trap', file: 'trap.asm', regs: false },
     { name: 'fib', file: 'fib.asm', max: 60_000_000 },
@@ -261,12 +265,16 @@ console.log('Verilog（iverilog）');
 if (spawnSync('iverilog', ['-V']).error) {
   console.log('  --   iverilog がないので飛ばす');
 } else {
-  const rtl = ['rtl/cpu.v', 'rtl/soc.v', 'rtl/uart.v', 'rtl/video.v'].map((f) => path.join(ROOT, f));
+  const rtl = ['rtl/cpu.v', 'rtl/soc.v', 'rtl/sdram.v', 'rtl/uart.v', 'rtl/video.v'].map((f) => path.join(ROOT, f));
   const p = (f) => path.join(ROOT, f);
 
   execFileSync('iverilog', ['-g2012', '-o', path.join(TMP, 'tmds.vvp'), p('tb/tb_tmds.v'), p('rtl/tmds.v')]);
   const tm = execFileSync('vvp', ['-n', path.join(TMP, 'tmds.vvp')], { encoding: 'utf8' });
   check('TMDS 符号器：元に戻せて、直流の偏りが小さい', /tb_tmds: 0 件 NG/.test(tm), tm.trim());
+
+  execFileSync('iverilog', ['-g2012', '-o', path.join(TMP, 'sdram.vvp'), p('tb/tb_sdram.v'), p('tb/sdram_model.v'), p('rtl/sdram.v')]);
+  const sdr = execFileSync('vvp', ['-n', path.join(TMP, 'sdram.vvp')], { encoding: 'utf8' });
+  check('SDRAM の制御回路：ランダムな読み書きが合い、モデルがタイミング違反を見つけない', /tb_sdram: 0 件 NG/.test(sdr), sdr.trim());
 
   const top = spawnSync('iverilog', ['-g2012', '-I', p('rtl'), '-o', path.join(TMP, 'top.vvp'), '-s', 'top_tangnano20k',
     p('rtl/gowin/top_tangnano20k.v'), ...rtl, p('rtl/tmds.v'), p('tb/gowin_stubs.v')], { encoding: 'utf8' });
@@ -275,11 +283,12 @@ if (spawnSync('iverilog', ['-V']).error) {
   for (const c of cases) {
     const base = path.join(TMP, c.name);
     const source = src(c.file);
-    const { image } = assemble(source);
-    fs.writeFileSync(base + '.hex', toReadmemh(image, isa.MAP.ROM_SIZE / 4));
+    const { image, symbols } = assemble(source);
+    fs.writeFileSync(base + '_even.hex', toReadmemh(image, isa.MAP.ROM_SIZE / 4, 0));
+    fs.writeFileSync(base + '_odd.hex', toReadmemh(image, isa.MAP.ROM_SIZE / 4, 1));
 
     // シミュレータ側の答え
-    const sim = runSim(source, { input: c.input, disk: c.disk, max: 60_000_000 });
+    const sim = runSim(source, { input: c.input, disk: c.disk, max: 60_000_000, trace: c.trace });
     const sdArgs = [];
     if (c.disk) {
       // 中身のあるセクタだけ書く（@番地 で飛ばす）
@@ -293,16 +302,32 @@ if (spawnSync('iverilog', ['-V']).error) {
     }
     // Verilog 側
     execFileSync('iverilog', ['-g2012', '-DMYCPU_SIM', '-I', path.join(ROOT, 'rtl'), '-o', base + '.vvp',
-      `-Ptb.ROM_HEX="${base}.hex"`, `-Ptb.FONT_HEX="${path.join(ROOT, 'font/font8x16.hex')}"`, ...sdArgs,
-      path.join(ROOT, 'tb/tb_soc.v'), path.join(ROOT, 'tb/sd_model.v'), ...rtl]);
+      `-Ptb.ROM_EVEN_HEX="${base}_even.hex"`, `-Ptb.ROM_ODD_HEX="${base}_odd.hex"`, `-Ptb.FONT_HEX="${path.join(ROOT, 'font/font8x16.hex')}"`, ...sdArgs,
+      path.join(ROOT, 'tb/tb_soc.v'), path.join(ROOT, 'tb/sd_model.v'), path.join(ROOT, 'tb/sdram_model.v'), ...rtl]);
     const args = ['-n', base + '.vvp', `+uart=${base}.uart`, `+regs=${base}.regs`, `+max=${c.max || 20_000_000}`];
     if (c.input) { fs.writeFileSync(base + '.rx', Buffer.from(c.input, 'latin1')); args.push(`+rx=${base}.rx`); }
     if (c.ppm) args.push(`+ppm=${base}.ppm`);
+    if (c.trace) args.push(`+trace=${base}.trace`);
     const log = execFileSync('vvp', args, { encoding: 'utf8' });
     const halted = /停止 halt_code=1/.test(log);
     const out = fs.readFileSync(base + '.uart', 'latin1');
     check(`${c.name}：HLT で止まる`, halted, log.trim());
+    if (c.sdram) {
+      const m = /SDRAM 読み出し (\d+) 回・書き込み (\d+) 回、タイミング違反 (\d+) 件/.exec(log);
+      check(`${c.name}：SDRAM を使い、タイミング違反がない`, m && +m[1] > 0 && +m[2] > 0 && m[3] === '0', log.trim());
+    }
     check(`${c.name}：UART 出力が一致`, out === sim.out, JSON.stringify(out.slice(0, 200)) + '\n≠ ' + JSON.stringify(sim.out.slice(0, 200)));
+    if (c.trace) {
+      // 実行した命令の順番。UART に出す部分（io_begin〜io_end）は、送信を待つ回数が違うので除く
+      const lo = Number(symbols.get('io_begin')), hi = Number(symbols.get('io_end'));
+      const keep = (pc) => !(pc >= lo && pc < hi);
+      const want = sim.trace.filter(keep);
+      const got = fs.readFileSync(base + '.trace', 'utf8').trim().split('\n').map((x) => parseInt(x, 16)).filter(keep);
+      let at = 0;
+      while (at < want.length && want[at] === got[at]) at++;
+      check(`${c.name}：実行した命令の順番がシミュレータと同じ（${want.length} 命令）`, at === want.length && got.length === want.length,
+        `${at} 番目で違う：${(got[at] || 0).toString(16)}（シミュレータは ${(want[at] || 0).toString(16)}）`);
+    }
     if (c.regs !== false) {
       const regs = fs.readFileSync(base + '.regs', 'utf8');
       check(`${c.name}：レジスタが一致`, regs === sim.cpu.dumpRegs(), regs + '≠\n' + sim.cpu.dumpRegs());
@@ -316,6 +341,31 @@ if (spawnSync('iverilog', ['-V']).error) {
         `長さ ${got.length} / ${want.length}、最初の違い ${diff}`);
     }
   }
+}
+
+if (!spawnSync('iverilog', ['-V']).error) {
+  // 速さ：命令ごとのクロック数が上限を超えていないか（test/cpi.asm。Verilog だけ）
+  const base = path.join(TMP, 'cpi');
+  const { image } = assemble(fs.readFileSync(path.join(ROOT, 'test/cpi.asm'), 'utf8'));
+  fs.writeFileSync(base + '_even.hex', toReadmemh(image, isa.MAP.ROM_SIZE / 4, 0));
+  fs.writeFileSync(base + '_odd.hex', toReadmemh(image, isa.MAP.ROM_SIZE / 4, 1));
+  const rtl = ['rtl/cpu.v', 'rtl/soc.v', 'rtl/sdram.v', 'rtl/uart.v', 'rtl/video.v', 'tb/tb_soc.v', 'tb/sd_model.v', 'tb/sdram_model.v']
+    .map((f) => path.join(ROOT, f));
+  execFileSync('iverilog', ['-g2012', '-DMYCPU_SIM', '-I', path.join(ROOT, 'rtl'), '-o', base + '.vvp',
+    `-Ptb.ROM_EVEN_HEX="${base}_even.hex"`, `-Ptb.ROM_ODD_HEX="${base}_odd.hex"`,
+    `-Ptb.FONT_HEX="${path.join(ROOT, 'font/font8x16.hex')}"`, ...rtl]);
+  execFileSync('vvp', ['-n', base + '.vvp', `+uart=${base}.uart`], { encoding: 'utf8' });
+  const rows = fs.readFileSync(base + '.uart', 'latin1').trim().split(/\r?\n/).map((l) => /^(.*): (\d+) \[([\d.]+)\]$/.exec(l));
+  const loop = +rows[0][2];
+  const slow = [], table = [];
+  for (const m of rows.slice(1)) {
+    const cpi = (+m[2] - loop) / 160;
+    table.push(`${m[1]} ${cpi.toFixed(2)}`);
+    if (cpi > +m[3] + 0.01) slow.push(`${m[1]}：${cpi.toFixed(2)} クロック（上限 ${m[3]}）`);
+  }
+  check('速さ：1 命令あたりのクロック数が上限以内（ふつうの命令 1、読み出しの直後に使う 2、M 形式 3 …）', rows.length > 5 && slow.length === 0,
+    slow.join('\n'));
+  console.log('       ' + table.join(' / '));
 }
 
 fs.rmSync(TMP, { recursive: true, force: true });

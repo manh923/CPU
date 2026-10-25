@@ -42,6 +42,7 @@ LAST_CR     = BDA + 12                  ; 直前の入力が \r だった（\r\n
 SD_TYPE     = BDA + 16                  ; SD カードの種類（0 = なし、1 = SDSC v1、2 = SDSC v2、3 = SDHC/SDXC）
 SD_CTRLV    = BDA + 20                  ; SD_CTRL に書く分周（CS は bit0 で足す）
 USER_FAULT  = BDA + 24                  ; ユーザーモードの例外を受け取る番地（0 なら止まる）
+SDRAM_KB    = BDA + 28                  ; 使える SDRAM の大きさ（KB。調べて壊れていたら 0）
 B_SPC       = BDA + 32                  ; ここから下はブートローダーの作業用
 B_FAT       = BDA + 36
 B_ROOT      = BDA + 40
@@ -50,6 +51,8 @@ B_DATA      = BDA + 48
 B_TYPE      = BDA + 52
 B_RCLUS     = BDA + 56
 STACK_TOP   = 0x0002C000
+SDRAM       = 0x01000000                ; SDRAM 8MB（〜0x017FFFFF）
+SDRAM_SIZE  = 0x00800000
 WAIT_US     = 1000000                   ; U キーを待つ時間
 MEMTEST_US  = 15000                     ; メモリテストで 1KB ごとに待つ時間（見た目のため）
 
@@ -124,7 +127,56 @@ bios_start:
         ADDI32 r16, r0, s_kbok
         CALL32 bios_puts
 
+        ; ---- SDRAM：データ線（1 の立つ bit をずらす）とアドレス線（2^k 番地）だけ調べる。全部は時間がかかる ----
+        ADDI32 r16, r0, s_sdram
+        CALL32 bios_puts
+        STORE32_32 r0, r0, SDRAM_KB
+        ADDI32 r24, r0, SDRAM
+        ADDI32 r25, r0, 1
+.sdd:   STORE32_32 r25, r0, SDRAM
+        XORI32 r17, r25, -1
+        STORE32_32 r17, r0, SDRAM + 4   ; 線に別の値を流してから読む
+        LOAD32_32 r18, r0, SDRAM
+        CMPNER32 p1, r18, r25
+        BR32 p1, .sdfail
+        SHLI32 r25, r25, 1
+        CMPNEI32 p1, r25, 0
+        BR32 p1, .sdd
+        STORE32_32 r0, r0, SDRAM
+        ADDI32 r25, r0, 4
+.sdaw:  XORI32 r17, r25, 0x5A5AA5A5
+        STORE32_32 r17, r25, SDRAM
+        SHLI32 r25, r25, 1
+        CMPLTUI32 p1, r25, SDRAM_SIZE
+        BR32 p1, .sdaw
+        LOAD32_32 r18, r0, SDRAM        ; 0 番地が書き換わっていたら、どこかの線がつながっている
+        CMPNEI32 p1, r18, 0
+        BR32 p1, .sdfail
+        ADDI32 r25, r0, 4
+.sdar:  ADDI32 r24, r25, SDRAM
+        XORI32 r17, r25, 0x5A5AA5A5
+        LOAD32_32 r18, r25, SDRAM
+        CMPNER32 p1, r18, r17
+        BR32 p1, .sdfail
+        SHLI32 r25, r25, 1
+        CMPLTUI32 p1, r25, SDRAM_SIZE
+        BR32 p1, .sdar
+        ADDI32 r16, r0, SDRAM_SIZE / 1024
+        STORE32_32 r16, r0, SDRAM_KB
+        CALL32 bios_putdec
+        ADDI32 r16, r0, s_kbok
+        CALL32 bios_puts
+        JMP32 .sdcard
+.sdfail:
+        ADDI32 r16, r0, s_sdfail        ; SDRAM がなくても MyDOS は動くので、止まらずに先へ
+        CALL32 bios_puts
+        ADDR32 r16, r24, r0
+        CALL32 bios_puthex
+        ADDI32 r16, r0, 10
+        CALL32 bios_putc
+
         ; ---- SD カード ----
+.sdcard:
         ADDI32 r16, r0, s_sd
         CALL32 bios_puts
         CALL32 bios_sd_init
@@ -1217,6 +1269,8 @@ s_cpu:      .asciz "CPU         : MyCPU-32 @ 27MHz\n"
 s_memtest:  .asciz "Memory Test : "
 s_kbok:     .asciz " KB OK\n"
 s_memfail:  .asciz " FAILED at 0x"
+s_sdram:    .asciz "SDRAM       : "
+s_sdfail:   .asciz "FAILED at 0x"
 s_sd:       .asciz "SD card     : "
 s_sd0:      .asciz "not found\n\n"
 s_sd1:      .asciz "SDSC (v1)\n\n"
