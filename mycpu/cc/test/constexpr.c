@@ -1,3 +1,4 @@
+// MyCPU：ILP32 なので定数式の long を 64bit 前提から 32bit に（45 行目）
 #include "test.h"
 
 float g40 = 1.5;

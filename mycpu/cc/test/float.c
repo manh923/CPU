@@ -1,3 +1,4 @@
+// MyCPU：unsigned long は 32bit。int に入らない double を int にする（未定義）ところは、比べる式にした
 #include "test.h"
 
 int main() {
@@ -37,7 +38,7 @@ int main() {
   ASSERT(35, (unsigned int)(double)35);
   ASSERT(35, (unsigned long)(double)35);
 
-  ASSERT(-2147483648, (double)(unsigned long)(long)-1);
+  ASSERT(1, (double)(unsigned long)(long)-1 == 4294967295.0);   // MyCPU：unsigned long は 32bit。int に入らない値を int にするのは未定義なので、比べる
 
   ASSERT(1, 2e3==2e3);
   ASSERT(0, 2e3==2e5);

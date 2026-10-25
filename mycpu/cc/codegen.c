@@ -4,14 +4,16 @@
 //   r16 = 値（x86 の rax）、r17〜r22 = 作業用、r31 = フレームポインタ（x86 の rbp）
 // 型の大きさ（ILP32）：char 1、short 2、int・long・ポインタ 4、long long 8。
 //   long long の値はレジスタ 2 つ（r16 = 下位、r17 = 上位）。割り算・余りは libc の __divdi3 などを呼ぶ。
-//   float・double はまだない（使うとエラー）。
+//   float は 4 バイト（r16）、double・long double は 8 バイト（long long と同じく r16・r17）。どちらも IEEE 754。
+//   計算・比べる・変換はどれも libc/softfloat.c の関数を呼ぶ（ソフトウェアで）。
 // 呼び出し規約（isa-spec.md の 8 章）：引数は r16〜r21（7 個目からと、構造体・long long はスタック）、
-//   戻り値は r16（long long は r16・r17）。
+//   戻り値は r16（long long・double は r16・r17）。float は int と同じ、double は long long と同じに渡す。
 //   構造体を返す関数は、呼ぶ側がバッファを用意して、その番地を隠れた最初の引数として渡す。
 // フレーム：[r31] = 戻り番地（lr）、[r31 + 4] = 呼んだ側の r31、[r31 + 8] 〜 = スタックで渡された引数、
 //   [r31 − n] = ローカル変数。SP は常に 8 の倍数。
 // 名前：C の大域の名前は「_名前」、static と内部のラベルは「L<ファイルの番号>…」（ファイルごとに別）。
 //   データは「; @data」、コードは「; @text」の行で区切って出す（ドライバが分けて並べ直す）。
+//   関数の前には「; @fn 名前」、大域変数の前には「; @obj 名前」（ドライバが使わないものを捨てる）。
 #include "chibicc.h"
 
 #define GP_MAX 6
@@ -93,8 +95,13 @@ static void pop64(int lo, int hi) {
   depth--;
 }
 
+// 8 バイトのスカラー（long long・double・long double）か。レジスタ 2 つで扱う
+static bool is_pair(Type *ty) {
+  return is64(ty) || ty->kind == TY_DOUBLE || ty->kind == TY_LDOUBLE;
+}
+
 static void push_val(Type *ty) {
-  if (is64(ty))
+  if (is_pair(ty))
     push64();
   else
     push();
@@ -107,24 +114,44 @@ int align_to(int n, int align) {
 }
 
 static void unsupported(Node *node, Type *ty) {
-  if (is_flonum(ty))
-    error_tok(node->tok, "float / double はまだ使えない（MyCPU）");
   error_tok(node->tok, "この型はまだ使えない（MyCPU）");
 }
 
-// 値（型 ty）が 0 なら / 0 でなければ飛ぶ（long long は r16 を壊す）
-static void jump_if_zero(Type *ty, char *label) {
-  if (is64(ty))
+// 値（型 ty）が 0 かを r16 だけで見られるようにする（r16・r17 を壊す）。
+// 浮動小数点は符号のビットを除いて見る（−0.0 も 0）。NaN は 0 でない
+static void to_cmp_zero(Type *ty) {
+  if (ty->kind == TY_FLOAT) {
+    println("  SHLI32 r16, r16, 1");
+  } else if (ty->kind == TY_DOUBLE || ty->kind == TY_LDOUBLE) {
+    println("  SHLI32 r17, r17, 1");
     println("  ORR32 r16, r16, r17");
+  } else if (is64(ty)) {
+    println("  ORR32 r16, r16, r17");
+  }
+}
+
+// 値（型 ty）が 0 なら / 0 でなければ飛ぶ
+static void jump_if_zero(Type *ty, char *label) {
+  to_cmp_zero(ty);
   println("  CMPEQI32 p1, r16, 0");
   println("  BR32 p1, %s", label);
 }
 
 static void jump_if_nonzero(Type *ty, char *label) {
-  if (is64(ty))
-    println("  ORR32 r16, r16, r17");
+  to_cmp_zero(ty);
   println("  CMPNEI32 p1, r16, 0");
   println("  BR32 p1, %s", label);
+}
+
+// libc/softfloat.c の関数を 1 つの引数で呼ぶ。引数は今の値：8 バイトならスタックで、4 バイトなら r16 で渡す
+static void call_helper(char *fn, bool arg8) {
+  if (arg8)
+    push64();
+  println("  CALL32 %s", fn);
+  if (arg8) {
+    println("  ADDI32 sp, sp, 8");
+    depth--;
+  }
 }
 
 // src から dst へ size バイト写す（r20・r21 を壊す。src・dst のレジスタは変えない）
@@ -223,10 +250,6 @@ static void load(Node *node, Type *ty) {
     // This is where "array is automatically converted to a pointer to
     // the first element of the array in C" occurs.
     return;
-  case TY_FLOAT:
-  case TY_DOUBLE:
-  case TY_LDOUBLE:
-    unsupported(node, ty);
   }
 
   // char・short は int の大きさに広げて読む
@@ -236,7 +259,7 @@ static void load(Node *node, Type *ty) {
     println("  %s r16, r16, 0", ty->is_unsigned ? "LOAD16U_32" : "LOAD16S_32");
   else if (ty->size == 4)
     println("  LOAD32_32 r16, r16, 0");
-  else if (is64(ty)) {
+  else if (is_pair(ty)) {
     println("  LOAD32_32 r17, r16, 4");
     println("  LOAD32_32 r16, r16, 0");
   } else
@@ -245,7 +268,7 @@ static void load(Node *node, Type *ty) {
 
 // Store r16 to an address that the stack top is pointing to.
 static void store(Node *node, Type *ty) {
-  if (is64(ty)) {
+  if (is_pair(ty)) {
     pop(22);
     println("  STORE32_32 r16, r22, 0");
     println("  STORE32_32 r17, r22, 4");
@@ -259,10 +282,6 @@ static void store(Node *node, Type *ty) {
   case TY_UNION:
     copy_bytes(17, 0, 16, ty->size, ty->align);
     return;
-  case TY_FLOAT:
-  case TY_DOUBLE:
-  case TY_LDOUBLE:
-    unsupported(node, ty);
   }
 
   if (ty->size == 1)
@@ -275,18 +294,59 @@ static void store(Node *node, Type *ty) {
     unsupported(node, ty);
 }
 
+static void cast(Node *node, Type *from, Type *to);
+
+// 浮動小数点が入る変換（libc/softfloat.c の関数を呼ぶ）
+static void cast_flonum(Node *node, Type *from, Type *to) {
+  bool f32 = from->kind == TY_FLOAT, t32 = to->kind == TY_FLOAT;
+
+  if (is_flonum(from) && is_flonum(to)) {
+    if (f32 && !t32)
+      call_helper("___extendsfdf2", false);
+    else if (!f32 && t32)
+      call_helper("___truncdfsf2", true);
+    return;                            // double と long double は同じ
+  }
+
+  // 整数 → 浮動小数点（char・short・_Bool は int に広げてあるので int として）
+  if (is_flonum(to)) {
+    char *fn;
+    if (is64(from))
+      fn = from->is_unsigned ? (t32 ? "___floatundisf" : "___floatundidf") : (t32 ? "___floatdisf" : "___floatdidf");
+    else if (from->size == 4 && (from->is_unsigned || from->base))
+      fn = t32 ? "___floatunsisf" : "___floatunsidf";
+    else
+      fn = t32 ? "___floatsisf" : "___floatsidf";
+    call_helper(fn, is64(from));
+    return;
+  }
+
+  // 浮動小数点 → 整数：まず int・unsigned・long long・unsigned long long のどれかにして、小さい型へは切り詰める
+  char *fn;
+  if (is64(to))
+    fn = to->is_unsigned ? (f32 ? "___fixunssfdi" : "___fixunsdfdi") : (f32 ? "___fixsfdi" : "___fixdfdi");
+  else if (to->size == 4 && to->is_unsigned)
+    fn = f32 ? "___fixunssfsi" : "___fixunsdfsi";
+  else
+    fn = f32 ? "___fixsfsi" : "___fixdfsi";
+  call_helper(fn, !f32);
+  if (!is64(to) && to->size < 4)
+    cast(node, ty_int, to);
+}
+
 static void cast(Node *node, Type *from, Type *to) {
   if (to->kind == TY_VOID)
     return;
 
-  if (is_flonum(from) || is_flonum(to))
-    unsupported(node, is_flonum(from) ? from : to);
-
   if (to->kind == TY_BOOL) {
-    if (is64(from))
-      println("  ORR32 r16, r16, r17");
+    to_cmp_zero(from);
     println("  CMPNEI32 p1, r16, 0");
     println("  BTOI32 r16, p1");
+    return;
+  }
+
+  if (is_flonum(from) || is_flonum(to)) {
+    cast_flonum(node, from, to);
     return;
   }
 
@@ -345,10 +405,6 @@ static void push_args2(Node *args, bool first_pass) {
   case TY_UNION:
     push_struct(args->ty);
     break;
-  case TY_FLOAT:
-  case TY_DOUBLE:
-  case TY_LDOUBLE:
-    unsupported(args, args->ty);
   default:
     push_val(args->ty);
   }
@@ -357,7 +413,7 @@ static void push_args2(Node *args, bool first_pass) {
 // 引数を積む。先に「スタックで渡すもの」を後ろから、次に「レジスタで渡すもの」を後ろから積むので、
 // 後で取り出すと最初の引数から順に出てくる。スタックで渡すものは、そのまま呼ばれた側が読む。
 //   - 整数・ポインタは r16〜r21 の 6 個まで。残りはスタック（8 バイトずつ）
-//   - 構造体・共用体はいつもスタック
+//   - 構造体・共用体・8 バイトのスカラー（long long・double）はいつもスタック。float は int と同じ
 //   - 構造体を返す関数には、バッファの番地を隠れた最初の引数として渡す
 static int push_args(Node *node) {
   int stack = 0, gp = 0;
@@ -375,7 +431,9 @@ static int push_args(Node *node) {
       stack += align_to(ty->size, 8) / 8;
       break;
     case TY_LONG:
-      if (is64(ty)) {
+    case TY_DOUBLE:
+    case TY_LDOUBLE:
+      if (is_pair(ty)) {
         arg->pass_by_stack = true;
         stack++;
         break;
@@ -614,22 +672,98 @@ static void gen_binary64(Node *node) {
   error_tok(node->tok, "invalid expression");
 }
 
+// 浮動小数点の 2 つの値の演算・比べる（libc/softfloat.c の関数を呼ぶ）
+//   float：r16 = 左、r17 = 右。double：スタックに [sp] = 左、[sp + 8] = 右
+//   比べる関数は −1（<）・0（=）・1（>）・2（NaN があって比べられない）を返す
+static void gen_flonum_binary(Node *node) {
+  bool f32 = node->lhs->ty->kind == TY_FLOAT;
+  char *fn;
+  switch (node->kind) {
+  case ND_ADD: fn = f32 ? "___addsf3" : "___adddf3"; break;
+  case ND_SUB: fn = f32 ? "___subsf3" : "___subdf3"; break;
+  case ND_MUL: fn = f32 ? "___mulsf3" : "___muldf3"; break;
+  case ND_DIV: fn = f32 ? "___divsf3" : "___divdf3"; break;
+  case ND_EQ:
+  case ND_NE:
+  case ND_LT:
+  case ND_LE:
+    fn = f32 ? "___mycpu_fcmp" : "___mycpu_dcmp";
+    break;
+  default:
+    error_tok(node->tok, "invalid operands");
+  }
+
+  gen_expr(node->rhs);
+  push_val(node->rhs->ty);
+  gen_expr(node->lhs);
+  if (f32) {
+    pop(17);
+    println("  CALL32 %s", fn);
+  } else {
+    push64();
+    println("  CALL32 %s", fn);
+    println("  ADDI32 sp, sp, 16");
+    depth -= 2;
+  }
+
+  switch (node->kind) {
+  case ND_EQ:
+    println("  CMPEQI32 p1, r16, 0");
+    println("  BTOI32 r16, p1");
+    return;
+  case ND_NE:
+    println("  CMPNEI32 p1, r16, 0");
+    println("  BTOI32 r16, p1");
+    return;
+  case ND_LT:
+    println("  CMPEQI32 p1, r16, -1");
+    println("  BTOI32 r16, p1");
+    return;
+  case ND_LE:                          // −1 か 0：（値 + 1）< 2（符号なし）
+    println("  ADDI32 r16, r16, 1");
+    println("  CMPLTUI32 p1, r16, 2");
+    println("  BTOI32 r16, p1");
+    return;
+  }
+}
+
 // Generate code for a given node.
 static void gen_expr(Node *node) {
   switch (node->kind) {
   case ND_NULL_EXPR:
     return;
   case ND_NUM:
-    if (is_flonum(node->ty))
-      unsupported(node, node->ty);
+    // ビット列をそのまま入れる。NaN はいつも 0x7FC00000・0x7FF8000000000000（libc/softfloat.c と同じ。
+    // PC の上で 0.0 / 0.0 を計算すると符号つきの NaN になることがあるので、そろえる）
+    if (node->ty->kind == TY_FLOAT) {
+      union { float f; uint32_t u; } u = { node->fval };
+      if (node->fval != node->fval)
+        u.u = 0x7FC00000;
+      println("  ADDI32 r16, r0, %d", (int32_t)u.u);
+      return;
+    }
+    if (is_flonum(node->ty)) {
+      union { double d; uint64_t u; } u = { node->fval };
+      if (node->fval != node->fval)
+        u.u = 0x7FF8000000000000ULL;
+      println("  ADDI32 r16, r0, %d", (int32_t)u.u);
+      println("  ADDI32 r17, r0, %d", (int32_t)(u.u >> 32));
+      return;
+    }
     println("  ADDI32 r16, r0, %d", (int32_t)node->val);
     if (is64(node->ty))
       println("  ADDI32 r17, r0, %d", (int32_t)(node->val >> 32));
     return;
   case ND_NEG:
     gen_expr(node->lhs);
-    if (is_flonum(node->ty))
-      unsupported(node, node->ty);
+    if (node->ty->kind == TY_FLOAT) {           // 符号のビットを反転する
+      println("  XORI32 r16, r16, %d", INT32_MIN);
+      return;
+    }
+    if (is_flonum(node->ty)) {
+      println("  XORI32 r17, r17, %d", INT32_MIN);
+      return;
+    }
     if (is64(node->ty)) {             // −(上位:下位)：下位が 0 でなければ上位から 1 借りる
       println("  SUBR32 r16, r0, r16");
       println("  CMPNEI32 p1, r16, 0");
@@ -642,7 +776,8 @@ static void gen_expr(Node *node) {
     return;
   case ND_VAR:
     // スカラーのローカル変数は、番地を作らずに直接読む
-    if (node->var->is_local && node->var->ty->kind != TY_VLA && is_integer(node->ty) && node->ty->size == 4) {
+    if (node->var->is_local && node->var->ty->kind != TY_VLA && (is_integer(node->ty) || node->ty->kind == TY_FLOAT) &&
+        node->ty->size == 4) {
       println("  LOAD32_32 r16, r31, %d", node->var->offset);
       return;
     }
@@ -679,7 +814,7 @@ static void gen_expr(Node *node) {
   case ND_ASSIGN:
     // スカラーのローカル変数へは、直接書く
     if (node->lhs->kind == ND_VAR && node->lhs->var->is_local && node->lhs->var->ty->kind != TY_VLA &&
-        (is_integer(node->ty) || node->ty->kind == TY_PTR) && node->ty->size == 4) {
+        (is_integer(node->ty) || node->ty->kind == TY_PTR || node->ty->kind == TY_FLOAT) && node->ty->size == 4) {
       gen_expr(node->rhs);
       println("  STORE32_32 r16, r31, %d", node->lhs->var->offset);
       return;
@@ -755,8 +890,7 @@ static void gen_expr(Node *node) {
   }
   case ND_NOT:
     gen_expr(node->lhs);
-    if (is64(node->lhs->ty))
-      println("  ORR32 r16, r16, r17");
+    to_cmp_zero(node->lhs->ty);
     println("  CMPEQI32 p1, r16, 0");
     println("  BTOI32 r16, p1");
     return;
@@ -904,8 +1038,10 @@ static void gen_expr(Node *node) {
   }
   }
 
-  if (is_flonum(node->lhs->ty))
-    unsupported(node, node->lhs->ty);
+  if (is_flonum(node->lhs->ty)) {
+    gen_flonum_binary(node);
+    return;
+  }
 
   // 右を積んでから左を求める。右は 32bit なら r17、long long なら r18・r19
   // （シフトの右は左と型が違うことがある。そのときは下位だけ使う）
@@ -1060,10 +1196,7 @@ static void assign_lvar_offsets(Obj *prog) {
 
     for (Obj *var = fn->params; var; var = var->next) {
       Type *ty = var->ty;
-      if (is_flonum(ty))
-        error("%s: float / double の引数はまだ使えない（MyCPU）", fn->name);
-
-      if (ty->kind != TY_STRUCT && ty->kind != TY_UNION && !is64(ty) && gp++ < GP_MAX)
+      if (ty->kind != TY_STRUCT && ty->kind != TY_UNION && !is_pair(ty) && gp++ < GP_MAX)
         continue;
 
       var->offset = top;
@@ -1098,6 +1231,7 @@ static void emit_data(Obj *prog) {
       continue;
     }
 
+    println("; @obj %s", sym_name(var->name));
     println("  .align %d", var->align < 4 ? 4 : var->align);
     println("%s:", sym_name(var->name));
 
@@ -1159,6 +1293,7 @@ static void emit_text(Obj *prog) {
     if (!fn->is_live)
       continue;
 
+    println("; @fn %s", sym_name(fn->name));
     println("%s:", sym_name(fn->name));
     current_fn = fn;
 
@@ -1177,7 +1312,7 @@ static void emit_text(Obj *prog) {
     if (fn->va_area) {
       int gp = 0;                      // レジスタで来た名前付きの引数の数
       for (Obj *var = fn->params; var; var = var->next)
-        if (var->ty->kind != TY_STRUCT && var->ty->kind != TY_UNION && !is64(var->ty) && gp < GP_MAX)
+        if (var->ty->kind != TY_STRUCT && var->ty->kind != TY_UNION && !is_pair(var->ty) && gp < GP_MAX)
           gp++;
 
       int off = fn->va_area->offset;

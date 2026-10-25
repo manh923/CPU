@@ -330,6 +330,8 @@ static int utoa_rev(unsigned long long v, int base, int upper, char *tmp) {
   return n;
 }
 
+int __mycpu_dtoa(double x, int conv, int prec, int alt, char *out);
+
 static int format(Out *o, const char *f, va_list ap) {
   for (; *f; f++) {
     if (*f != '%') {
@@ -372,8 +374,9 @@ static int format(Out *o, const char *f, va_list ap) {
     }
 
     // 長さ：ll（と j）は long long。int・long・ポインタはどれも 4 バイトなので、ほかは読み飛ばす
+    // （L も読み飛ばす。long double は double と同じ）
     int nl = 0;
-    while (*f == 'l' || *f == 'h' || *f == 'z' || *f == 't' || *f == 'j') {
+    while (*f == 'l' || *f == 'h' || *f == 'z' || *f == 't' || *f == 'j' || *f == 'L') {
       if (*f == 'l')
         nl++;
       if (*f == 'j')
@@ -433,6 +436,43 @@ static int format(Out *o, const char *f, va_list ap) {
       out_pad(o, '0', digits - n);
       while (n > 0)
         out_c(o, tmp[--n]);
+      if (left)
+        out_pad(o, ' ', pad);
+      break;
+    }
+    case 'f':
+    case 'F':
+    case 'e':
+    case 'E':
+    case 'g':
+    case 'G': {
+      // 数字は libc/fltio.c が作る。inf・nan は 0 で埋めない
+      static char fbuf[1400];
+      double v = va_arg(ap, double);
+      unsigned hi;
+      memcpy(&hi, (char *)&v + 4, 4);
+      int upper = *f < 'a';
+      char *body = fbuf;
+      int finite = (hi & 0x7FF00000) != 0x7FF00000;
+      prefix = hi >> 31 ? "-" : plus ? "+" : space ? " " : "";
+      if (finite) {
+        __mycpu_dtoa(v, *f, prec, alt, fbuf);
+      } else {
+        unsigned lo;
+        memcpy(&lo, &v, 4);
+        body = (hi & 0xFFFFF) || lo ? (upper ? "NAN" : "nan") : (upper ? "INF" : "inf");
+      }
+      int len = strlen(body), plen = strlen(prefix);
+      int pad = width - len - plen;
+      int zpad = zero && !left && finite;
+      if (!left && !zpad)
+        out_pad(o, ' ', pad);
+      for (char *p = prefix; *p; p++)
+        out_c(o, *p);
+      if (zpad)
+        out_pad(o, '0', pad);
+      for (int i = 0; i < len; i++)
+        out_c(o, body[i]);
       if (left)
         out_pad(o, ' ', pad);
       break;

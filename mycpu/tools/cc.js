@@ -6,6 +6,7 @@
 // リンカの代わりに、crt0・プログラム・C ライブラリ（libc/）のアセンブリを 1 つにつなげてアセンブルする：
 //   コードを前に、データを後ろにまとめ（codegen.c の「; @text」「; @data」で分ける）、
 //   最後に __heap_start（malloc がここから後ろを使う）を置く。
+//   使われない関数・変数は捨てる（codegen.c の「; @fn」「; @obj」で分けて、crt0 からたどれるものだけ残す）。
 // require して使う：buildAsm(.c のパスの並び) → アセンブリの文字列、diskSources(フォルダ) → mkdisk 用の並び
 'use strict';
 const fs = require('fs');
@@ -50,29 +51,84 @@ function compileFile(file, includes = []) {
   }
 }
 
-// アセンブリをコードとデータに分ける
+// コンパイルした結果を覚えておく（libc は何度もコンパイルするので）：パス・-I・更新時刻 → アセンブリ
+const cache = new Map();
+function compileCached(file, includes) {
+  const key = [path.resolve(file), ...includes, fs.statSync(file).mtimeMs, fs.statSync(CC).mtimeMs].join('\0');
+  if (!cache.has(key)) cache.set(key, compileFile(file, includes));
+  return cache.get(key);
+}
+
+// アセンブリをコードとデータに分け、それぞれを関数・変数ごとのかたまりにする（codegen.c の「; @fn」「; @obj」）
+//   かたまり = { name: 定義するラベル（先頭のものは null）, lines: [...] }
 function split(asm) {
-  const text = [], data = [];
+  const text = [{ name: null, lines: [] }], data = [{ name: null, lines: [] }];
   let cur = text;
   for (const line of asm.split('\n')) {
     if (line === '; @data') cur = data;
     else if (line === '; @text') cur = text;
-    else cur.push(line);
+    else if (line.startsWith('; @fn ') || line.startsWith('; @obj ')) cur.push({ name: line.split(' ')[2], lines: [] });
+    else if (line.startsWith('; @common ')) data[0].lines.push(line);     // 残すかは後で決める
+    else cur[cur.length - 1].lines.push(line);
   }
-  return { text: text.join('\n'), data: data.join('\n') };
+  return { text, data };
 }
 
-// .c の並び → プログラム全体のアセンブリ（crt0・C ライブラリ込み）。opts.includes はインクルードを探すフォルダ
+// 使われない関数・変数を捨てる（リンカの --gc-sections と同じ）。.s のファイルと名前のないかたまりから、
+// たどれるラベルのものだけ残す
+function gc(parts, roots) {
+  const byName = new Map();
+  for (const p of parts) for (const c of [...p.text, ...p.data]) if (c.name) byName.set(c.name, c);
+  const keep = new Set();
+  const refs = (lines) => {
+    const out = [];
+    for (const line of lines) {
+      const code = line.replace(/;.*/, '');
+      for (const m of code.matchAll(/[A-Za-z_][\w.]*/g)) if (byName.has(m[0])) out.push(m[0]);
+    }
+    return out;
+  };
+  const todo = [...roots];
+  for (const p of parts) for (const c of [...p.text, ...p.data]) if (!c.name) todo.push(...refs(c.lines));
+  while (todo.length) {
+    const n = todo.pop();
+    if (keep.has(n)) continue;
+    keep.add(n);
+    todo.push(...refs(byName.get(n).lines));
+  }
+  for (const p of parts) {
+    p.text = p.text.filter((c) => !c.name || keep.has(c.name));
+    p.data = p.data.filter((c) => !c.name || keep.has(c.name));
+  }
+  return keep;
+}
+
+// .c の並び → プログラム全体のアセンブリ（crt0・C ライブラリ込み）
+//   opts.includes はインクルードを探すフォルダ。opts.gc = false なら、使わない関数・変数も捨てない
+//   （disk/as.c は捨てないので、比べるテストはこれを使う）
 function buildAsm(files, opts = {}) {
+  const includes = opts.includes || [];
   const libc = fs.readdirSync(LIBC).filter((f) => f.endsWith('.c')).sort().map((f) => path.join(LIBC, f));
-  const parts = [...files, ...libc].map((f) => ({ name: path.relative(ROOT, f), ...split(compileFile(f, opts.includes)) }));
+  ensureCompiler();
+  const parts = [...files, ...libc].map((f) => ({ name: path.relative(ROOT, f), ...split(compileCached(f, includes)) }));
   // crt0.s を先頭に、ほかの libc/*.s（setjmp など）はその後ろに
   const asms = fs.readdirSync(LIBC).filter((f) => f.endsWith('.s') && f !== 'crt0.s').sort();
+  const asmText = ['crt0.s', ...asms].map((f) => fs.readFileSync(path.join(LIBC, f), 'utf8'));
+  let keep = null;
+  if (opts.gc !== false) {
+    const roots = [];
+    for (const t of asmText) for (const m of t.replace(/;.*/g, '').matchAll(/[A-Za-z_][\w.]*/g)) roots.push(m[0]);
+    keep = gc(parts, roots.filter((n) => parts.some((p) => [...p.text, ...p.data].some((c) => c.name === n))));
+  }
+  const join = (chunks) => chunks.map((c) => c.lines.join('\n')).join('\n');
+  for (const p of parts) {
+    p.text = join(p.text);
+    p.data = join(p.data);
+  }
   const out = [
     `; ${files.map((f) => path.basename(f)).join(' ')} — tools/cc.js が作ったアセンブリ（C ライブラリ込み）`,
     `        .org 0x${BASE.toString(16)}`,
-    fs.readFileSync(path.join(LIBC, 'crt0.s'), 'utf8'),
-    ...asms.map((f) => fs.readFileSync(path.join(LIBC, f), 'utf8')),
+    ...asmText,
   ];
   for (const p of parts) out.push(`; ---- ${p.name} ----`, p.text);
   out.push('', '; ---- データ ----', '        .align 64');
@@ -87,9 +143,15 @@ function buildAsm(files, opts = {}) {
       common.set(m[1], { size: Math.max(c.size, +m[2]), align: Math.max(c.align, +m[3]) });
     }
   }
-  for (const [name, c] of common) if (!defined.has(name)) out.push(`        .align ${c.align}`, `${name}:`, `        .space ${c.size}`);
+  for (const [name, c] of common) if (!defined.has(name) && (!keep || keepCommon(name, parts))) out.push(`        .align ${c.align}`, `${name}:`, `        .space ${c.size}`);
   out.push('        .align 8', '___heap_start:', '');
   return out.join('\n');
+}
+
+// 初期値なしの大域変数が、残したコードかデータから使われているか
+function keepCommon(name, parts) {
+  const re = new RegExp(`(^|[^\\w.])${name.replace(/\./g, '\\.')}($|[^\\w.])`, 'm');
+  return parts.some((p) => re.test((p.text + '\n' + p.data).replace(/;.*/g, '')));
 }
 
 // SD カードの中身のもと（mkdisk・sim.js・テスト用）：フォルダのファイルを読み、

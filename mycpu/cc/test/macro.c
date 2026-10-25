@@ -337,10 +337,10 @@ int main() {
 
   ASSERT(1, __STDC__);
 
-  ASSERT(0, strcmp(main_filename1, "test/macro.c"));
+  ASSERT(0, strcmp(main_filename1, "cc/test/macro.c"));   // MyCPU：tools/cc.js はリポジトリの一番上からのパスで渡す
   ASSERT(5, main_line1);
   ASSERT(7, main_line2);
-  ASSERT(0, strcmp(include1_filename, "test/include1.h"));
+  ASSERT(0, strcmp(include1_filename, "cc/test/include1.h"));
   ASSERT(4, include1_line);
 
 #define M14(...) 3
@@ -394,7 +394,7 @@ int main() {
 
   ASSERT(24, strlen(__TIMESTAMP__));
 
-  ASSERT(0, strcmp(__BASE_FILE__, "test/macro.c"));
+  ASSERT(0, strcmp(__BASE_FILE__, "cc/test/macro.c"));
 
 #define M30(buf, fmt, ...) sprintf(buf, fmt __VA_OPT__(,) __VA_ARGS__)
   ASSERT(0, ({ char buf[100]; M30(buf, "foo"); strcmp(buf, "foo"); }));

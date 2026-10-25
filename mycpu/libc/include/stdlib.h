@@ -19,6 +19,10 @@ int atoi(const char *s);
 long atol(const char *s);
 long strtol(const char *s, char **end, int base);
 unsigned long strtoul(const char *s, char **end, int base);
+double strtod(const char *s, char **end);        // libc/fltio.c（正しく丸める）
+float strtof(const char *s, char **end);
+long double strtold(const char *s, char **end);
+double atof(const char *s);
 int rand(void);
 void srand(unsigned seed);
 void qsort(void *base, size_t n, size_t size, int (*cmp)(const void *, const void *));

@@ -1,4 +1,4 @@
-// chibicc の test/common から、float・double を使うものを外したもの（MyCPU：まだ float・double がない）
+// chibicc の test/common（そのまま）
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,11 +42,28 @@ int add_all(int n, ...) {
   return sum;
 }
 
+float add_float(float x, float y) {
+  return x + y;
+}
+
+double add_double(double x, double y) {
+  return x + y;
+}
+
 int add10_int(int x1, int x2, int x3, int x4, int x5, int x6, int x7, int x8, int x9, int x10) {
   return x1 + x2 + x3 + x4 + x5 + x6 + x7 + x8 + x9 + x10;
 }
 
+float add10_float(float x1, float x2, float x3, float x4, float x5, float x6, float x7, float x8, float x9, float x10) {
+  return x1 + x2 + x3 + x4 + x5 + x6 + x7 + x8 + x9 + x10;
+}
+
+double add10_double(double x1, double x2, double x3, double x4, double x5, double x6, double x7, double x8, double x9, double x10) {
+  return x1 + x2 + x3 + x4 + x5 + x6 + x7 + x8 + x9 + x10;
+}
+
 typedef struct { int a,b; short c; char d; } Ty4;
+typedef struct { int a; float b; double c; } Ty5;
 typedef struct { unsigned char a[3]; } Ty6;
 typedef struct { long a, b, c; } Ty7;
 
@@ -56,6 +73,14 @@ int struct_test4(Ty4 x, int n) {
   case 1: return x.b;
   case 2: return x.c;
   default: return x.d;
+  }
+}
+
+int struct_test5(Ty5 x, int n) {
+  switch (n) {
+  case 0: return x.a;
+  case 1: return x.b;
+  default: return x.c;
   }
 }
 
@@ -73,6 +98,10 @@ int struct_test7(Ty7 x, int n) {
 
 Ty4 struct_test24(void) {
   return (Ty4){10, 20, 30, 40};
+}
+
+Ty5 struct_test25(void) {
+  return (Ty5){10, 20, 30};
 }
 
 Ty6 struct_test26(void) {

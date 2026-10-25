@@ -1,3 +1,4 @@
+// MyCPU：ILP32 なので long の大きさを 8 → 4 にした
 #include "test.h"
 
 int main() {
@@ -113,7 +114,7 @@ int main() {
   ASSERT(-1, 0?-2:-1);
   ASSERT(-2, 1?-2:-1);
   ASSERT(4, sizeof(0?1:2));
-  ASSERT(8, sizeof(0?(long)1:(long)2));
+  ASSERT(4, sizeof(0?(long)1:(long)2));               // MyCPU：long は 4 バイト
   ASSERT(-1, 0?(long)-2:-1);
   ASSERT(-1, 0?-2:(long)-1);
   ASSERT(-2, 1?(long)-2:-1);

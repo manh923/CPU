@@ -1,3 +1,4 @@
+// MyCPU：ILP32 なので 0L などの大きさを 8 → 4、long double を 16 → 8 にした
 #include "test.h"
 
 int main() {
@@ -18,16 +19,16 @@ int main() {
   ASSERT(47, 0B101111);
 
   ASSERT(4, sizeof(0));
-  ASSERT(8, sizeof(0L));
-  ASSERT(8, sizeof(0LU));
-  ASSERT(8, sizeof(0UL));
+  ASSERT(4, sizeof(0L));   // MyCPU：long は 4 バイト
+  ASSERT(4, sizeof(0LU));   // MyCPU：long は 4 バイト
+  ASSERT(4, sizeof(0UL));   // MyCPU：long は 4 バイト
   ASSERT(8, sizeof(0LL));
   ASSERT(8, sizeof(0LLU));
   ASSERT(8, sizeof(0Ull));
-  ASSERT(8, sizeof(0l));
+  ASSERT(4, sizeof(0l));   // MyCPU：long は 4 バイト
   ASSERT(8, sizeof(0ll));
-  ASSERT(8, sizeof(0x0L));
-  ASSERT(8, sizeof(0b0L));
+  ASSERT(4, sizeof(0x0L));   // MyCPU：long は 4 バイト
+  ASSERT(4, sizeof(0b0L));   // MyCPU：long は 4 バイト
   ASSERT(4, sizeof(2147483647));
   ASSERT(8, sizeof(2147483648));
   ASSERT(-1, 0xffffffffffffffff);
@@ -88,8 +89,8 @@ int main() {
   ASSERT(4, sizeof(0.3F));
   ASSERT(8, sizeof(0.));
   ASSERT(8, sizeof(.0));
-  ASSERT(16, sizeof(5.l));
-  ASSERT(16, sizeof(2.0L));
+  ASSERT(8, sizeof(5.l));   // MyCPU：long double は double と同じ 8 バイト
+  ASSERT(8, sizeof(2.0L));   // MyCPU：long double は double と同じ 8 バイト
 
   assert(1, size\
 of(char), \

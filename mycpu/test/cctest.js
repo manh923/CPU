@@ -46,9 +46,18 @@ trap:   CMPNEI32 p1, cause, 3
 
 // 1 つのテストを動かす → { ok, out, why }
 function runOne(name, max = 50_000_000) {
+  const r = runC([path.join(DIR, name + '.c'), path.join(DIR, 'common.c')], { includes: [DIR, path.join(DIR, '..')], max });
+  if (r.why) return r;
+  if (!/OK\s*$/.test(r.out)) return { ok: false, out: r.out, why: 'OK が出ない' };
+  return r;
+}
+
+// C のファイルをコンパイルしてシミュレータで動かす → { ok, out, why }（main が 0 を返せば ok）
+function runC(files, opts = {}) {
+  const max = opts.max || 50_000_000;
   let asm;
   try {
-    asm = KERNEL + buildAsm([path.join(DIR, name + '.c'), path.join(DIR, 'common.c')], { includes: [DIR, path.join(DIR, '..')] });
+    asm = KERNEL + buildAsm(files, { includes: opts.includes || [] });
   } catch (e) {
     if (!(e instanceof CcError)) throw e;
     return { ok: false, out: '', why: 'コンパイルできない：' + e.message.split('\n').slice(0, 3).join(' / ') };
@@ -69,7 +78,6 @@ function runOne(name, max = 50_000_000) {
   if (cpu.halted.kind !== 'hlt') return { ok: false, out, why: cpu.halted.message };
   if ((code & 0xFFF0) === 0xBAD0) return { ok: false, out, why: `例外（理由 ${code & 15}）PC=${Number(cpu.epc).toString(16)}` };
   if (code !== 0) return { ok: false, out, why: `終了コード ${code}：` + out.trim().split('\n').slice(-1)[0] };
-  if (!/OK\s*$/.test(out)) return { ok: false, out, why: 'OK が出ない' };
   return { ok: true, out, why: '' };
 }
 
@@ -88,4 +96,4 @@ if (require.main === module) {
   console.log(`${results.length - ng} / ${results.length} ok`);
 }
 
-module.exports = { run, runOne, allTests };
+module.exports = { run, runOne, runC, allTests };

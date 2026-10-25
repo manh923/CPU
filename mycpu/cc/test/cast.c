@@ -1,3 +1,4 @@
+// MyCPU：ILP32 なので unsigned long の割り算・余りの値を 32bit のものにした。long に入らない (long)2e15 は long long に
 #include "test.h"
 
 int main() {
@@ -28,11 +29,11 @@ int main() {
   ASSERT(2147483647, ((unsigned)-1)>>1);
   ASSERT(-50, (-100)/2);
   ASSERT(2147483598, ((unsigned)-100)/2);
-  ASSERT(9223372036854775758, ((unsigned long)-100)/2);
-  ASSERT(0, ((long)-1)/(unsigned)100);
+  ASSERT(2147483598, ((unsigned long)-100)/2);       // MyCPU：unsigned long は 32bit
+  ASSERT(42949672, ((long)-1)/(unsigned)100);         // MyCPU：long と unsigned が同じ大きさなので unsigned long の割り算
   ASSERT(-2, (-100)%7);
   ASSERT(2, ((unsigned)-100)%7);
-  ASSERT(6, ((unsigned long)-100)%9);
+  ASSERT(3, ((unsigned long)-100)%9);                 // MyCPU：unsigned long は 32bit
 
   ASSERT(65535, (int)(unsigned short)65535);
   ASSERT(65535, ({ unsigned short x = 65535; x; }));
@@ -46,7 +47,7 @@ int main() {
   ASSERT(3, (char)3.0);
   ASSERT(1000, (short)1000.3);
   ASSERT(3, (int)3.99);
-  ASSERT(2000000000000000, (long)2e15);
+  ASSERT(2000000000000000, (long long)2e15);          // MyCPU：long は 32bit で入らないので long long
   ASSERT(3, (float)3.5);
   ASSERT(5, (double)(float)5.5);
   ASSERT(3, (float)3);

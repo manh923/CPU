@@ -1457,13 +1457,22 @@ write_gvar_data(Relocation *cur, Initializer *init, Type *ty, char *buf, int off
   if (!init->expr)
     return cur;
 
+  // MyCPU：long double も 8 バイト。NaN はいつも符号なしの同じビット列（codegen.c の ND_NUM と同じ）
   if (ty->kind == TY_FLOAT) {
-    *(float *)(buf + offset) = eval_double(init->expr);
+    float f = eval_double(init->expr);
+    uint32_t nan = 0x7FC00000;
+    if (f != f)
+      memcpy(&f, &nan, 4);
+    memcpy(buf + offset, &f, 4);
     return cur;
   }
 
-  if (ty->kind == TY_DOUBLE) {
-    *(double *)(buf + offset) = eval_double(init->expr);
+  if (ty->kind == TY_DOUBLE || ty->kind == TY_LDOUBLE) {
+    double d = eval_double(init->expr);
+    uint64_t nan = 0x7FF8000000000000ULL;
+    if (d != d)
+      memcpy(&d, &nan, 8);
+    memcpy(buf + offset, &d, 8);
     return cur;
   }
 
@@ -1839,7 +1848,20 @@ static int64_t eval(Node *node) {
 // is a pointer to a global variable and n is a postiive/negative
 // number. The latter form is accepted only as an initialization
 // expression for a global variable.
+static int64_t eval3(Node *node, char ***label);
+
+// MyCPU：int・long は 32bit なので、計算した値をその型に収める（-1u / 2 などが 64bit で計算されないように）
 static int64_t eval2(Node *node, char ***label) {
+  int64_t val = eval3(node, label);
+  if (is_integer(node->ty) && node->ty->size == 4) {
+    if (node->ty->is_unsigned)
+      return (uint32_t)val;
+    return (int32_t)val;
+  }
+  return val;
+}
+
+static int64_t eval3(Node *node, char ***label) {
   add_type(node);
 
   if (is_flonum(node->ty))
@@ -1908,7 +1930,10 @@ static int64_t eval2(Node *node, char ***label) {
       switch (node->ty->size) {
       case 1: return node->ty->is_unsigned ? (uint8_t)val : (int8_t)val;
       case 2: return node->ty->is_unsigned ? (uint16_t)val : (int16_t)val;
-      case 4: return node->ty->is_unsigned ? (uint32_t)val : (int32_t)val;
+      case 4:                          // MyCPU：? : だと両方 uint32_t になって符号が広がらないので、分けて返す
+        if (node->ty->is_unsigned)
+          return (uint32_t)val;
+        return (int32_t)val;
       }
     }
     return val;

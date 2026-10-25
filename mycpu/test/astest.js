@@ -57,7 +57,7 @@ function run() {
       }
       const exe = path.join(tmp, 'X.EXE');
       const r = spawnSync(as, ['-b', '0x1000000', '-o', exe, ...files], { encoding: 'utf8' });
-      const want = Buffer.from(makeFile('x.exe.asm', buildAsm([path.join(ROOT, prog)])).data);
+      const want = Buffer.from(makeFile('x.exe.asm', buildAsm([path.join(ROOT, prog)], { gc: false })).data);
       const ok = r.status === 0 && fs.readFileSync(exe).equals(want);
       results.push({ name: 'link ' + prog, ok, why: ok ? '' : (r.stderr || 'バイト列が違う').split('\n')[0] });
     }

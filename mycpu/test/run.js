@@ -283,16 +283,44 @@ const cases = [];
 // ---- C コンパイラ ----
 console.log('C コンパイラ（cc/。chibicc のテストをこの CPU で動かす）');
 {
-  // まだ通らないもの：float・double を使う（TODO.md の 7）、x86 のアセンブリ・pthread を使う（この CPU にはない）
-  const LATER = ['arith', 'cast', 'constexpr', 'control', 'float', 'function', 'literal', 'macro', 'varargs'];
+  // x86 のアセンブリ・pthread を使うものは除く（この CPU にはない）
   const NA = ['asm', 'atomic', 'tls'];
   const results = require('./cctest.js').run();
-  const expect = results.filter((r) => !LATER.includes(r.name) && !NA.includes(r.name));
+  const expect = results.filter((r) => !NA.includes(r.name));
   const bad = expect.filter((r) => !r.ok);
-  check(`chibicc のテスト ${expect.length} 本が通る（float・double の ${LATER.length} 本と x86・pthread の ${NA.length} 本は除く）`,
-    bad.length === 0 && expect.length >= 29, bad.map((r) => `${r.name}：${r.why}`).join('\n'));
-  const surprise = results.filter((r) => LATER.includes(r.name) && r.ok).map((r) => r.name);
-  if (surprise.length) console.log(`       （除いたうち通ったもの：${surprise.join(' ')}。LATER から外す）`);
+  check(`chibicc のテスト ${expect.length} 本が通る（x86・pthread の ${NA.length} 本は除く）`,
+    bad.length === 0 && expect.length >= 38, bad.map((r) => `${r.name}：${r.why}`).join('\n'));
+}
+
+// ---- 浮動小数点（libc/softfloat.c・fltio.c・math.c） ----
+if (spawnSync('gcc', ['--version']).error) {
+  console.log('  --   gcc がないので、浮動小数点のライブラリの比較は飛ばす');
+} else {
+  const exe = (name) => path.join(TMP, name);
+  const gcc = (out, args) => execFileSync('gcc', ['-O2', '-o', exe(out), ...args.map((f) => (f.startsWith('-') ? f : path.join(ROOT, f)))], { stdio: ['ignore', 'ignore', 'pipe'] });
+  const runExe = (name, args) => spawnSync(exe(name), args, { encoding: 'utf8' });
+
+  gcc('floattest', ['test/floattest.c', 'libc/softfloat.c']);
+  let r = runExe('floattest', ['300000']);
+  check('ソフトウェアの浮動小数点（libc/softfloat.c）：四則・比較・変換が PC の FPU とビット単位で同じ（30 万組）',
+    r.status === 0, r.stdout.trim());
+
+  gcc('fltiotest', ['-Dstrtod=my_strtod', '-Dstrtof=my_strtof', '-Dstrtold=my_strtold', '-Datof=my_atof', 'test/fltiotest.c', 'libc/fltio.c']);
+  r = runExe('fltiotest', ['20000']);
+  check('printf の %f・%e・%g と strtod（libc/fltio.c）：glibc と同じ文字列・同じビット列（2 万回）', r.status === 0, r.stdout.trim());
+
+  gcc('mathtest', ['-fno-builtin', '-fno-math-errno', 'test/mathtest.c', 'libc/math.c', '-lm']);
+  r = runExe('mathtest', ['200000']);
+  check('数学の関数（libc/math.c）：sqrt・fmod などは正確、sin・exp・pow などは 2 ulp 以内（glibc の long double と比べる）',
+    r.status === 0, r.stdout.trim());
+
+  // 同じプログラムを、この CPU（シミュレータ）と PC で動かして、出力が同じ
+  execFileSync('gcc', ['-O0', '-ffp-contract=off', '-fno-builtin', '-o', exe('cfloat'), path.join(ROOT, 'test/cfloat.c'), path.join(ROOT, 'libc/math.c'), '-lm']);
+  const want = runExe('cfloat', []).stdout;
+  const got = require('./cctest.js').runC([path.join(ROOT, 'test/cfloat.c')], { max: 400_000_000 });
+  const diff = got.out.split('\n').findIndex((l, i) => l !== want.split('\n')[i]);
+  check('C の float・double（test/cfloat.c）：この CPU で動かした出力が、PC の gcc で動かしたものと同じ',
+    got.ok && got.out === want, got.why || `${diff + 1} 行目：${got.out.split('\n')[diff]}（PC：${want.split('\n')[diff]}）`);
 }
 
 // ---- C のアセンブラ ----
