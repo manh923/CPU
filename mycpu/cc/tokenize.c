@@ -112,7 +112,11 @@ static Token *new_token(TokenKind kind, char *start, char *end) {
 }
 
 static bool startswith(char *p, char *q) {
-  return strncmp(p, q, strlen(q)) == 0;
+  // MyCPU：strlen と strncmp を呼ばずに 1 文字ずつ（記号を読むたびに呼ばれるので）
+  for (; *q; p++, q++)
+    if (*p != *q)
+      return false;
+  return true;
 }
 
 // Read an identifier and returns the length of it.

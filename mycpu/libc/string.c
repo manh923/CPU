@@ -140,6 +140,20 @@ void *memmove(void *dst, const void *src, size_t n) {
 
 void *memset(void *p, int c, size_t n) {
   unsigned char *d = p;
+  // 4 バイト境界まで 1 バイトずつ、そこから 4 バイトずつ（calloc がよく使う）
+  while (n && ((unsigned)d & 3)) {
+    *d++ = c;
+    n--;
+  }
+  unsigned w = (unsigned char)c * 0x01010101u;
+  for (; n >= 16; n -= 16, d += 16) {
+    ((unsigned *)d)[0] = w;
+    ((unsigned *)d)[1] = w;
+    ((unsigned *)d)[2] = w;
+    ((unsigned *)d)[3] = w;
+  }
+  for (; n >= 4; n -= 4, d += 4)
+    *(unsigned *)d = w;
   while (n--)
     *d++ = c;
   return p;

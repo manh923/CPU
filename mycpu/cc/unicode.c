@@ -85,6 +85,8 @@ static bool in_range(uint32_t *range, uint32_t c) {
 // 0x00BE-0x00C0 are allowed, while neither ⟘ (U+27D8) nor '　'
 // (U+3000, full-width space) are allowed because they are out of range.
 bool is_ident1(uint32_t c) {
+  if (c < 0x80)                         // MyCPU：ASCII は表を探さない（速くするため）
+    return c == '_' || c == '$' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
   static uint32_t range[] = {
     '_', '_', 'a', 'z', 'A', 'Z', '$', '$',
     0x00A8, 0x00A8, 0x00AA, 0x00AA, 0x00AD, 0x00AD, 0x00AF, 0x00AF,
@@ -113,6 +115,8 @@ bool is_ident2(uint32_t c) {
     0xFE20, 0xFE2F, -1,
   };
 
+  if (c < 0x80)                         // MyCPU：ASCII は表を探さない
+    return is_ident1(c) || (c >= '0' && c <= '9');
   return is_ident1(c) || in_range(range, c);
 }
 
