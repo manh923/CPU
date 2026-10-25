@@ -9,7 +9,8 @@
 | `sim/sim.js` | シミュレータ（コマンドライン。キー入力・画面表示つき） |
 | `web/index.html` | シミュレータ（ブラウザ。ファイルを直接開くだけで動く） |
 | `lib/` | アセンブラ・CPU・表示の本体（Node とブラウザで共通） |
-| `examples/` | 例題 |
+| `examples/` | 例題（`mydos.asm` は BIOS ＋ブートローダー＋張りぼての MyDOS） |
+| `tools/mkboot.js` | UART 起動で送るファイルを作る |
 | `rtl/` | Verilog（CPU・メモリ・入出力・UART・表示回路・DVI 符号器） |
 | `rtl/gowin/` | Tang Nano 20K 用のトップとピン割り当て |
 | `tb/` | Verilog のテストベンチ |
@@ -24,13 +25,14 @@
 cd mycpu
 node asm/asm.js examples/hello.asm          # → hello.bin / hello.lst / hello.hex
 node sim/sim.js examples/hello.asm          # .asm を直接渡してもよい
+node sim/sim.js examples/mydos.asm --screen # BIOS → MyDOS の C:\> まで。HELP でコマンド一覧
 node sim/sim.js examples/console.asm --screen   # 画面（VRAM）を端末に表示。キー入力はその場で届く。Ctrl-] で終了
 node sim/sim.js examples/selftest64.asm --cpu 64
 node sim/sim.js examples/colors.asm --png screen.png   # 止まったときの画面を PNG に
 node test/run.js                            # テスト一式
 ```
 
-`sim.js` のオプション：`--cpu 32|64`、`--trace`（1 命令ずつ表示）、`--max N`、`--input 文字列`（UART 受信に入れておく）、`--screen`、`--png`／`--ppm`、`--regs ファイル|-`、`--realtime`（タイマーを実時間で進める）。
+`sim.js` のオプション：`--cpu 32|64`、`--trace`（1 命令ずつ表示）、`--max N`、`--input 文字列`（UART 受信に入れておく）、`--rx-file ファイル`（同じくファイルの中身）、`--screen`、`--png`／`--ppm`、`--regs ファイル|-`、`--realtime`（タイマーを実時間で進める）。
 
 ブラウザ版は `web/index.html` を開く。左で書いて「アセンブルして実行」。画面（または UART の欄）をクリックしてからキーを押すと、その場で UART 受信に届く。Ctrl+Enter でも実行できる。
 
@@ -52,8 +54,36 @@ msg:    .asciz "hi\n"
 - 命令名とオペランドの並びは `opcodes.csv` のとおり（例：`STORE32_32 rs2, rs1, imm`、`SEL32 rd, rs1, rs2, p`）
 - レジスタの別名：`pc sp lr epc cause evec status`、1bit レジスタは `p1`〜`p7` とも書ける
 - 数値：`0x`、`0b`、10 進、`'A'`。即値には `+ - * / % << >> & | ^ ~ ( )` の式が書ける
-- 疑似命令：`.org .align .space .byte .half .word .dword .ascii .asciz .equ`
+- 疑似命令：`.org .align .space .byte .half .word .dword .ascii .asciz .equ .phase .dephase`
+- `.phase 番地` 〜 `.dephase`：中身はその場所（ROM）に置き、ラベルは「番地」（RAM）に写して動かす前提で決める。`.phase` の前は `.align 16`
 - 命令は自動で 4 バイト境界にそろう。幅の合わないレジスタ・予備レジスタ・PC への書き込みはエラー
+
+## MyDOS（`examples/mydos.asm`）
+
+1. **BIOS**（ROM）：見出し、メモリテスト（内蔵 RAM を 1KB ずつ書いて読み戻す）
+2. 1 秒だけ **U キー**を待つ。U なら UART から起動、ほかのキーか時間切れなら次へ
+3. **ブートローダー**：ROM の中の MyDOS を RAM の `0x20000` に写して飛ぶ
+4. **MyDOS**：`C:\>` を出してコマンドを待つ。`HELP`、`DIR`、`TYPE README.TXT`、`VER`、`CLS`、`ECHO`、`MEM`、`TIME`、`COLOR 1F`、`LED 2A`、`HELLO`、`REBOOT`、`SHUTDOWN`。ファイルは全部張りぼて
+
+UART から起動するプログラムは `.org 0x20000` で書き、画面や入力は BIOS の入口（ROM の決まった番地）を `CALL32` して使う（`examples/uartboot/hello_uart.asm`）。
+
+| 番地 | 機能 |
+|---|---|
+| `0x10` | putc(r16 = 文字) |
+| `0x18` | puts(r16 = 文字列) |
+| `0x20` | getc() → r16 |
+| `0x28` | getline(r16 = 置き場所, r17 = 最大の長さ) → r16 = 長さ |
+| `0x30` | cls() |
+| `0x38` | putdec(r16) |
+| `0x40` | puthex(r16) |
+| `0x48` | 再起動 |
+
+```sh
+node tools/mkboot.js examples/uartboot/hello_uart.asm -o hello.boot
+node sim/sim.js examples/mydos.asm --input u --rx-file hello.boot   # シミュレータで試す
+```
+
+実機では、起動中に U を押してから、端末ソフトのバイナリ送信で `hello.boot` を送る。ブラウザ版は「UART 受信へファイルを送る」から送る。
 
 ## 仕様書で決まっていないところ（仮決め）
 
@@ -89,7 +119,7 @@ Gowin EDA での手順：
 1. 新しいプロジェクト。デバイスは `GW2AR-LV18QN88C8/I7`
 2. 追加するファイル：`rtl/cpu.v rtl/soc.v rtl/uart.v rtl/video.v rtl/tmds.v rtl/gowin/top_tangnano20k.v rtl/gowin/tangnano20k.cst`
 3. インクルードのパスに `rtl` を追加（`opcodes.vh` のため）。トップモジュールは `top_tangnano20k`
-4. ROM の中身：`node asm/asm.js examples/console.asm -o rom` で `rom.hex` を作る。`rom.hex` と `font/font8x16.hex` を、合成ツールが `$readmemh` で見つけられる場所（プロジェクトのフォルダ）に置く
+4. ROM の中身：`node asm/asm.js examples/mydos.asm -o rom` で `rom.hex` を作る。`rom.hex` と `font/font8x16.hex` を、合成ツールが `$readmemh` で見つけられる場所（プロジェクトのフォルダ）に置く
 5. 合成・配置配線して書き込む。PC 側は 115200bps の端末ソフトでつなぐ
 
 **まだ実機で確かめていない。** ここ（クラウドの環境）では Gowin のツールを動かせないので、確かめたのは Icarus Verilog でのシミュレーションまで：

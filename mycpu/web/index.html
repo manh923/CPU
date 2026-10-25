@@ -57,7 +57,9 @@
     <canvas id="screen" width="1280" height="720" tabindex="0" title="クリックするとキー入力が UART 受信に届く"></canvas>
     <div class="hint">画面か UART の欄をクリックしてからキーを押すと、その場で UART 受信に届きます（Ctrl-D なども送れます）。</div>
     <div class="row">
-      <div class="box"><h2>UART 送信（CPU → PC）</h2><pre id="uart" tabindex="0"></pre></div>
+      <div class="box"><h2>UART 送信（CPU → PC）</h2><pre id="uart" tabindex="0"></pre>
+        <div class="hint" style="margin-top:6px">UART 受信へファイルを送る（MyDOS の UART 起動用。tools/mkboot.js の出力）：
+          <input type="file" id="rxfile"></div></div>
       <div class="box"><h2>レジスタ</h2><pre id="regs"></pre><div id="leds"></div></div>
     </div>
   </div>
@@ -88,7 +90,7 @@
     src.value = M.EXAMPLES[i].source;
     $('xlen').value = /selftest64/.test(M.EXAMPLES[i].name) ? '64' : '32';
   }
-  var start = M.EXAMPLES.findIndex(function (e) { return e.name === 'console.asm'; });
+  var start = M.EXAMPLES.findIndex(function (e) { return e.name === 'mydos.asm'; });
   $('example').value = String(Math.max(start, 0));
   loadExample(Math.max(start, 0));
   $('example').onchange = function () { loadExample(+this.value); };
@@ -205,6 +207,15 @@
     e.preventDefault();
     cpu.pushRx([code]);
   }
+  $('rxfile').addEventListener('change', function () {
+    var f = this.files[0];
+    if (!f || !cpu) return;
+    f.arrayBuffer().then(function (buf) {
+      cpu.pushRx(new Uint8Array(buf));
+      $('rxfile').value = '';
+      canvas.focus();
+    });
+  });
   canvas.addEventListener('keydown', onKey);
   uart.addEventListener('keydown', onKey);
   src.addEventListener('keydown', function (e) {

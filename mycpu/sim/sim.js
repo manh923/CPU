@@ -5,6 +5,7 @@
 //     --trace         1 命令ずつ表示（標準エラー）
 //     --max N         N 命令で打ち切る（既定 1 億）
 //     --input 文字列  UART 受信に最初から入れておく（\n などのエスケープ可）
+//     --rx-file 名前  ファイルの中身を UART 受信に入れておく（--input の後ろに続く）
 //     --screen        テキスト VRAM を端末にそのまま表示し続ける
 //     --png 名前      止まったときの画面を PNG で保存
 //     --ppm 名前      同じく PPM（Verilog のテストベンチの出力と比べる用）
@@ -28,6 +29,7 @@ function parseArgs(argv) {
       case '--trace': o.trace = true; break;
       case '--max': o.max = +val(); break;
       case '--input': o.input = unescape(val()); break;
+      case '--rx-file': o.rxFile = val(); break;
       case '--screen': o.screen = true; break;
       case '--png': o.png = val(); break;
       case '--ppm': o.ppm = val(); break;
@@ -134,6 +136,7 @@ function main() {
   });
   cpu.load(loadImage(o.file));
   cpu.pushRx(Buffer.from(o.input, 'latin1'));
+  if (o.rxFile) cpu.pushRx(fs.readFileSync(o.rxFile));
 
   const interactive = process.stdin.isTTY;
   let stdinOpen = false;
@@ -144,7 +147,7 @@ function main() {
       if (d.includes(0x1d)) finish('Ctrl-] で終了');
       cpu.pushRx(d);
     });
-  } else if (!o.input) {
+  } else if (!o.input && !o.rxFile) {
     // パイプからの入力は、全部読んでから UART に入れる
     try { cpu.pushRx(fs.readFileSync(0)); } catch (_) { /* 入力なし */ }
   }
