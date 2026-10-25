@@ -81,7 +81,7 @@
 
   // 番地 0 に何もないときの説明（リセット後は番地 0 から実行するので、すぐ HLT で止まる）
   CPU.NO_RESET_CODE = '番地 0（リセット後に実行を始める場所）に何もないので、すぐ HLT で止まる。' +
-    '.org 0x20000 で書いたプログラムは、mydos.asm の BIOS から UART 起動で読み込んで使う（tools/mkboot.js）。';
+    '.org 0x20000 で書いたプログラムは、bios.asm の BIOS から UART 起動で読み込んで使う（tools/mkboot.js）。';
 
   CPU.prototype.pushRx = function (bytes) {
     for (var i = 0; i < bytes.length; i++) this.rx.push(bytes[i] & 0xff);

@@ -1,9 +1,9 @@
 ; FIB.EXE [n] — フィボナッチ数を 0 番から n 番まで（n は 0〜47、なければ 20）
-BIOS_PUTC   = 0x10
-BIOS_PUTS   = 0x18
-BIOS_PUTDEC = 0x38
+SYS_PUTC    = 1
+SYS_PUTS    = 2
+SYS_PUTDEC  = 6
 
-        .org 0x23000
+        .org 0x26000
 start:
         ADDI32 sp, sp, -24
         STORE32_32 lr, sp, 0
@@ -34,15 +34,20 @@ start:
         ADDI32 r26, r0, 1               ; b
         ADDI32 r27, r0, 0               ; i
 .loop:  ADDI32 r16, r0, s1
-        CALL32 BIOS_PUTS
+        ADDI32 r23, r0, SYS_PUTS
+        SYSCALL
         ADDR32 r16, r27, r0
-        CALL32 BIOS_PUTDEC
+        ADDI32 r23, r0, SYS_PUTDEC
+        SYSCALL
         ADDI32 r16, r0, s2
-        CALL32 BIOS_PUTS
+        ADDI32 r23, r0, SYS_PUTS
+        SYSCALL
         ADDR32 r16, r25, r0
-        CALL32 BIOS_PUTDEC
+        ADDI32 r23, r0, SYS_PUTDEC
+        SYSCALL
         ADDI32 r16, r0, 10
-        CALL32 BIOS_PUTC
+        ADDI32 r23, r0, SYS_PUTC
+        SYSCALL
         ADDR32 r17, r25, r26
         ADDR32 r25, r26, r0
         ADDR32 r26, r17, r0

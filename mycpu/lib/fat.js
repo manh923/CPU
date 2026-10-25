@@ -28,6 +28,9 @@
       this.sector(lba + (p >> 9))[p & 511] = bytes[i];
     }
   };
+  SparseDisk.prototype.writeSector = function (lba, data) {
+    this.sector(lba).set(data);
+  };
   SparseDisk.prototype.toBuffer = function () {
     var buf = new Uint8Array(this.sectors * 512);
     this.map.forEach(function (s, lba) { buf.set(s, lba * 512); });
@@ -39,6 +42,8 @@
     return {
       sectors: Math.floor(buf.length / 512),
       read: function (lba) { return buf.subarray(lba * 512, lba * 512 + 512); },
+      writeSector: function (lba, data) { buf.set(data, lba * 512); },
+      buffer: buf,
     };
   }
 

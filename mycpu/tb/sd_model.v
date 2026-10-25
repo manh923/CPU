@@ -1,5 +1,5 @@
 // SD カード（SPI モード 0）のモデル。テストベンチ用。lib/sdcard.js と同じ動きにしてある。
-//   CMD0・CMD8・CMD55＋ACMD41（2 回目で初期化完了）・CMD58（SDHC）・CMD16・CMD17（1 セクタ読み出し）
+//   CMD0・CMD8・CMD55＋ACMD41（2 回目で初期化完了）・CMD58（SDHC）・CMD16・CMD17（読み出し）・CMD24（書き込み）
 //   ディスクの中身は DISK_HEX（$readmemh、1 行 1 バイト、@番地 で飛ばしてよい）。DISK_HEX が空なら「カードなし」
 module sd_model #(
   parameter DISK_HEX = "",
@@ -29,6 +29,8 @@ module sd_model #(
   integer acmd41 = 0;
   reg [7:0] cmd [0:5];
   integer cmdn = 0;
+  integer wlba = -1;      // CMD24 の後、データを受け取る先
+  integer wn = -1;        // 受け取ったバイト数（-1 は開始の印 0xFE 待ち）
 
   task command(input [5:0] c, input [31:0] arg);
     reg was_app;
@@ -49,6 +51,11 @@ module sd_model #(
         6'd55: begin app = 1'b1; push(r1); end
         6'd58: begin push(r1); push(8'hC0); push(8'hFF); push(8'h80); push(8'h00); end
         6'd16: push(r1);
+        6'd24: begin
+          if (idle) push(8'h05);
+          else if (arg >= SECTORS) push(8'h40);
+          else begin push(8'h00); wlba = arg; wn = -1; end
+        end
         6'd17: begin
           if (idle) push(8'h05);
           else if (arg >= SECTORS) push(8'h40);
@@ -65,7 +72,18 @@ module sd_model #(
 
   task receive(input [7:0] b);
     begin
-      if (cmdn != 0 || b[7:6] == 2'b01) begin
+      if (wlba >= 0) begin
+        if (wn < 0) begin
+          if (b == 8'hFE) wn = 0;
+        end else begin
+          if (wn < 512) disk[wlba * 512 + wn] = b;
+          wn = wn + 1;
+          if (wn == 514) begin           // データ 512 バイト＋CRC 2 バイト
+            wlba = -1;
+            push(8'h05); push(8'h00); push(8'h00);
+          end
+        end
+      end else if (cmdn != 0 || b[7:6] == 2'b01) begin
         cmd[cmdn] = b;
         cmdn = cmdn + 1;
         if (cmdn == 6) begin
@@ -82,7 +100,7 @@ module sd_model #(
   assign miso = (cs_n || !PRESENT) ? 1'b1 : out_sr[7];
 
   always @(posedge cs_n) begin
-    qh = 0; qt = 0; cmdn = 0; bitc = 0; out_sr = 8'hFF;
+    qh = 0; qt = 0; cmdn = 0; bitc = 0; out_sr = 8'hFF; wlba = -1;
   end
   always @(posedge sclk) if (!cs_n && PRESENT) begin
     rx = {rx[6:0], mosi};

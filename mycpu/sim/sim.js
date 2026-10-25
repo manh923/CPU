@@ -12,6 +12,7 @@
 //     --regs 名前     止まったときのレジスタ一覧をファイルへ（- なら標準エラー）
 //     --realtime      タイマーを実時間で進める（既定は 1 命令 = 1µs で毎回同じ結果）
 //     --sd 名前       SD カードを挿す。.img ならそのイメージ、フォルダなら中身から FAT16 のイメージを作る（tools/mkdisk.js と同じ）
+//     --sd-save 名前  止まったときの SD カードの中身をイメージとして保存する（.img を渡したときも、元のファイルは書き換えない）
 // 標準入力は UART 受信につながる。端末ならキーを押した瞬間に届く。Ctrl-] で終了。
 'use strict';
 const fs = require('fs');
@@ -38,6 +39,7 @@ function parseArgs(argv) {
       case '--regs': o.regs = val(); break;
       case '--realtime': o.realtime = true; break;
       case '--sd': o.sd = val(); break;
+      case '--sd-save': o.sdSave = val(); break;
       default:
         if (a.startsWith('--') || o.file) usage();
         o.file = a;
@@ -140,7 +142,7 @@ function main() {
         .map((n) => ({ name: n, contents: /\.asm$/i.test(n) ? fs.readFileSync(path.join(o.sd, n), 'utf8') : fs.readFileSync(path.join(o.sd, n)) }));
       sd = new SDCard(makeDisk(sources));
     } else {
-      sd = new SDCard(require('../lib/fat.js').bufferDisk(new Uint8Array(fs.readFileSync(o.sd))));
+      sd = new SDCard(require('../lib/fat.js').bufferDisk(new Uint8Array(fs.readFileSync(o.sd))));   // 読み込んだ写しに書く
     }
   }
   const cpu = new CPU({
@@ -192,6 +194,10 @@ function main() {
       const rgb = video.render(cpu.vram);
       if (o.png) fs.writeFileSync(o.png, png(rgb, video.WIDTH, video.HEIGHT));
       if (o.ppm) fs.writeFileSync(o.ppm, ppm(rgb, video.WIDTH, video.HEIGHT));
+    }
+    if (o.sdSave && sd) {
+      const d = sd.disk;
+      fs.writeFileSync(o.sdSave, d.toBuffer ? d.toBuffer() : d.buffer);
     }
     process.exitCode = h && h.kind !== 'hlt' ? 1 : 0;
   }

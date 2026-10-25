@@ -1,7 +1,6 @@
 ; MANDEL.EXE — マンデルブロ集合を色付きの文字で描く（固定小数点、小数部 12bit）
-; 色は BIOS の変数（BIOS Data Area の ATTR）を直接書き換えて変える。
-BIOS_PUTC   = 0x10
-ATTR        = 0x00027008                ; BIOS の今の色
+SYS_PUTC    = 1
+SYS_SETATTR = 9                         ; 色を変える（前の色が返る）
 W           = 120                       ; 横の文字数
 H           = 36                        ; 行数
 X0          = -9011                     ; -2.2 × 4096
@@ -10,7 +9,7 @@ Y0          = -4915                     ; -1.2 × 4096
 DY          = 273                       ; 2.4 / H × 4096
 MAXI        = 32                        ; これだけ回して発散しなければ集合の中
 
-        .org 0x23000
+        .org 0x26000
 start:
         ADDI32 sp, sp, -32
         STORE32_32 lr, sp, 0
@@ -21,6 +20,10 @@ start:
         STORE32_32 r28, sp, 20
         STORE32_32 r29, sp, 24
         STORE32_32 r30, sp, 28
+        ADDI32 r16, r0, 0x07            ; 今の色を覚えておく
+        ADDI32 r23, r0, SYS_SETATTR
+        SYSCALL
+        STORE32_32 r16, r0, old_attr
         ADDI32 r24, r0, 0               ; 行
 .row:   MULI32 r26, r24, DY             ; ci
         ADDI32 r26, r26, Y0
@@ -51,15 +54,22 @@ start:
 .esc:   ANDI32 r17, r30, 15
         LOAD8U_32 r16, r17, ramp
         LOAD8U_32 r18, r17, colors
-.put:   STORE32_32 r18, r0, ATTR
-        CALL32 BIOS_PUTC
+.put:   STORE32_32 r16, r0, ch
+        ADDR32 r16, r18, r0
+        ADDI32 r23, r0, SYS_SETATTR
+        SYSCALL
+        LOAD32_32 r16, r0, ch
+        ADDI32 r23, r0, SYS_PUTC
+        SYSCALL
         ADDI32 r25, r25, 1
         CMPLTI32 p1, r25, W
         BR32 p1, .col
-        ADDI32 r16, r0, 0x07
-        STORE32_32 r16, r0, ATTR
+        LOAD32_32 r16, r0, old_attr
+        ADDI32 r23, r0, SYS_SETATTR
+        SYSCALL
         ADDI32 r16, r0, 10
-        CALL32 BIOS_PUTC
+        ADDI32 r23, r0, SYS_PUTC
+        SYSCALL
         ADDI32 r24, r24, 1
         CMPLTI32 p1, r24, H
         BR32 p1, .row
@@ -74,6 +84,9 @@ start:
         ADDI32 sp, sp, 32
         RET32
 
+        .align 4
+old_attr: .word 0
+ch:     .word 0
 ramp:   .ascii ".,:;-=+*#%@@%#*+"
 colors: .byte 0x01, 0x09, 0x03, 0x0B, 0x02, 0x0A, 0x0E, 0x06
         .byte 0x0C, 0x04, 0x05, 0x0D, 0x0F, 0x07, 0x08, 0x09

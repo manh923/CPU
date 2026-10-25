@@ -1,9 +1,9 @@
 // SD カード（SPI モード）のふり。シミュレータ用。Verilog のテストベンチの tb/sd_model.v と同じ動きにしてある。
-//   var sd = new SDCard(disk);  // disk = { sectors: 総セクタ数, read(lba) → Uint8Array(512) }
+//   var sd = new SDCard(disk);  // disk = { sectors: 総セクタ数, read(lba) → Uint8Array(512), writeSector(lba, data) }
 //   sd.exchange(byte) → byte    // CS を有効にしたまま 1 バイト送って 1 バイト受け取る
 //   sd.deselect()               // CS を無効にした
-// 対応しているコマンド：CMD0・CMD8・CMD55＋ACMD41・CMD58・CMD16・CMD17（1 セクタ読み出し）。
-// SDHC（セクタ番号で指定）として振る舞う。書き込み（CMD24）はまだ。
+// 対応しているコマンド：CMD0・CMD8・CMD55＋ACMD41・CMD58・CMD16・CMD17（1 セクタ読み出し）・CMD24（1 セクタ書き込み）。
+// SDHC（セクタ番号で指定）として振る舞う。
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory();
   else root.MyCPU.SDCard = factory();
@@ -17,11 +17,15 @@
     this.acmd41 = 0;       // ACMD41 を受けた回数（2 回目で初期化完了）
     this.cmd = [];
     this.out = [];
+    this.wlba = -1;        // CMD24 の後、データを受け取る先
+    this.wbuf = null;      // 受け取り中のデータ（開始の印 0xFE の後から）
   }
 
   SDCard.prototype.deselect = function () {
     this.cmd = [];
     this.out = [];
+    this.wlba = -1;
+    this.wbuf = null;
   };
 
   SDCard.prototype.exchange = function (b) {
@@ -31,6 +35,16 @@
   };
 
   SDCard.prototype.receive = function (b) {
+    if (this.wlba >= 0) {                 // CMD24 のデータ：0xFE の後に 512 バイトと CRC 2 バイト
+      if (!this.wbuf) { if (b === 0xFE) this.wbuf = []; return; }
+      this.wbuf.push(b);
+      if (this.wbuf.length < 514) return;
+      this.disk.writeSector(this.wlba, Uint8Array.from(this.wbuf.slice(0, 512)));
+      this.wlba = -1;
+      this.wbuf = null;
+      this.out = this.out.concat([0x05, 0x00, 0x00]);   // 受け取った・書いている間は 0
+      return;
+    }
     if (!this.cmd.length) {
       if ((b & 0xC0) !== 0x40) return;   // コマンドの始まりを待つ
     }
@@ -66,6 +80,12 @@
         break;
       case 16:
         out.push(r1);
+        break;
+      case 24:
+        if (this.idle) { out.push(0x05); break; }
+        if (arg >= this.disk.sectors) { out.push(0x40); break; }
+        out.push(0x00);
+        this.wlba = arg;
         break;
       case 17:
         if (this.idle) { out.push(0x05); break; }

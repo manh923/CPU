@@ -50,6 +50,7 @@
     <option value="img">SD：.img ファイルを選ぶ…</option>
   </select>
   <input type="file" id="sdfile" accept=".img,.bin" hidden>
+  <button id="sdsave" title="今の SD カードの中身（MyDOS で書いたものも）を .img で保存">SD を保存</button>
   <button id="run" class="primary">アセンブルして実行</button>
   <button id="pause">一時停止</button>
   <button id="step">1 命令</button>
@@ -100,7 +101,7 @@
     src.value = M.EXAMPLES[i].source;
     $('xlen').value = /selftest64/.test(M.EXAMPLES[i].name) ? '64' : '32';
   }
-  var start = M.EXAMPLES.findIndex(function (e) { return e.name === 'mydos.asm'; });
+  var start = M.EXAMPLES.findIndex(function (e) { return e.name === 'bios.asm'; });
   $('example').value = String(Math.max(start, 0));
   loadExample(Math.max(start, 0));
   $('example').onchange = function () { loadExample(+this.value); };
@@ -138,6 +139,18 @@
       imgDisk = M.fat.bufferDisk(new Uint8Array(buf));
       $('sdsel').options[3].textContent = 'SD：' + f.name;
     });
+  });
+
+  // SD カードの中身を .img で保存（同じページで続けて実行すると、書いた中身は残る）
+  $('sdsave').addEventListener('click', function () {
+    var d;
+    try { d = sdDisk(); } catch (e) { errors.textContent = 'SD カード：' + e.message; return; }
+    if (!d) { errors.textContent = 'SD カードがない'; return; }
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([d.toBuffer ? d.toBuffer() : d.buffer], { type: 'application/octet-stream' }));
+    a.download = 'sdcard.img';
+    a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
   });
 
   function build() {

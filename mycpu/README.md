@@ -1,6 +1,6 @@
 # MyCPU
 
-`isa-spec.md`（命令セット仕様書 v0.7）と `opcodes.csv` から作った、アセンブラ・シミュレータ・Verilog（32bit 版、Tang Nano 20K 向け）。
+`isa-spec.md`（命令セット仕様書 v0.8）と `opcodes.csv` から作った、アセンブラ・シミュレータ・Verilog（32bit 版、Tang Nano 20K 向け）。
 
 | 場所 | 中身 |
 |---|---|
@@ -9,8 +9,8 @@
 | `sim/sim.js` | シミュレータ（コマンドライン。キー入力・画面表示つき） |
 | `web/index.html` | シミュレータ（ブラウザ。ファイルを直接開くだけで動く） |
 | `lib/` | アセンブラ・CPU・表示の本体（Node とブラウザで共通） |
-| `examples/` | 例題（`mydos.asm` は BIOS ＋ブートローダー＋ MyDOS） |
-| `disk/` | SD カードの中身のもと（`tools/mkdisk.js` で作る） |
+| `examples/` | 例題（`bios.asm` は ROM に入れる BIOS ＋ブートローダー） |
+| `disk/` | SD カードの中身のもと（MyDOS 本体 `mydos.sys.asm` も。`tools/mkdisk.js` で作る） |
 | `tools/mkboot.js` | UART 起動で送るファイルを作る |
 | `tools/mkdisk.js` | SD カードの中身（ファイルかディスクイメージ）を作る |
 | `rtl/` | Verilog（CPU・メモリ・入出力・UART・表示回路・DVI 符号器） |
@@ -27,14 +27,14 @@
 cd mycpu
 node asm/asm.js examples/hello.asm          # → hello.bin / hello.lst / hello.hex
 node sim/sim.js examples/hello.asm          # .asm を直接渡してもよい
-node sim/sim.js examples/mydos.asm --sd disk/ --screen   # BIOS → SD カードの MyDOS。HELP でコマンド一覧
+node sim/sim.js examples/bios.asm --sd disk/ --screen    # BIOS → SD カードの MYDOS.SYS。HELP でコマンド一覧
 node sim/sim.js examples/console.asm --screen   # 画面（VRAM）を端末に表示。キー入力はその場で届く。Ctrl-] で終了
 node sim/sim.js examples/selftest64.asm --cpu 64
 node sim/sim.js examples/colors.asm --png screen.png   # 止まったときの画面を PNG に
 node test/run.js                            # テスト一式
 ```
 
-`sim.js` のオプション：`--cpu 32|64`、`--trace`（1 命令ずつ表示）、`--max N`、`--input 文字列`（UART 受信に入れておく）、`--rx-file ファイル`（同じくファイルの中身）、`--sd フォルダ|.img`（SD カードを挿す）、`--screen`、`--png`／`--ppm`、`--regs ファイル|-`、`--realtime`（タイマーを実時間で進める）。
+`sim.js` のオプション：`--cpu 32|64`、`--trace`（1 命令ずつ表示）、`--max N`、`--input 文字列`（UART 受信に入れておく）、`--rx-file ファイル`（同じくファイルの中身）、`--sd フォルダ|.img`（SD カードを挿す）、`--sd-save 名前`（止まったときの SD カードを .img で保存）、`--screen`、`--png`／`--ppm`、`--regs ファイル|-`、`--realtime`（タイマーを実時間で進める）。
 
 ブラウザ版は `web/index.html` を開く。左で書いて「アセンブルして実行」。画面（または UART の欄）をクリックしてからキーを押すと、その場で UART 受信に届く。Ctrl+Enter でも実行できる。
 
@@ -60,40 +60,77 @@ msg:    .asciz "hi\n"
 - `.phase 番地` 〜 `.dephase`：中身はその場所（ROM）に置き、ラベルは「番地」（RAM）に写して動かす前提で決める。`.phase` の前は `.align 16`
 - 命令は自動で 4 バイト境界にそろう。幅の合わないレジスタ・予備レジスタ・PC への書き込みはエラー
 
-## MyDOS（`examples/mydos.asm`）
+## BIOS と MyDOS
 
-1. **BIOS**（ROM）：見出し、メモリテスト（内蔵 RAM を 1KB ずつ書いて読み戻す）、SD カードの初期化
+ROM（16KB）に入っているのは BIOS（`examples/bios.asm`）だけ。MyDOS は SD カードの `MYDOS.SYS`（`disk/mydos.sys.asm`）。
+
+1. **BIOS**：見出し、メモリテスト（内蔵 RAM 48KB を 1KB ずつ書いて読み戻す）、SD カードの初期化、SYSCALL の表の初期化
 2. 1 秒だけ **U キー**を待つ。U なら UART から起動、ほかのキーか時間切れなら次へ
-3. **ブートローダー**：ROM の中の MyDOS を RAM の `0x20000` に写して飛ぶ
-4. **MyDOS**：SD カードの FAT（FAT16 / FAT32）を読み、`AUTOEXEC.BAT` があれば実行して `C:\>` を出す
+3. **ブートローダー**：SD カードの FAT のルートから `MYDOS.SYS` を探し、`0x20000` に読み込んで飛ぶ。カードがない・`MYDOS.SYS` がないときは `Non-System disk or disk error` を出し、キーを待ってやり直す
+4. **MyDOS 3.0**：`AUTOEXEC.BAT` があれば実行して `C:\>` を出す
 
-ドライブ C: は microSD カード（SPI モード、**読み出しだけ**）。PC で FAT にフォーマットしたカードのルートにファイルを置けば、そのまま見える。
+### MyDOS
 
-- 組み込みのコマンド：`DIR`、`TYPE`、`VOL`、`VER`、`CLS`、`ECHO`、`MEM`、`TIME`、`COLOR 1F`、`LED 2A`、`HELP`、`REBOOT`、`SHUTDOWN`
+ドライブ C: は microSD カード（SPI モード）の FAT16 / FAT32 のルートディレクトリ。**読み書きできる**。PC で FAT にフォーマットしたカードに `MYDOS.SYS` を写せば起動する（書き込みを試すときは、消えて困るもののないカードで）。
+
+- 組み込みのコマンド：`DIR`、`TYPE`、`COPY`（`COPY CON 名前` でキーボードから。Ctrl-Z で終わり）、`DEL`／`ERASE`、`REN`／`RENAME`、`VOL`、`VER`、`CLS`、`ECHO`、`MEM`、`TIME`、`COLOR 1F`、`LED 2A`、`HELP`、`REBOOT`、`SHUTDOWN`
+- `コマンド > 名前`・`コマンド >> 名前`：画面に出るものをファイルへ（プログラムの出力も）
 - それ以外は SD カードから探して実行する：名前だけなら `.EXE` → `.COM` → `.BAT` の順
-  - `.EXE`：先頭 16 バイトがヘッダ（`'MZ'`、ヘッダの大きさ 2 バイト、読み込む番地・開始番地・本体の大きさ 各 4 バイト）。`0x23000` に読み込んで実行
-  - `.COM`：ヘッダなし。`0x23000` に置いてそのまま実行
+  - `.EXE`：先頭 16 バイトがヘッダ（`'MZ'`、ヘッダの大きさ 2 バイト、読み込む番地・開始番地・本体の大きさ 各 4 バイト）。`0x26000` に読み込む
+  - `.COM`：ヘッダなし。`0x26000` に置いてそのまま実行
   - `.BAT`：1 行ずつコマンドとして実行（`@` で始まる行は表示しない。別の `.BAT` を実行するとそちらへ移る）
-  - プログラムは r16 に引数の文字列を受け取り、`RET32` で `C:\>` に戻る。大きさは 16KB（`0x23000`〜`0x26FFF`）まで
-- パーティション表あり（普通の SD カード）・なし（`mkfs.fat` でそのまま作ったもの）のどちらも読める。長いファイル名の項目は飛ばし、8.3 の名前で扱う。サブディレクトリは `DIR` に `<DIR>` と出るだけ（中には入れない）
-- 未対応：書き込み（`COPY`・`DEL` など）、サブディレクトリの中、FAT12、1 セクタ 512 バイト以外
+  - プログラムは**ユーザーモード**で動き、OS を呼ぶのは SYSCALL だけ。r16 に引数の文字列を受け取り、`RET32` か SYSCALL 0 で `C:\>` に戻る。例外（0 で割る、整列していない読み書き、特権命令など）を起こすと `Program terminated: …` を出して `C:\>` に戻る（`CRASH.EXE`）。大きさは 20KB（`0x26000`〜`0x2AFFF`）まで
+- 書き込み：空きクラスタを探して FAT を 2 つとも書き、FAT32 は FSInfo（空きの数）も直す。FAT32 のルートがいっぱいならクラスタを足す。長い名前のファイルを消す・名前を変えるときは、長い名前の項目も消す。日付は時計がないので 2026-01-01
+- パーティション表あり（普通の SD カード）・なし（`mkfs.fat` でそのまま作ったもの）のどちらも使える。長いファイル名は 8.3 の名前で扱う。サブディレクトリは `DIR` に `<DIR>` と出るだけ（中には入れない）
+- 未対応：サブディレクトリの中、FAT12、1 セクタ 512 バイト以外、時計
+
+### SYSCALL（x86 の INT にあたる）
+
+r23 に番号、引数は r16〜r19 に入れて `SYSCALL`。戻り値は r16（エラーは負の数）。CPU は BIOS の例外の入口に飛び、BIOS が RAM の表（`0x2B100`、4 バイト × 64）のその番号の番地を呼ぶ。表は RAM にあるので書き換えて機能を差し替えられる。BIOS が 1〜10 を登録し、MyDOS が 0 と 16〜21 を足して、画面に出す 1・2・6・7・8 をリダイレクトできる自分の版に差し替える。
+
+| 番号 | 機能 |
+|---|---|
+| 0 | 終了 |
+| 1 / 2 | putc(文字) / puts(文字列) |
+| 3 / 4 | getc() → 文字 / getline(置き場所, 最大) → 長さ |
+| 5 | cls() |
+| 6 / 7 | putdec(数) / puthex(数) |
+| 8 | putg(文字)：制御文字も字の形のまま |
+| 9 | setattr(色) → 前の色 |
+| 10 | kbhit() → キーが来ていれば 1 |
+| 16 | open(名前, モード) → ハンドル（0 = 読む、1 = 新しく書く、2 = 後ろに足す。同時に 4 つまで） |
+| 17 | close(ハンドル) |
+| 18 | read(ハンドル, 置き場所, 長さ) → 読んだ長さ（0 で終わり） |
+| 19 | write(ハンドル, データ, 長さ) → 書いた長さ |
+| 20 / 21 | delete(名前) / rename(前の名前, 新しい名前) |
+
+エラー：-1 番号がない・ハンドルが違う、-2 ファイルがない、-3 開きすぎ、-4 空きがない、-5 できない（ディレクトリ・読み出し専用・同じ名前がある）、-6 名前が正しくない、-7 カードが読めない。使い方の例は `disk/toupper.exe.asm`（ファイルを読んで大文字にして書く）。
+
+### メモリの配置（内蔵 RAM 48KB）
+
+| 番地 | 中身 |
+|---|---|
+| `0x20000`〜`0x25FFF` | MYDOS.SYS（変数も含めて 24KB まで） |
+| `0x26000`〜`0x2AFFF` | プログラム（.EXE・.COM） |
+| `0x2B000`〜 | BIOS の変数、`0x2B100` SYSCALL の表、`0x2B200` セクタの置き場、`0x2B400` FAT の置き場、`0x2B600` .BAT の置き場 |
+| 〜`0x2BFFF` | スタック（SP の初期値 `0x2C000`） |
 
 ### SD カードの中身を作る
 
-`disk/` に入れる中身がある（`README.TXT`、`AUTOEXEC.BAT`、`DEMO.BAT`、`HELLO.EXE`、`FIB.EXE`、`MANDEL.EXE`、`KITT.COM` のもと）。`NAME.exe.asm` は `NAME.EXE`、`NAME.com.asm` は `NAME.COM` にアセンブルされる（`.org 0x23000` で書く）。
+`disk/` に入れる中身がある（`MYDOS.SYS`、`README.TXT`、`AUTOEXEC.BAT`、`DEMO.BAT`、`HELLO.EXE`、`FIB.EXE`、`MANDEL.EXE`、`TOUPPER.EXE`、`CRASH.EXE`、`KITT.COM` のもと）。`NAME.exe.asm`・`NAME.com.asm` は `.EXE`・`.COM` に（`.org 0x26000` で書く）、`NAME.sys.asm` は `.SYS` に（`.org 0x20000`）アセンブルされる。
 
 ```sh
 node tools/mkdisk.js --files sdcard/           # ファイルを作る → FAT でフォーマットした SD カードに PC から写す
 node tools/mkdisk.js -o disk.img [--fat32]     # ディスクイメージを作る（シミュレータ用）
-node sim/sim.js examples/mydos.asm --sd disk/ --screen    # フォルダを渡すと、その場でイメージを作って挿す
-node sim/sim.js examples/mydos.asm --sd disk.img          # .img も挿せる
+node sim/sim.js examples/bios.asm --sd disk/ --screen    # フォルダを渡すと、その場でイメージを作って挿す
+node sim/sim.js examples/bios.asm --sd disk.img --sd-save after.img   # 書いた後の中身を保存（元の .img はそのまま）
 ```
 
-ブラウザ版は、上の「SD：」から disk/ の中身（FAT16 / FAT32）、なし、手元の `.img` を選べる。
+ブラウザ版は、上の「SD：」から disk/ の中身（FAT16 / FAT32）、なし、手元の `.img` を選べる。同じページで続けて実行すると、書いた中身は残る。「SD を保存」で `.img` として保存できる。
 
 ### BIOS の入口
 
-プログラムからは、画面や入力・SD カードを BIOS の入口（ROM の決まった番地）を `CALL32` して使う。色は BIOS の変数 `0x27008`（今の色）を直接書き換えてよい（`disk/mandel.exe.asm`）。
+カーネルモードのもの（MyDOS など）は、ROM の決まった番地を `CALL32` しても BIOS を使える。
 
 | 番地 | 機能 |
 |---|---|
@@ -108,14 +145,17 @@ node sim/sim.js examples/mydos.asm --sd disk.img          # .img も挿せる
 | `0x50` | putg(r16)：制御文字も字の形のまま画面に出す |
 | `0x58` | sd_init() → r16 = カードの種類（0 = なし、1・2 = SDSC、3 = SDHC/SDXC） |
 | `0x60` | sd_read(r16 = セクタ番号, r17 = 置き場所 512 バイト) → r16 = 0 なら成功 |
+| `0x68` | sd_write(r16 = セクタ番号, r17 = 512 バイト) → r16 = 0 なら成功 |
+| `0x70` | kbhit() → r16 = キーが来ていれば 1 |
+| `0x78` | setattr(r16 = 色) → r16 = 前の色 |
 
 ### UART から起動
 
-起動中に U を押すと、`'MC'`＋長さ（4 バイト）＋本体 を受け取って `0x20000` に置き、そこへ飛ぶ。プログラムは `.org 0x20000` で書く（`examples/uartboot/hello_uart.asm`）。
+起動中に U を押すと、`'MC'`＋長さ（4 バイト）＋本体 を受け取って `0x20000` に置き（44KB まで）、カーネルモードのままそこへ飛ぶ。プログラムは `.org 0x20000` で書く（`examples/uartboot/hello_uart.asm`）。
 
 ```sh
 node tools/mkboot.js examples/uartboot/hello_uart.asm -o hello.boot
-node sim/sim.js examples/mydos.asm --input u --rx-file hello.boot   # シミュレータで試す
+node sim/sim.js examples/bios.asm --input u --rx-file hello.boot   # シミュレータで試す
 ```
 
 実機では、U を押してから端末ソフトのバイナリ送信で `hello.boot` を送る。ブラウザ版は「UART 受信へファイルを送る」から送る。
@@ -150,22 +190,22 @@ node sim/sim.js examples/mydos.asm --input u --rx-file hello.boot   # シミュ�
 
 ## FPGA（Tang Nano 20K）
 
-32bit 版 CPU、ROM 32KB・内蔵 RAM 32KB・VRAM 16KB（BSRAM）、UART、タイマー、LED、microSD（SPI）、720p のテキスト画面（HDMI 端子から DVI で出す）。CPU は 27MHz で、1 命令あたり 8 クロック前後（約 3.4MIPS。パイプラインなし）。
+32bit 版 CPU、ROM 16KB・内蔵 RAM 48KB・VRAM 16KB（BSRAM）、UART、タイマー、LED、microSD（SPI）、720p のテキスト画面（HDMI 端子から DVI で出す）。CPU は 27MHz で、1 命令あたり 8 クロック前後（約 3.4MIPS。パイプラインなし）。
 
 Gowin EDA での手順：
 
 1. 新しいプロジェクト。デバイスは `GW2AR-LV18QN88C8/I7`
 2. 追加するファイル：`rtl/cpu.v rtl/soc.v rtl/uart.v rtl/video.v rtl/tmds.v rtl/gowin/top_tangnano20k.v rtl/gowin/tangnano20k.cst`
 3. インクルードのパスに `rtl` を追加（`opcodes.vh` のため）。トップモジュールは `top_tangnano20k`
-4. ROM の中身：`node asm/asm.js examples/mydos.asm -o rom` で `rom.hex` を作る。`rom.hex` と `font/font8x16.hex` を、合成ツールが `$readmemh` で見つけられる場所（プロジェクトのフォルダ）に置く
+4. ROM の中身：`node asm/asm.js examples/bios.asm -o rom` で `rom.hex` を作る。`rom.hex` と `font/font8x16.hex` を、合成ツールが `$readmemh` で見つけられる場所（プロジェクトのフォルダ）に置く
 5. 合成・配置配線して書き込む。PC 側は 115200bps の端末ソフトでつなぐ
-6. SD カード：PC で FAT32（2GB 以下なら FAT16 も可）にフォーマットし、`node tools/mkdisk.js --files sdcard/` で作ったファイルをルートに写して挿す
+6. SD カード：PC で FAT32（2GB 以下なら FAT16 も可）にフォーマットし、`node tools/mkdisk.js --files sdcard/` で作ったファイル（`MYDOS.SYS` も）をルートに写して挿す
 
 **まだ実機で確かめていない。** ここ（クラウドの環境）では Gowin のツールを動かせないので、確かめたのは Icarus Verilog でのシミュレーションまで：
 
 - CPU：例題をシミュレータと同時に動かし、UART の出力と止まったときのレジスタが全部一致
-- SD カード：SPI の回路を、SD カード（SPI モード）のモデル（`tb/sd_model.v`）につないで MyDOS を起動。FAT16 のイメージから `AUTOEXEC.BAT`・`HELLO.EXE`・`TYPE`・`DIR` まで、シミュレータと一致
-- FAT：`mkfs.fat`・`mtools` で作ったイメージ（FAT16・FAT32、パーティション表なし、長い名前、サブディレクトリ）も読め、空き容量も `mdir` と一致
+- SD カード：SPI の回路を、SD カード（SPI モード）のモデル（`tb/sd_model.v`、読み書き）につないで BIOS から `MYDOS.SYS` を起動。FAT16 のイメージで `AUTOEXEC.BAT`・`DIR`・`TYPE`・`COPY CON`・`REN`・`DEL`・ユーザーモードのプログラムと例外まで、シミュレータと一致
+- FAT：`mkfs.fat`・`mtools` で作ったイメージ（FAT16・FAT32、パーティション表なし、長い名前、サブディレクトリ）も読め、空き容量も `mdir` と一致。MyDOS で書いた後のイメージは `fsck.fat` でエラーなし、書いたファイルは `mtype` で読める
 - 表示回路：1 フレーム（1280×720）を取り込み、シミュレータの絵と 1 ドットまで一致
 - TMDS 符号器：符号化したものを元に戻せること、直流の偏りが小さいこと
 - トップ：Gowin 部品を代わりのモジュールにしてコンパイルが通ること

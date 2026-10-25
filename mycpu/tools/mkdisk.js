@@ -4,7 +4,8 @@
 //       ファイルを作るだけ。FAT でフォーマットした SD カードに PC からそのまま写す
 //   node tools/mkdisk.js [フォルダ] -o disk.img [--fat32] [--size MB]
 //       ディスクイメージを作る（シミュレータの --sd 用。dd などで SD カードに書いてもよい）
-// NAME.exe.asm → NAME.EXE、NAME.com.asm → NAME.COM にアセンブルする。ほかのファイルはそのまま。
+// NAME.exe.asm → NAME.EXE、NAME.com.asm → NAME.COM（.org 0x26000）、NAME.sys.asm → NAME.SYS（.org 0x20000）に
+// アセンブルする。ほかのファイルはそのまま。
 'use strict';
 const fs = require('fs');
 const path = require('path');

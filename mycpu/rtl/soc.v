@@ -1,8 +1,8 @@
 // CPU とメモリ・入出力をつないだもの（4.1 のメモリマップ）
-//   0x0000_0000 ROM 32KB（ROM_HEX で中身を決める）
+//   0x0000_0000 ROM 16KB（ROM_HEX で中身を決める）
 //   0x0001_0000 入出力（UART・タイマー・LED。番地は README）
 //   0x0001_8000 テキスト VRAM 16KB（表示回路側にも読み出し口がある）
-//   0x0002_0000 内蔵 RAM 32KB
+//   0x0002_0000 内蔵 RAM 48KB
 //   SDRAM はまだない（つながっていない番地として扱う）
 module mycpu_soc #(
   parameter integer CLK_HZ  = 27_000_000,
@@ -40,25 +40,25 @@ module mycpu_soc #(
   );
 
   // ---- 番地の振り分け ----
-  wire sel_rom  = addr[31:15] == 17'h0;          // 0x0000_0000〜0x0000_7FFF
+  wire sel_rom  = addr[31:14] == 18'h0;          // 0x0000_0000〜0x0000_3FFF
   wire sel_io   = addr[31:15] == 17'h2;          // 0x0001_0000〜0x0001_7FFF
   wire sel_vram = addr[31:14] == 18'h6;          // 0x0001_8000〜0x0001_BFFF
-  wire sel_ram  = addr[31:15] == 17'h4;          // 0x0002_0000〜0x0002_7FFF
+  wire sel_ram  = addr[31:16] == 16'h2 && addr[15:14] != 2'b11;   // 0x0002_0000〜0x0002_BFFF（48KB）
   wire start = valid && !ready;
   wire wr = wstrb != 4'd0;
 
   // ---- メモリ ----
-  reg [31:0] rom [0:8191];
+  reg [31:0] rom [0:4095];
   initial $readmemh(ROM_HEX, rom);
   reg [31:0] rom_q;
-  always @(posedge clk) rom_q <= rom[addr[14:2]];
+  always @(posedge clk) rom_q <= rom[addr[13:2]];
 
   wire [31:0] ram_q, vram_q;
   genvar g;
   generate
     for (g = 0; g < 4; g = g + 1) begin : lane
-      mycpu_bram #(.AW(13)) ram (
-        .clk(clk), .we(start && sel_ram && wstrb[g]), .addr(addr[14:2]),
+      mycpu_bram #(.AW(14), .DEPTH(12288)) ram (
+        .clk(clk), .we(start && sel_ram && wstrb[g]), .addr(addr[15:2]),
         .din(wdata[8*g +: 8]), .dout(ram_q[8*g +: 8])
       );
       mycpu_dpram #(.AW(12)) vram (
@@ -181,17 +181,17 @@ module mycpu_soc #(
 endmodule
 
 // 1 ポートの RAM（BSRAM になる書き方）
-module mycpu_bram #(parameter integer AW = 13) (
+module mycpu_bram #(parameter integer AW = 13, parameter integer DEPTH = 1 << AW) (
   input  wire          clk,
   input  wire          we,
   input  wire [AW-1:0] addr,
   input  wire [7:0]    din,
   output reg  [7:0]    dout
 );
-  reg [7:0] mem [0:(1 << AW) - 1];
+  reg [7:0] mem [0:DEPTH - 1];
 `ifdef MYCPU_SIM
   integer i;   // シミュレーションでは 0 にしておく（実機の BSRAM も 0 から始まる）
-  initial for (i = 0; i < (1 << AW); i = i + 1) mem[i] = 8'd0;
+  initial for (i = 0; i < DEPTH; i = i + 1) mem[i] = 8'd0;
 `endif
   always @(posedge clk) begin
     if (we) mem[addr] <= din;
