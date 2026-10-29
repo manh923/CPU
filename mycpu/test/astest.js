@@ -11,7 +11,7 @@ const os = require('os');
 const path = require('path');
 const { execFileSync, spawnSync } = require('child_process');
 const { assemble } = require('../lib/assembler.js');
-const { makeFile } = require('../lib/disk.js');
+const { makeFile, parseExe } = require('../lib/disk.js');
 const { buildAsm, buildLib, compileFile } = require('../tools/cc.js');
 const CPU = require('../lib/cpu.js');
 
@@ -71,20 +71,23 @@ function run() {
     fs.copyFileSync(path.join(libc, 'crt0.s'), path.join(tmp, 'CRT0.S'));
     fs.writeFileSync(path.join(tmp, 'PRIMES.S'), compileFile(path.join(ROOT, 'disk/primes.c')));
     const r3 = spawnSync(as, ['-lib', 'LIBC', '-o', 'PRIMES.EXE', 'CRT0.S', 'PRIMES.S'], { cwd: tmp, encoding: 'utf8' });
-    let out = '';
+    let out = '', exeSize = 0;
     if (r3.status === 0) {
-      const exe = fs.readFileSync(path.join(tmp, 'PRIMES.EXE'));
-      const load = exe.readUInt32LE(4), entry = exe.readUInt32LE(8), size = exe.readUInt32LE(12);
+      const exe = parseExe(fs.readFileSync(path.join(tmp, 'PRIMES.EXE')));
       const kernel = fs.readFileSync(path.join(__dirname, 'cctest.js'), 'utf8').match(/const KERNEL = `([\s\S]*?)`;/)[1];
-      const img = new Uint8Array(load + size);
-      img.set(assemble(kernel.replace('JMP32 start', 'JMP32 0x' + entry.toString(16))).image, 0);
-      img.set(exe.subarray(16, 16 + size), load);
+      const top = Math.max(...exe.segments.map((s) => s.addr + s.data.length));
+      const img = new Uint8Array(top);
+      img.set(assemble(kernel.replace('JMP32 start', 'JMP32 0x' + exe.entry.toString(16))).image, 0);
+      for (const s of exe.segments) img.set(s.data, s.addr);
+      exeSize = fs.statSync(path.join(tmp, 'PRIMES.EXE')).size;
       const cpu = new CPU({ xlen: 32, onTx: (b) => { out += String.fromCharCode(b); } });
       cpu.load(img);
       cpu.run(50_000_000);
     }
-    const ok3 = /Total primes: 168/.test(out);
-    results.push({ name: 'as -lib LIBC（primes.c）', ok: ok3, why: ok3 ? '' : (r3.stderr || out.slice(-200)).split('\n')[0] });
+    // 使う関数だけを入れるので、ライブラリ全部（LIBC.BIN）よりずっと小さいはず
+    const ok3 = /Total primes: 168/.test(out) && exeSize > 0 && exeSize < lib.bin.length / 2;
+    results.push({ name: `as -lib LIBC（primes.c）：使う関数だけつないで ${exeSize} バイト（LIBC.BIN は ${lib.bin.length}）`, ok: ok3,
+      why: ok3 ? '' : (r3.stderr || out.slice(-200)).split('\n')[0] });
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

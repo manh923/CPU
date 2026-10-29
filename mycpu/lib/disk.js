@@ -3,7 +3,10 @@
 //                             NAME.com.asm → NAME.COM（0x26000 から）、
 //                             NAME.sys.asm → NAME.SYS（0x20000 から。MYDOS.SYS 用）。アセンブルして作る。ほかはそのまま
 //   makeDisk(sources, opts)：ファイルを並べて FAT のディスクイメージにする（lib/fat.js）
-// .EXE：'MZ'、ヘッダの大きさ（16）、読み込む番地、開始番地（ラベル start、なければ読み込む番地）、本体の大きさ、本体
+//   parseExe(data)：.EXE を読む → { load, entry, segments: [{ addr, data }] }
+// .EXE：'MZ'、ヘッダの大きさ（16）、読み込む番地、開始番地（ラベル start、なければ読み込む番地）、本体の大きさ、本体。
+//   ヘッダの大きさの欄が 0x8010 なら区切りのある .EXE（AS -lib が作る）：本体は「番地・長さ（4 バイトずつ）・中身」の並び、
+//   読み込む番地はいちばん小さい番地
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory(require('./assembler.js'), require('./fat.js'));
   else root.MyCPU.disk = factory(root.MyCPU.Assembler, root.MyCPU.fat);
@@ -46,5 +49,21 @@
     return fat.buildDisk(files, opts);
   }
 
-  return { TPA: TPA, makeFile: makeFile, makeDisk: makeDisk };
+  function parseExe(data) {
+    var d = toBytes(data);
+    var u32 = function (o) { return (d[o] | d[o + 1] << 8 | d[o + 2] << 16 | d[o + 3] << 24) >>> 0; };
+    if (d[0] !== 0x4D || d[1] !== 0x5A) throw new Error('.EXE でない');
+    var hdr = d[2] | d[3] << 8, load = u32(4), entry = u32(8), size = u32(12);
+    if (hdr === 16) return { load: load, entry: entry, segments: [{ addr: load, data: d.subarray(16, 16 + size) }] };
+    if (hdr !== 0x8010) throw new Error('知らない .EXE のヘッダ');
+    var segs = [];
+    for (var o = 16; o < 16 + size;) {
+      var addr = u32(o), len = u32(o + 4);
+      segs.push({ addr: addr, data: d.subarray(o + 8, o + 8 + len) });
+      o += 8 + len;
+    }
+    return { load: load, entry: entry, segments: segs };
+  }
+
+  return { TPA: TPA, makeFile: makeFile, makeDisk: makeDisk, parseExe: parseExe };
 });

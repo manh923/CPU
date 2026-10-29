@@ -151,17 +151,72 @@ function buildAsm(files, opts = {}) {
 }
 
 // 先にアセンブルしておく C ライブラリ（AS -lib LIBC 用）：0x1000000 から置く LIBC.BIN と、名前と番地の表 LIBC.SYM
-//   LIBC.SYM：「@base 16 進」「@end 16 進」（LIBC.BIN の終わり。プログラムはここから）、「名前 16 進」（大域の名前だけ）
+//   LIBC.SYM：「@base 16 進」「@end 16 進」（LIBC.BIN の終わり。プログラムはここから）、
+//     「@chunk 始め 終わり 番号 …」（関数・変数・.s のファイルごとのかたまりの番地の範囲と、それが使うかたまりの番号。
+//      番号は @chunk の行の順に 0 から。AS は、プログラムが使うかたまりだけを .EXE に入れる）、
+//     「名前 16 進」（大域の名前だけ）
 function buildLib() {
   const { assemble } = require('../lib/assembler.js');
-  const r = assemble(buildAsm([], { lib: true }));
+  const { asm, chunks } = buildLibAsm();
+  const r = assemble(asm);
   const end = Number(r.symbols.get('___libc_end'));
   const bin = Buffer.from(r.image.subarray(BASE, end));
   const lines = ['; LIBC.SYM — LIBC.BIN（C ライブラリ）の名前と番地（tools/cc.js が作る。AS -lib LIBC が読む）',
     `@base ${BASE.toString(16)}`, `@end ${end.toString(16)}`];
+
+  // かたまりの番地の範囲と、使うかたまり
+  const owner = new Map();
+  chunks.forEach((c, i) => { for (const n of c.names) owner.set(n, i); });
+  chunks.forEach((c, i) => {
+    const start = Number(r.symbols.get(`L__c.${i}`));
+    const stop = i + 1 < chunks.length ? Number(r.symbols.get(`L__c.${i + 1}`)) : end;
+    const deps = new Set();
+    for (const m of c.text.replace(/;.*/g, '').matchAll(/[A-Za-z_][\w.]*/g)) {
+      const j = owner.get(m[0]);
+      if (j !== undefined && j !== i) deps.add(j);
+    }
+    lines.push(['@chunk', start.toString(16), stop.toString(16), ...[...deps].sort((a, b) => a - b)].join(' '));
+  });
+
   for (const [name, v] of [...r.symbols].sort((a, b) => Number(a[1]) - Number(b[1])))
     if (name.startsWith('_') && !name.includes('.') && name !== '___libc_end') lines.push(`${name} ${Number(v).toString(16)}`);
   return { bin, sym: lines.join('\r\n') + '\r\n' };
+}
+
+// C ライブラリだけのアセンブリ（buildLib 用）。かたまり（関数・変数・.s のファイル・初期値なしの大域変数）の前に
+// 「L__c.番号:」を置き、かたまりの一覧 { names: 定義する名前, text } も返す
+function buildLibAsm() {
+  ensureCompiler();
+  const libc = fs.readdirSync(LIBC).filter((f) => f.endsWith('.c')).sort().map((f) => path.join(LIBC, f));
+  const parts = libc.map((f) => split(compileCached(f, [])));
+  const asms = fs.readdirSync(LIBC).filter((f) => f.endsWith('.s') && f !== 'crt0.s').sort();
+  const chunks = [];
+  const out = ['; C ライブラリ — tools/cc.js が作ったアセンブリ（LIBC.BIN 用）', `        .org 0x${BASE.toString(16)}`];
+  const add = (names, text) => {
+    out.push(`L__c.${chunks.length}:`, text);
+    chunks.push({ names, text });
+  };
+  for (const f of asms) {
+    const t = fs.readFileSync(path.join(LIBC, f), 'utf8');
+    add([...t.matchAll(/^([A-Za-z_]\w*):/gm)].map((m) => m[1]), t);
+  }
+  for (const p of parts) for (const c of p.text) add(c.name ? [c.name] : [], c.lines.join('\n'));
+  out.push('', '; ---- データ ----', '        .align 64');
+  for (const p of parts) for (const c of p.data) add(c.name ? [c.name] : [], c.lines.join('\n'));
+  // 初期値なしの大域変数：どこにも定義がなければ、1 つだけ置く
+  const defined = new Set();
+  for (const c of chunks) for (const m of c.text.matchAll(/^([A-Za-z_][\w.]*):/gm)) defined.add(m[1]);
+  const common = new Map();
+  for (const c of chunks) {
+    for (const m of c.text.matchAll(/^; @common (\S+) (\d+) (\d+)$/gm)) {
+      const k = common.get(m[1]) || { size: 0, align: 4 };
+      common.set(m[1], { size: Math.max(k.size, +m[2]), align: Math.max(k.align, +m[3]) });
+    }
+  }
+  for (const [name, c] of common)
+    if (!defined.has(name)) add([name], `        .align ${c.align}\n${name}:\n        .space ${c.size}`);
+  out.push('        .align 64', '___libc_end:', '');
+  return { asm: out.join('\n'), chunks };
 }
 
 // 初期値なしの大域変数が、残したコードかデータから使われているか
@@ -282,4 +337,4 @@ function usage() {
 
 if (require.main === module) main(process.argv);
 
-module.exports = { buildAsm, buildLib, diskSources, compilerFiles, dosName, compileFile, CcError };
+module.exports = { buildAsm, buildLib, buildLibAsm, diskSources, compilerFiles, dosName, compileFile, CcError };

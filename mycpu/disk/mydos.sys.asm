@@ -6,7 +6,9 @@
 ; ・「コマンド > ファイル」「コマンド >> ファイル」で、画面に出るものをファイルへ（リダイレクト）
 ; ・.EXE・.COM は 0x26000 に読み込んで、ユーザーモードで実行する。OS を呼ぶのは SYSCALL だけ。
 ;   例外を起こしたら "Program terminated" を出して C:\> に戻る
-;     .EXE：先頭 16 バイトがヘッダ（'MZ'、ヘッダの大きさ 2 バイト、読み込む番地・開始番地・本体の大きさ 各 4 バイト）
+;     .EXE：先頭 16 バイトがヘッダ（'MZ'、ヘッダの大きさ 2 バイト、読み込む番地・開始番地・本体の大きさ 各 4 バイト）。
+;       ヘッダの大きさの欄が 0x8010 なら区切りのある .EXE（AS -lib が作る。使う関数だけ入れたもの）：
+;       本体は「番地・長さ（4 バイトずつ）・中身」の並び。読み込む番地はいちばん小さい番地
 ;     .COM：ヘッダなし。0x26000 に置いて 0x26000 から実行
 ;   プログラムは r16 に引数の文字列を受け取り、RET32 か SYSCALL 0（終了）で C:\> に戻る
 ;
@@ -418,11 +420,13 @@ ext_is:
 
 ; run_prog()：name83 の .EXE・.COM を TPA に読み込んで、ユーザーモードで実行する
 run_prog:
-        ADDI32 sp, sp, -16
+        ADDI32 sp, sp, -24
         STORE32_32 lr, sp, 0
         STORE32_32 r24, sp, 4
         STORE32_32 r25, sp, 8
         STORE32_32 r26, sp, 12
+        STORE32_32 r27, sp, 16
+        STORE32_32 r28, sp, 20
         ADDI32 r16, r0, 0               ; 読むモードで開く（name83 はもう入っている）
         CALL32 f_open83
         CMPLTI32 p1, r16, 0
@@ -454,10 +458,12 @@ run_prog:
         LOAD16U_32 r16, r0, exehdr
         CMPNEI32 p1, r16, 0x5A4D        ; 'M' 'Z'
         BR32 p1, .badexe1
-        LOAD16U_32 r17, r0, exehdr + 2  ; ヘッダの大きさ（16 だけ）
+        LOAD16U_32 r17, r0, exehdr + 2  ; ヘッダの大きさ（16。0x8010 なら区切りのある .EXE）
         LOAD32_32 r18, r0, exehdr + 4   ; 読み込む番地
         LOAD32_32 r26, r0, exehdr + 8   ; 開始番地
         LOAD32_32 r19, r0, exehdr + 12  ; 本体の大きさ
+        CMPEQI32 p1, r17, 0x8010
+        BR32 p1, .seg
         CMPNEI32 p1, r17, 16
         BR32 p1, .badexe1
         ADDI32 r20, r19, 16             ; ヘッダ + 本体 ≦ ファイルの大きさ
@@ -496,6 +502,65 @@ run_prog:
         CALL32 f_close
         CMPNER32 p1, r20, r25
         BR32 p1, .ioerr
+        JMP32 .go
+        ; 区切りのある .EXE：場所（TPA か SDRAM）を読み込む番地で決め、区切りを 1 つずつその番地へ読む
+        ;   r27〜r28 = 場所の範囲、r25 = 本体の残り
+.seg:   ADDI32 r20, r19, 16             ; ヘッダ + 本体 ≦ ファイルの大きさ
+        CMPLTUR32 p1, r25, r20
+        BR32 p1, .badexe1
+        ADDI32 r27, r0, TPA
+        ADDI32 r28, r0, TPA_END
+        CMPLTUR32 p1, r18, r27
+        BR32 p1, .sdram
+        CMPLTUR32 p1, r18, r28
+        BR32 p1, .sgo
+.sdram: LOAD32_32 r21, r0, SDRAM_KB
+        CMPEQI32 p1, r21, 0
+        BR32 p1, .big1
+        ADDI32 r27, r0, SDRAM
+        SHLI32 r21, r21, 10
+        ADDI32 r28, r21, SDRAM
+        CMPLTUR32 p1, r18, r27
+        BR32 p1, .big1
+        CMPGEUR32 p1, r18, r28
+        BR32 p1, .big1
+.sgo:   STORE32_32 r18, r0, prog_base
+        ADDR32 r25, r19, r0
+.sl:    CMPEQI32 p1, r25, 0
+        BR32 p1, .sdone
+        CMPLTUI32 p1, r25, 8
+        BR32 p1, .badexe1
+        ADDR32 r16, r24, r0             ; 番地と長さ（exehdr に）
+        ADDI32 r17, r0, exehdr
+        ADDI32 r18, r0, 8
+        CALL32 f_read
+        CMPNEI32 p1, r16, 8
+        BR32 p1, .badexe1
+        ADDI32 r25, r25, -8
+        LOAD32_32 r17, r0, exehdr       ; 番地：場所の中（4 の倍数でなくてよい）
+        LOAD32_32 r18, r0, exehdr + 4   ; 長さ：本体の残りまで、場所の終わりまで
+        CMPLTUR32 p1, r25, r18
+        BR32 p1, .badexe1
+        CMPLTUR32 p1, r17, r27
+        BR32 p1, .big1
+        CMPGEUR32 p1, r17, r28
+        BR32 p1, .big1
+        SUBR32 r20, r28, r17
+        CMPLTUR32 p1, r20, r18
+        BR32 p1, .big1
+        SUBR32 r25, r25, r18
+        ADDR32 r16, r24, r0
+        CALL32 f_read
+        LOAD32_32 r17, r0, exehdr + 4
+        CMPNER32 p1, r16, r17
+        BR32 p1, .badexe1
+        JMP32 .sl
+.sdone: ADDR32 r16, r24, r0
+        CALL32 f_close
+        CMPLTUR32 p1, r26, r27          ; 開始番地が場所の中
+        BR32 p1, .badexe
+        CMPGEUR32 p1, r26, r28
+        BR32 p1, .badexe
 .go:    LOAD32_32 r16, r0, ATTR         ; 色を覚えておいて、終わったら戻す
         STORE32_32 r16, r0, saved_attr
         ADDI32 r16, r0, 1
@@ -528,6 +593,7 @@ run_prog:
 .badexe1:
         ADDR32 r16, r24, r0
         CALL32 f_close
+.badexe:
         ADDI32 r16, r0, s_badexe
         JMP32 .say
 .ioerr: ADDI32 r16, r0, s_readerr
@@ -536,7 +602,9 @@ run_prog:
         LOAD32_32 r24, sp, 4
         LOAD32_32 r25, sp, 8
         LOAD32_32 r26, sp, 12
-        ADDI32 sp, sp, 16
+        LOAD32_32 r27, sp, 16
+        LOAD32_32 r28, sp, 20
+        ADDI32 sp, sp, 24
         RET32
 
 exit_stub:                              ; プログラムが RET32 で戻るとここ（まだユーザーモード）
