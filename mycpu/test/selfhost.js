@@ -54,7 +54,7 @@ if (process.env.PROF) {
 } else {
   let seen = 0, last = 0;
   while (cpu.steps < max && !cpu.halted) {
-    cpu.run(5e6);
+    cpu.run(2e5);
     for (const n = prompts(); seen < n; seen++) {
       if (seen > 0) log.push(`${cmds[seen - 1]}: ${((cpu.steps - last) / 1e6).toFixed(1)}M 命令`);
       last = cpu.steps;

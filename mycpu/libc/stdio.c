@@ -218,10 +218,8 @@ int fputs(const char *s, FILE *fp) {
     __syscall(SYS_PUTS, (int)s, 0, 0);
     return 0;
   }
-  for (; *s; s++)
-    if (fputc(*s, fp) == EOF)
-      return EOF;
-  return 0;
+  size_t len = strlen(s);
+  return fwrite(s, 1, len, fp) == len ? 0 : EOF;
 }
 
 int puts(const char *s) {
@@ -304,7 +302,7 @@ size_t fread(void *p, size_t size, size_t n, FILE *fp) {
 
 size_t fwrite(const void *p, size_t size, size_t n, FILE *fp) {
   const unsigned char *s = p;
-  size_t want = size * n;
+  size_t want = size * n, done = 0;
   if (fp->fd == -1) {
     for (size_t i = 0; i < want; i++)
       __syscall(SYS_PUTC, s[i], 0, 0);
@@ -312,10 +310,49 @@ size_t fwrite(const void *p, size_t size, size_t n, FILE *fp) {
   }
   if (fp->mode != 'w')
     return 0;
-  for (size_t i = 0; i < want; i++)
-    if (put_byte(fp, s[i]) == EOF)
-      return size ? i / size : 0;
-  return n;
+  if (fp->fd == -3) {                    // open_memstream：足りなければ大きくする（最後の 0 の分も）
+    if (fp->pos + want + 1 > fp->len) {
+      size_t len = fp->len * 2;
+      if (len < fp->pos + want + 1)
+        len = fp->pos + want + 1;
+      unsigned char *nb = realloc(fp->buf, len);
+      if (!nb) {
+        fp->err = 1;
+        return 0;
+      }
+      fp->buf = nb;
+      fp->len = len;
+    }
+    memcpy(fp->buf + fp->pos, s, want);
+    fp->pos += want;
+    return n;
+  }
+  while (done < want) {
+    if (fp->pos == 0 && want - done >= BUFSIZ) {   // 大きければ直接書く
+      int k = (want - done) / BUFSIZ * BUFSIZ;
+      int r = __syscall(SYS_WRITE, fp->fd, (int)(s + done), k);
+      if (r < 0) {
+        fp->err = 1;
+        set_errno(r);
+        break;
+      }
+      done += r;
+      if (r < k) {
+        fp->err = 1;
+        break;
+      }
+      continue;
+    }
+    size_t k = BUFSIZ - fp->pos;           // ためる
+    if (k > want - done)
+      k = want - done;
+    memcpy(fp->buf + fp->pos, s + done, k);
+    fp->pos += k;
+    done += k;
+    if (fp->pos == BUFSIZ && fflush(fp) < 0)
+      break;
+  }
+  return size ? done / size : 0;
 }
 
 int feof(FILE *fp) { return fp->eof; }
@@ -400,6 +437,17 @@ static void out_c(Out *o, int c) {
   o->len++;
 }
 
+// 文字列 s の len バイトをまとめて出す
+static void out_s(Out *o, const char *s, size_t len) {
+  if (o->fp) {
+    fwrite(s, 1, len, o->fp);
+  } else if (o->buf && o->len + 1 < o->n) {
+    size_t k = o->n - 1 - o->len;
+    memcpy(o->buf + o->len, s, k < len ? k : len);
+  }
+  o->len += len;
+}
+
 static void out_pad(Out *o, int c, int n) {
   while (n-- > 0)
     out_c(o, c);
@@ -420,8 +468,12 @@ int __mycpu_dtoa(double x, int conv, int prec, int alt, char *out);
 
 static int format(Out *o, const char *f, va_list ap) {
   for (; *f; f++) {
-    if (*f != '%') {
-      out_c(o, *f);
+    if (*f != '%') {                   // % までの文字はまとめて
+      const char *q = f;
+      while (*q && *q != '%')
+        q++;
+      out_s(o, f, q - f);
+      f = q - 1;
       continue;
     }
     f++;
@@ -581,8 +633,7 @@ static int format(Out *o, const char *f, va_list ap) {
         len++;
       if (!left)
         out_pad(o, ' ', width - len);
-      for (int i = 0; i < len; i++)
-        out_c(o, s[i]);
+      out_s(o, s, len);
       if (left)
         out_pad(o, ' ', width - len);
       break;

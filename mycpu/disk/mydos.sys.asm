@@ -1929,10 +1929,28 @@ f_read:
         ADDR32 r17, r16, r0
         ADDR32 r16, r24, r0
         CALL32 pos_lba
-        CALL32 sb_get
+        ; セクタの頭から 512 バイト以上読むなら、セクタの置き場を通さずに直接読む
+        ; （置き場にそのセクタがあれば、書きかけかもしれないので置き場から）
+        LOAD32_32 r17, r24, H_POS
+        ANDI32 r17, r17, 511
+        CMPNEI32 p1, r17, 0
+        BR32 p1, .buf
+        CMPLTUI32 p1, r26, 512
+        BR32 p1, .buf
+        LOAD32_32 r17, r0, sb_lba
+        CMPEQR32 p1, r16, r17
+        BR32 p1, .buf
+        ADDR32 r17, r25, r0
+        CALL32 BIOS_SDREAD
         CMPNEI32 p1, r16, 0
         BR32 p1, .ret
-        LOAD32_32 r16, r24, H_POS       ; このセクタから写す長さ
+        ADDI32 r17, r0, 512
+        ADDI32 r25, r25, 512
+        JMP32 .adv
+.buf:   CALL32 sb_get
+        CMPNEI32 p1, r16, 0
+        BR32 p1, .ret
+        LOAD32_32 r16, r24, H_POS       ; このセクタから写す長さ（1 以上）
         ANDI32 r16, r16, 511
         ADDI32 r17, r0, 512
         SUBR32 r17, r17, r16
@@ -1940,13 +1958,24 @@ f_read:
         SEL32 r17, r26, r17, p1
         ADDI32 r16, r16, SECBUF
         ADDR32 r18, r16, r17
-.cp:    CMPGEUR32 p1, r16, r18
-        BR32 p1, .adv
-        LOAD8U_32 r19, r16, 0
+        ORR32 r19, r16, r25             ; 元・先・長さが 4 の倍数なら 4 バイトずつ
+        ORR32 r19, r19, r17
+        ANDI32 r19, r19, 3
+        CMPNEI32 p1, r19, 0
+        BR32 p1, .cp
+.cw:    LOAD32_32 r19, r16, 0
+        STORE32_32 r19, r25, 0
+        ADDI32 r16, r16, 4
+        ADDI32 r25, r25, 4
+        CMPLTUR32 p1, r16, r18
+        BR32 p1, .cw
+        JMP32 .adv
+.cp:    LOAD8U_32 r19, r16, 0
         STORE8_32 r19, r25, 0
         ADDI32 r16, r16, 1
         ADDI32 r25, r25, 1
-        JMP32 .cp
+        CMPLTUR32 p1, r16, r18
+        BR32 p1, .cp
 .adv:   LOAD32_32 r16, r24, H_POS
         ADDR32 r16, r16, r17
         STORE32_32 r16, r24, H_POS

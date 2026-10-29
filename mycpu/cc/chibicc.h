@@ -134,6 +134,9 @@ struct Obj {
 
   // Local variable
   int offset;
+  int reg;       // MyCPU：レジスタに置くなら その番号（r24〜r30）、置かないなら 0（codegen.c が決める）
+  int ra_weight; // MyCPU：使う回数（ループの中は多めに数える）
+  bool ra_noreg; // MyCPU：番地を取るのでレジスタに置けない
 
   // Global variable or function
   bool is_function;
@@ -154,6 +157,9 @@ struct Obj {
   Obj *va_area;
   Obj *alloca_bottom;
   int stack_size;
+  int ra_nvars;     // MyCPU：レジスタに置いた変数の数（r24 から）。残りの r30 までが式の一時置き場
+  bool ra_alloca;   // MyCPU：alloca（可変長配列も）を使う
+  bool ra_asm;      // MyCPU：asm 文がある（レジスタに変数を置かない、出したコードをそのまま）
 
   // Static inline function
   bool is_live;

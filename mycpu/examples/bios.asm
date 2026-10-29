@@ -968,9 +968,14 @@ bios_sd_read:
         CMPLTUI32 p1, r24, 65536
         BR32 p1, .tok
         JMP32 .err
-.data:  ADDI32 r24, r25, 512
-.d:     ADDI32 r16, r0, 0xFF
-        CALL32 spi
+.data:  ADDI32 r24, r25, 512           ; 512 バイト（spi を呼ばずにここで送り受けする）
+        ADDI32 r18, r0, 0xFF
+.d:     STORE32_32 r18, r0, SD_DATA
+.dw:    LOAD32_32 r17, r0, SD_STATUS
+        ANDI32 r17, r17, 1
+        CMPNEI32 p4, r17, 0
+        BR32 p4, .dw
+        LOAD32_32 r16, r0, SD_DATA
         STORE8_32 r16, r25, 0
         ADDI32 r25, r25, 1
         CMPLTUR32 p1, r25, r24
