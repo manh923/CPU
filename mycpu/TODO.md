@@ -86,8 +86,6 @@ MyDOS の上で C コンパイラを動かし、C のプログラム（コンパ
 
 ## そのほか（急がない）
 
-- **scanf を足す**（libc にまだない）：`scanf`・`sscanf`・`fscanf` と v 付きの版。`%d %i %u %x %o %c %s %f %e %g %[...] %n %%`、
-  `%lld`・`%lf` などの長さ、幅、`*`（読み飛ばし）。数の変換は今ある strtol・strtod を使う。PC の glibc の sscanf と比べるテストも
 - **カードを作るときにサブディレクトリに分ける**（下の MyDOS のサブディレクトリができてから）：tools/cc.js の diskSources・mkdisk・
   ブラウザ版のカードで、ヘッダは `INCLUDE\`、chibicc のソースは `SRC\CC\`、CRT0.S・LIBC.* は `LIB\` に。
   BUILD.BAT・SELFHOST.BAT もパスを付けて呼ぶ。MyDOS のサブディレクトリだけ作っても、次の 3 つがないと CC は読めない：

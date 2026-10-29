@@ -62,6 +62,12 @@ int vprintf(const char *fmt, va_list ap);
 int vfprintf(FILE *fp, const char *fmt, va_list ap);
 int vsprintf(char *buf, const char *fmt, va_list ap);
 int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap);
+int scanf(const char *fmt, ...);                // libc/scanf.c
+int fscanf(FILE *fp, const char *fmt, ...);
+int sscanf(const char *s, const char *fmt, ...);
+int vscanf(const char *fmt, va_list ap);
+int vfscanf(FILE *fp, const char *fmt, va_list ap);
+int vsscanf(const char *s, const char *fmt, va_list ap);
 
 #define _IOFBF 0
 #define _IOLBF 1

@@ -73,10 +73,10 @@ node test/cctest.js                              # コンパイラのテスト�
 
 - コンパイラは `cc/`（chibicc の改造版）。`gcc` と `make` で自動でビルドされる。`int`・`long`・ポインタは 32bit、`long long` は 64bit。`float` は 32bit、`double`・`long double` は 64bit（IEEE 754。計算はソフトウェアで、`libc/softfloat.c`）。使わない関数・変数はつながない（`tools/cc.js` がリンカの代わりに捨てる）
 - C ライブラリ（`libc/`）：
-  - `stdio.h`：`FILE`（`fopen`・`fread`・`fwrite`・`fgets`・`fputs`・`fseek`・`ftell`・`fprintf` …。書くファイルは後ろに足すだけなので、`fseek` できるのは読むファイル）、`stdin`（1 行ずつ）・`stdout`・`stderr`、`printf` の仲間（`%lld` も）、`remove`・`rename`・`perror`
+  - `stdio.h`：`FILE`（`fopen`・`fread`・`fwrite`・`fgets`・`fputs`・`fseek`・`ftell`・`fprintf` …。書くファイルは後ろに足すだけなので、`fseek` できるのは読むファイル）、`stdin`（1 行ずつ）・`stdout`・`stderr`、`printf` の仲間（`%lld` も）、`scanf`・`fscanf`・`sscanf` と v の付いたもの（`libc/scanf.c`。glibc と同じ結果になるかをテストで比べる）、`remove`・`rename`・`perror`
   - `printf` の `%f`・`%e`・`%g` と `strtod`・`atof` は正しく丸める（`libc/fltio.c`）
   - `math.h`（`libc/math.c`）：`sqrt`・`fmod`・`floor`・`ceil`・`round` などは正確、`sin`・`cos`・`tan`・`atan2`・`exp`・`log`・`pow` などは誤差 2 ulp 以内。`float` の版（`sinf` など）もある
-  - `stdlib.h`（`malloc`・`free`・`realloc`・`exit`・`strtol`・`strtod`・`qsort`・`rand`）、`string.h`、`ctype.h`、`errno.h`、`limits.h`、`stdint.h`、`inttypes.h`、`assert.h`、`setjmp.h`、`time.h`（時計がないので 2026-01-01 から起動後の秒数）、`stdarg.h`・`stddef.h`・`stdbool.h`
+  - `stdlib.h`（`malloc`・`free`・`realloc`・`exit`・`strtol`・`strtoll`・`strtoull`・`strtod`・`qsort`・`rand`）、`string.h`、`ctype.h`、`errno.h`、`limits.h`、`stdint.h`、`inttypes.h`、`assert.h`、`setjmp.h`、`time.h`（時計がないので 2026-01-01 から起動後の秒数）、`stdarg.h`・`stddef.h`・`stdbool.h`
   - `conio.h`：`clrscr`・`gotoxy`・`textattr`・`getch`（矢印・Home・End・PgUp・PgDn・Delete・F1〜F4 を 1 つのキーに）・`kbhit`
   - `mycpu.h`：MyDOS の SYSCALL を直接呼ぶ
   - テストは `test/libtest.c`（MyDOS の上で動かす）

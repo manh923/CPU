@@ -139,6 +139,31 @@ int main(void) {
   check("fopen bad name", fopen("A*B.TXT", "r") == 0 && errno == EINVAL);
   check("strerror", !strcmp(strerror(ENOENT), "File not found"));
 
+  // ---- scanf ----
+  {
+    int a = 0, b = 0, n = 0;
+    unsigned u = 0;
+    long long ll = 0;
+    char w1[20] = "", w2[20] = "", cs[4] = "";
+    double d = 0;
+    float f = 0;
+    check("sscanf %d %x %u", sscanf("-42 1f 7", "%d %x %u", &a, &b, &u) == 3 && a == -42 && b == 31 && u == 7);
+    check("sscanf %i %lld %n", sscanf("0x10 -123456789012", "%i %lld%n", &a, &ll, &n) == 2 && a == 16 &&
+                                   ll == -123456789012LL && n == 18);
+    check("sscanf %s %[ %c", sscanf("ab,cd xyz", "%[^,],%s %2c", w1, w2, cs) == 3 && !strcmp(w1, "ab") &&
+                                 !strcmp(w2, "cd") && cs[0] == 'x' && cs[1] == 'y');
+    check("sscanf %lf %f", sscanf("3.25 -1e-3", "%lf %f", &d, &f) == 2 && d == 3.25 && f == -1e-3f);
+    check("sscanf EOF / partial", sscanf("", "%d", &a) == EOF && sscanf("12 x", "%d %d", &a, &b) == 1 && a == 12);
+    fp = fopen("SCAN.TXT", "w");
+    fprintf(fp, "10 20\nname 3.5\n");
+    fclose(fp);
+    fp = fopen("SCAN.TXT", "r");
+    check("fscanf", fscanf(fp, "%d %d %s %lf", &a, &b, w1, &d) == 4 && a == 10 && b == 20 && !strcmp(w1, "name") &&
+                        d == 3.5 && fscanf(fp, "%d", &a) == EOF);
+    fclose(fp);
+    remove("SCAN.TXT");
+  }
+
   // ---- 時間 ----
   time_t now = time(0);
   struct tm *tm = localtime(&now);

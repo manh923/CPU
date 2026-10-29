@@ -152,8 +152,10 @@ function buildAsm(files, opts = {}) {
 
 // 先にアセンブルしておく C ライブラリ（AS -lib LIBC 用）：0x1000000 から置く LIBC.BIN と、名前と番地の表 LIBC.SYM
 //   LIBC.SYM：「@base 16 進」「@end 16 進」（LIBC.BIN の終わり。プログラムはここから）、
-//     「@chunk 始め 終わり 番号 …」（関数・変数・.s のファイルごとのかたまりの番地の範囲と、それが使うかたまりの番号。
-//      番号は @chunk の行の順に 0 から。AS は、プログラムが使うかたまりだけを .EXE に入れる）、
+//     「@chunk 始め 終わり [w] 番号 …」（関数・変数・.s のファイルごとのかたまりの番地の範囲と、それが使うかたまりの番号。
+//      番号は @chunk の行の順に 0 から。AS は、プログラムが使うかたまりだけを .EXE に入れる。
+//      w は弱いかたまり（「___mycpu_weak_」で始まる変数）：プログラムが名前で使ったときだけ中身と先を入れ、
+//      ほかのかたまりから使われるだけなら 0 で埋めて入れる。libc/stdio.c を見よ）、
 //     「名前 16 進」（大域の名前だけ）
 function buildLib() {
   const { assemble } = require('../lib/assembler.js');
@@ -175,7 +177,8 @@ function buildLib() {
       const j = owner.get(m[0]);
       if (j !== undefined && j !== i) deps.add(j);
     }
-    lines.push(['@chunk', start.toString(16), stop.toString(16), ...[...deps].sort((a, b) => a - b)].join(' '));
+    const weak = c.names.some((n) => n.startsWith('___mycpu_weak_')) ? ['w'] : [];
+    lines.push(['@chunk', start.toString(16), stop.toString(16), ...weak, ...[...deps].sort((a, b) => a - b)].join(' '));
   });
 
   for (const [name, v] of [...r.symbols].sort((a, b) => Number(a[1]) - Number(b[1])))

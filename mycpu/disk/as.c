@@ -7,6 +7,7 @@
 //           表の名前を知っている状態でアセンブルし、名前.BIN の後ろ（-b がなければそこから）にプログラムを置く。
 //           .EXE には、ライブラリのうちプログラムが使う関数・変数（名前.SYM の @chunk。使うものからたどれるものも）
 //           だけを入れる（区切りのある .EXE。ライブラリは動かさないので、番地はとびとび）。-bin には名前.BIN を全部入れる。
+//           弱いかたまり（@chunk の w）は、プログラムが名前で使ったときだけ中身を入れ、ほかは 0 で埋める（先もたどらない）
 //           プログラムで同じ名前を定義すれば、プログラムの方を使う
 // ファイルをいくつも渡すと、1 つのプログラムにまとめる（リンカの代わり。tools/cc.js と同じ並べ方）：
 //   「; @text」「; @data」の行で分けてあれば、全部のファイルのコードを前に、データを後ろにまとめ、
@@ -958,7 +959,8 @@ static i64 lib_base = -1, lib_end;
 static int nchunks, cap_chunks;
 static i64 *ck_start, *ck_end;
 static int *ck_dep;
-static char *ck_used;
+static char *ck_weak;
+static char *ck_used;            // 1 = 入れる、2 = 0 で埋めて入れる（弱いかたまりを、ほかのかたまりが使うだけ）
 static int *deps, ndeps, cap_deps;
 
 // 「@chunk 始め 終わり 番号 …」の「始め」から後ろ
@@ -968,10 +970,16 @@ static void add_chunk(char *p) {
     ck_start = realloc(ck_start, cap_chunks * sizeof(i64));
     ck_end = realloc(ck_end, cap_chunks * sizeof(i64));
     ck_dep = realloc(ck_dep, (cap_chunks + 1) * sizeof(int));
+    ck_weak = realloc(ck_weak, cap_chunks);
   }
   ck_start[nchunks] = (i64)strtoul(p, &p, 16);
   ck_end[nchunks] = (i64)strtoul(p, &p, 16);
   ck_dep[nchunks] = ndeps;
+  while (*p == ' ')
+    p++;
+  ck_weak[nchunks] = *p == 'w';
+  if (*p == 'w')
+    p++;
   for (;;) {
     while (*p == ' ')
       p++;
@@ -1001,7 +1009,7 @@ static void use_chunk_at(i64 a) {
       break;
     }
   }
-  if (k < 0 || ck_used[k])
+  if (k < 0 || ck_used[k] == 1)
     return;
   int *stack = malloc((nchunks + 1) * sizeof(int)), sp = 0;
   ck_used[k] = 1;
@@ -1010,10 +1018,14 @@ static void use_chunk_at(i64 a) {
     int c = stack[--sp];
     for (int i = ck_dep[c]; i < ck_dep[c + 1]; i++) {
       int d = deps[i];
-      if (d >= 0 && d < nchunks && !ck_used[d]) {
-        ck_used[d] = 1;
-        stack[sp++] = d;
+      if (d < 0 || d >= nchunks || ck_used[d] == 1)
+        continue;
+      if (ck_weak[d]) {                // 弱いかたまり：0 で埋めて入れるだけ
+        ck_used[d] = 2;
+        continue;
       }
+      ck_used[d] = 1;
+      stack[sp++] = d;
     }
   }
   free(stack);
@@ -1108,6 +1120,7 @@ static i64 write_segments(FILE *fp, i64 *lowest) {
       i++;
       continue;
     }
+    int first = i;
     i64 a = ck_start[i], b = ck_end[i];
     for (i++; i < nchunks && (ck_used[i] || ck_end[i] <= ck_start[i]) && ck_start[i] == b; i++)
       b = ck_end[i];
@@ -1121,6 +1134,10 @@ static i64 write_segments(FILE *fp, i64 *lowest) {
     if (fp) {
       put_le32(fp, (unsigned)a);
       put_le32(fp, (unsigned)(b - a));
+      for (int j = first; j < i; j++) {    // 0 で埋めるかたまりは 0 を
+        if (ck_used[j] == 2)
+          memset(lib + (ck_start[j] - lib_base), 0, ck_end[j] - ck_start[j]);
+      }
       fwrite(lib + (a - lib_base), 1, b - a, fp);
     }
   }

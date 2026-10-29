@@ -453,8 +453,13 @@ static void out_pad(Out *o, int c, int n) {
     out_c(o, c);
 }
 
-// 数を文字列に（逆順にためて返す）。戻り値は桁数
-static int utoa_rev(unsigned long long v, int base, int upper, char *tmp) {
+// ---- long long・小数の表示は、使うプログラムだけ ----
+// __mycpu_weak_ll・__mycpu_weak_dtoa（関数を指す変数）を通して呼ぶ。AS -lib は「___mycpu_weak_」で始まる変数を、
+// プログラムが名前で使ったときだけ本当の値（と、その先の関数）で入れ、使わなければ 0 にして先の関数を入れない。
+// codegen.c が、long long・float・double を使うファイルにこの名前を使う印を付ける（だから printf だけなら小さい）
+
+// 64bit の数を文字列に（逆順にためて返す）。戻り値は桁数
+static int utoa64_rev(unsigned long long v, int base, int upper, char *tmp) {
   char *digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
   int n = 0;
   do {
@@ -463,8 +468,31 @@ static int utoa_rev(unsigned long long v, int base, int upper, char *tmp) {
   } while (v);
   return n;
 }
+int (*__mycpu_weak_ll)(unsigned long long, int, int, char *) = utoa64_rev;
 
 int __mycpu_dtoa(double x, int conv, int prec, int alt, char *out);
+
+// 小数の数字（libc/fltio.c が作る）
+static char *float_digits(double v, int conv, int prec, int alt) {
+  static char fbuf[1400];
+  __mycpu_dtoa(v, conv, prec, alt, fbuf);
+  return fbuf;
+}
+char *(*__mycpu_weak_dtoa)(double, int, int, int) = float_digits;
+
+// 数を文字列に（逆順にためて返す）。戻り値は桁数。32bit に入らなければ utoa64_rev で
+static int utoa_rev(unsigned long long v, int base, int upper, char *tmp) {
+  if ((v >> 32) && __mycpu_weak_ll)
+    return __mycpu_weak_ll(v, base, upper, tmp);
+  char *digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
+  unsigned u = (unsigned)v;
+  int n = 0;
+  do {
+    tmp[n++] = digits[u % base];
+    u /= base;
+  } while (u);
+  return n;
+}
 
 static int format(Out *o, const char *f, va_list ap) {
   for (; *f; f++) {
@@ -585,16 +613,16 @@ static int format(Out *o, const char *f, va_list ap) {
     case 'g':
     case 'G': {
       // 数字は libc/fltio.c が作る。inf・nan は 0 で埋めない
-      static char fbuf[1400];
       double v = va_arg(ap, double);
       unsigned hi;
       memcpy(&hi, (char *)&v + 4, 4);
       int upper = *f < 'a';
-      char *body = fbuf;
+      char *body = "?";
       int finite = (hi & 0x7FF00000) != 0x7FF00000;
       prefix = hi >> 31 ? "-" : plus ? "+" : space ? " " : "";
       if (finite) {
-        __mycpu_dtoa(v, *f, prec, alt, fbuf);
+        if (__mycpu_weak_dtoa)
+          body = __mycpu_weak_dtoa(v, *f, prec, alt);
       } else {
         unsigned lo;
         memcpy(&lo, &v, 4);

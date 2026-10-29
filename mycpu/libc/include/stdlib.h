@@ -22,6 +22,9 @@ int atoi(const char *s);
 long atol(const char *s);
 long strtol(const char *s, char **end, int base);
 unsigned long strtoul(const char *s, char **end, int base);
+long long strtoll(const char *s, char **end, int base);
+unsigned long long strtoull(const char *s, char **end, int base);
+long long atoll(const char *s);
 double strtod(const char *s, char **end);        // libc/fltio.c（正しく丸める）
 float strtof(const char *s, char **end);
 long double strtold(const char *s, char **end);

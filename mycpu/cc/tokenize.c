@@ -361,7 +361,7 @@ static bool convert_pp_int(Token *tok) {
     base = 8;
   }
 
-  int64_t val = strtoul(p, &p, base);
+  int64_t val = strtoull(p, &p, base);   // MyCPU：strtoul は 32bit（long が 4 バイト）なので 64bit 版で
 
   // Read U, L or LL suffixes.（MyCPU：LL は long long。long は 4 バイトなので別に扱う）
   bool l = false;

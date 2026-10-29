@@ -2228,6 +2228,8 @@ static void gen_stmt(Node *node) {
 static bool ra_setjmp;                 // setjmp を呼ぶ
 static bool ra_call;                   // 関数を呼ぶ（浮動小数点・long long の割り算は libc を呼ぶ）
 static bool ra_hiscratch;              // r19〜r22 を作業に使う（構造体を写す・long long・ビットフィールド・CAS）
+static bool uses_float, uses_ll;       // このファイルが float・double、long long を使う（emit_data が印を付ける）
+static bool uses_scanf;                // このファイルが scanf の仲間を呼ぶ
 
 // 番地を取られる変数に印を付ける（&x、&x.member）
 static void ra_mark_addr(Node *node) {
@@ -2250,9 +2252,9 @@ static void ra_scan(Node *node, int w) {
   if (!node)
     return;
   if (node->ty && is_flonum(node->ty))
-    ra_call = true;
+    ra_call = uses_float = true;
   if (node->ty && is64(node->ty)) {
-    ra_hiscratch = true;
+    ra_hiscratch = uses_ll = true;
     if (node->kind == ND_DIV || node->kind == ND_MOD)
       ra_call = true;
   }
@@ -2289,6 +2291,8 @@ static void ra_scan(Node *node, int w) {
         current_fn->ra_alloca = true;
       if (strstr(name, "setjmp"))
         ra_setjmp = true;
+      if (strstr(name, "scanf"))
+        uses_scanf = true;
     }
     break;
   case ND_ASM:
@@ -2472,6 +2476,15 @@ static void emit_data(Obj *prog) {
     // 初期値なし（0 で埋める）
     println("  .space %d", var->ty->size);
   }
+
+  // long long・float・double を使うなら、printf がそれを表示する部分（libc/stdio.c の __mycpu_weak_ll・
+  // __mycpu_weak_dtoa）を名前で使う印。AS -lib は、印のないプログラムにその部分を入れない
+  if (uses_ll)
+    println("; @obj L%s..weak_ll\n  .align 4\nL%s..weak_ll:\n  .word ___mycpu_weak_ll", fid, fid);
+  if (uses_float)
+    println("; @obj L%s..weak_dtoa\n  .align 4\nL%s..weak_dtoa:\n  .word ___mycpu_weak_dtoa", fid, fid);
+  if (uses_float && uses_scanf)      // scanf の %f など（libc/scanf.c の __mycpu_weak_strtod）
+    println("; @obj L%s..weak_strtod\n  .align 4\nL%s..weak_strtod:\n  .word ___mycpu_weak_strtod", fid, fid);
 }
 
 // レジスタで来た引数を、置き場（レジスタかスタック）へ

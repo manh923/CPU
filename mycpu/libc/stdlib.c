@@ -141,8 +141,41 @@ long strtol(const char *s, char **end, int base) {
   return (long)strtoul(s, end, base);
 }
 
+// 64bit 版（long は 4 バイトなので、strtoul では 32bit を超える数が読めない）
+unsigned long long strtoull(const char *s, char **end, int base) {
+  while (isspace(*s))
+    s++;
+  int neg = 0;
+  if (*s == '+' || *s == '-')
+    neg = *s++ == '-';
+  if ((base == 0 || base == 16) && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+    s += 2;
+    base = 16;
+  } else if (base == 0) {
+    base = *s == '0' ? 8 : 10;
+  }
+  unsigned long long v = 0;
+  for (;; s++) {
+    int d;
+    if (isdigit(*s)) d = *s - '0';
+    else if (isalpha(*s)) d = tolower(*s) - 'a' + 10;
+    else break;
+    if (d >= base)
+      break;
+    v = v * base + d;
+  }
+  if (end)
+    *end = (char *)s;
+  return neg ? -v : v;
+}
+
+long long strtoll(const char *s, char **end, int base) {
+  return (long long)strtoull(s, end, base);
+}
+
 int atoi(const char *s) { return (int)strtol(s, 0, 10); }
 long atol(const char *s) { return strtol(s, 0, 10); }
+long long atoll(const char *s) { return strtoll(s, 0, 10); }
 
 static unsigned rand_state = 1;
 void srand(unsigned seed) { rand_state = seed; }
