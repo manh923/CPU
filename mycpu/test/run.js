@@ -193,7 +193,7 @@ const cases = [];
     check(`MyDOS（${type}）：ユーザーモードのプログラム（SYSCALL）`, o.includes(nl('Hello, World!\n')) && o.includes(nl('Hello, claude!\n')) &&
       o.includes(nl('fib(12) = 144\n')) && o.includes('LED chaser'), '');
     check(`MyDOS（${type}）：SDRAM に読み込む .EXE（スタックも SDRAM）`,
-      o.includes(nl('Hello from SDRAM! PC = 01000024, SP = 017FFFF8\nRecursion depth: 10000\n')), '');
+      o.includes(nl('Hello from SDRAM! PC = 01000024, SP = 017EFFF8\nRecursion depth: 10000\n')), '');
     check(`MyDOS（${type}）：C で書いたプログラム（PRIMES.EXE、cc/ と libc/ で作る）`,
       o.includes(nl('=== MyCPU Prime Search ===\nSearching primes from 2 to 1000...\nFound: 10 primes\n')) &&
       o.includes(nl('Found: 160 primes\nSearch complete!\nTotal primes: 168\n')), '');

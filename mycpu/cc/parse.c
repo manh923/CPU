@@ -190,7 +190,7 @@ static Type *find_tag(Token *tok) {
 }
 
 static Node *new_node(NodeKind kind, Token *tok) {
-  Node *node = calloc(1, sizeof(Node));
+  Node *node = calloc(1, node_is_small(kind) ? NODE_SMALL : sizeof(Node));
   node->kind = kind;
   node->tok = tok;
   return node;
@@ -244,7 +244,7 @@ static Node *new_vla_ptr(Obj *var, Token *tok) {
 Node *new_cast(Node *expr, Type *ty) {
   add_type(expr);
 
-  Node *node = calloc(1, sizeof(Node));
+  Node *node = calloc(1, NODE_SMALL);
   node->kind = ND_CAST;
   node->tok = expr->tok;
   node->lhs = expr;

@@ -175,12 +175,26 @@ static void usual_arith_conv(Node **lhs, Node **rhs) {
   *rhs = new_cast(*rhs, ty);
 }
 
+// 式のノード（cond から後ろを使わない種類）。parse.c の new_node は、この種類なら cond より前だけを確保する
+bool node_is_small(NodeKind kind) {
+  switch (kind) {
+  case ND_COND: case ND_IF: case ND_FOR: case ND_DO: case ND_SWITCH: case ND_CASE: case ND_BLOCK:
+  case ND_GOTO: case ND_GOTO_EXPR: case ND_LABEL: case ND_LABEL_VAL: case ND_FUNCALL: case ND_STMT_EXPR:
+  case ND_ASM: case ND_CAS: case ND_EXCH:
+    return false;
+  default:
+    return true;
+  }
+}
+
 void add_type(Node *node) {
   if (!node || node->ty)
     return;
 
   add_type(node->lhs);
   add_type(node->rhs);
+  if (node_is_small(node->kind))
+    goto small;
   add_type(node->cond);
   add_type(node->then);
   add_type(node->els);
@@ -192,6 +206,7 @@ void add_type(Node *node) {
   for (Node *n = node->args; n; n = n->next)
     add_type(n);
 
+small:
   switch (node->kind) {
   case ND_NUM:
     node->ty = ty_int;

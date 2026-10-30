@@ -6,6 +6,7 @@
 #include <libgen.h>
 #include <stdarg.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -231,14 +232,28 @@ typedef enum {
 } NodeKind;
 
 // AST node type
+// 式のノード（node_is_small の種類）は、cond より前だけを確保する（メモリを減らすため。parse.c の new_node）
 struct Node {
   NodeKind kind; // Node kind
+  bool pass_by_stack; // 関数の引数（式）のとき
   Node *next;    // Next node
   Type *ty;      // Type, e.g. int or pointer to int
   Token *tok;    // Representative token
 
   Node *lhs;     // Left-hand side
   Node *rhs;     // Right-hand side
+
+  // Struct member access
+  Member *member;
+
+  // Variable
+  Obj *var;
+
+  // Numeric literal
+  int64_t val;
+  long double fval;
+
+  // ここから後ろは文・関数呼び出しなど（node_is_small でない種類）だけ
 
   // "if" or "for" statement
   Node *cond;
@@ -254,13 +269,9 @@ struct Node {
   // Block or statement expression
   Node *body;
 
-  // Struct member access
-  Member *member;
-
   // Function call
   Type *func_ty;
   Node *args;
-  bool pass_by_stack;
   Obj *ret_buffer;
 
   // Goto or labeled statement, or labels-as-values
@@ -287,14 +298,10 @@ struct Node {
   // Atomic op= operators
   Obj *atomic_addr;
   Node *atomic_expr;
-
-  // Variable
-  Obj *var;
-
-  // Numeric literal
-  int64_t val;
-  long double fval;
 };
+
+#define NODE_SMALL offsetof(Node, cond)
+bool node_is_small(NodeKind kind);
 
 Node *new_cast(Node *expr, Type *ty);
 int64_t const_expr(Token **rest, Token *tok);
