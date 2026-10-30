@@ -1,8 +1,11 @@
 ; mydos.sys.asm — MyDOS 本体（SD カードの MYDOS.SYS。BIOS がこれを 0x20000 に読み込んで飛ぶ）
 ;
-; ・ドライブ C: は SD カードの FAT16 / FAT32（ルートディレクトリ）。読み書きできる
-; ・組み込みのコマンド：CLS COLOR COPY DEL DIR ECHO HELP LED MEM REBOOT REN SHUTDOWN TIME TYPE VER VOL
-;   それ以外は .EXE → .COM → .BAT の順に探して実行する。起動時に AUTOEXEC.BAT を実行する
+; ・ドライブ C: は SD カードの FAT16 / FAT32。読み書きできる。サブディレクトリも使える：パスは「C:\INCLUDE\STDIO.H」
+;   「..\A.TXT」のように書く（「/」でもよい。「.」「..」も）。「\」で始まらなければ今のディレクトリから
+; ・組み込みのコマンド：CD（CHDIR）CLS COLOR COPY DEL DIR ECHO HELP LED MD（MKDIR）MEM RD（RMDIR）REBOOT REN
+;   SHUTDOWN TIME TYPE VER VOL。組み込みのコマンドは MYDOS.SYS の後ろ半分にあり、起動時に SDRAM の最後の 64KB に読み込む
+;   それ以外は .EXE → .COM → .BAT の順に、今のディレクトリ → ルートの順に探して実行する（パスを書けばそこだけ）。
+;   起動時に AUTOEXEC.BAT を実行する
 ; ・「コマンド > ファイル」「コマンド >> ファイル」で、画面に出るものをファイルへ（リダイレクト）
 ; ・.EXE・.COM は 0x26000 に読み込んで、ユーザーモードで実行する。OS を呼ぶのは SYSCALL だけ。
 ;   例外を起こしたら "Program terminated" を出して C:\> に戻る
@@ -21,6 +24,9 @@
 ;   17 close(ハンドル)   18 read(ハンドル, 置き場所, 長さ) → 読んだ長さ（0 で終わり）
 ;   19 write(ハンドル, データ, 長さ) → 書いた長さ          20 delete(名前)     21 rename(前の名前, 新しい名前)
 ;   22 seek(ハンドル, 位置, 基準) → 新しい位置（基準 0 = 先頭、1 = 今の位置、2 = 終わり。書くファイルは終わりだけ）
+;   23 mkdir(パス)       24 rmdir(パス)（空のディレクトリだけ）         25 chdir(パス)
+;   26 getcwd(置き場所, 大きさ) → 長さ（"C:\INCLUDE" のように。入らなければ -1）
+;   名前の引数はどれもパスでよい（rename の新しい名前だけは、同じディレクトリの中の名前）
 ;   エラーは負の数：-1 番号がない・ハンドルが違う、-2 ファイルがない、-3 開きすぎ、-4 空きがない、
 ;   -5 できない（ディレクトリ・読み出し専用・同じ名前がある）、-6 名前が正しくない、-7 カードが読めない
 ; 呼び出し規約は 8 章どおり：r16〜r23 は壊れてよい、r24〜r31 は保存する。
@@ -51,6 +57,7 @@ SDRAM_KB     = BDA + 28                 ; BIOS が調べた SDRAM の大きさ�
 SDRAM        = 0x01000000               ; SDRAM の先頭（.EXE をここに読み込んでもよい）
 HIGH_BASE    = 0x017F0000               ; MyDOS の後ろ半分を置く場所（8MB の SDRAM の最後の 64KB）
 HIGH_MAX     = 0x10000
+RPATH_MAX    = 80                       ; パスの文字列（cwd_path・rpath）の大きさ
 HIGH_FILE    = 0x6000                   ; MYDOS.SYS の中で、後ろ半分が始まる位置（BIOS が読むのは ここまで）
 VEC          = 0x0002B100               ; SYSCALL の表
 SECBUF       = 0x0002B200               ; セクタの置き場（1 つだけ覚えておく。書いたら後でまとめて書き戻す）
@@ -101,6 +108,8 @@ dos_start:
         SHLI32 r16, r16, 10
         ADDI32 r16, r16, SDRAM
         STORE32_32 r16, r0, user_top
+        ADDI32 r16, r0, '\\'              ; 今のディレクトリはルート
+        STORE16_32 r16, r0, cwd_path
         ADDI32 r16, r0, s_banner
         CALL32 puts
         CALL32 fs_mount                 ; カードが読めたら、後ろ半分を読み込み、AUTOEXEC.BAT があれば実行する
@@ -122,8 +131,7 @@ shell:
         ADDI32 r16, r0, 10
         CALL32 putc
 .prompt:
-        ADDI32 r16, r0, s_prompt
-        CALL32 puts
+        CALL32 put_prompt
         ADDI32 r16, r0, linebuf
         ADDI32 r17, r0, 72
         CALL32 BIOS_GETLINE
@@ -145,6 +153,10 @@ dos_vectors:                            ; SYSCALL の表に入れる MyDOS の�
         .word 20, f_delete
         .word 21, f_rename
         .word 22, f_seek
+        .word 23, f_mkdir
+        .word 24, f_rmdir
+        .word 25, f_chdir
+        .word 26, f_getcwd
         .word -1
 
 ; load_high()：MYDOS.SYS の HIGH_FILE から後ろ（後ろ半分）を HIGH_BASE に読み込む。SDRAM が 8MB なければ読まない。
@@ -717,10 +729,10 @@ f_mkdir:
         BR32 p1, .ret
         LOAD32_32 r25, r0, dir_clus     ; r25 = 親
         CALL32 alloc                    ; r24 = 新しいディレクトリのクラスタ
-        CMPEQI32 p1, r16, 0
+        ADDR32 r24, r16, r0
+        CMPEQI32 p1, r24, 0
         ADDI32 r16, r0, -4
         BR32 p1, .ret
-        ADDR32 r24, r16, r0
         CALL32 clus_lba                 ; 0 で埋める
         ADDR32 r26, r16, r0
         LOAD32_32 r27, r0, spc
@@ -1329,8 +1341,7 @@ run_batch:
         JMP32 .exec
 .echo:  ADDI32 r16, r0, 10
         CALL32 putc
-        ADDI32 r16, r0, s_prompt
-        CALL32 puts
+        CALL32 put_prompt
         ADDI32 r16, r0, linebuf
         CALL32 puts
         ADDI32 r16, r0, 10
@@ -1472,7 +1483,7 @@ putdec_w:
 
 ; fmtdec(r16 = 数, r17 = 幅) → r16 = numbuf の中の 10 進の文字列（右寄せ）。r17〜r19 を壊す
 fmtdec:
-        ADDI32 r18, r0, numbuf + 11     ; 後ろから数字を置く
+        ADDI32 r18, r0, numbuf + 39     ; 後ろから数字を置く
         STORE8_32 r0, r18, 0
 .d:     ADDI32 r18, r18, -1
         REMUI32 r19, r16, 10
@@ -2999,6 +3010,8 @@ mounted:
 ; 組み込みのコマンド（r16 = 引数）
 ; ==================================================================
 commands:
+        .word c_cd, cmd_cd
+        .word c_chdir, cmd_cd
         .word c_cls, cmd_cls
         .word c_color, cmd_color
         .word c_copy, cmd_copy
@@ -3008,10 +3021,14 @@ commands:
         .word c_echo, cmd_echo
         .word c_help, cmd_help
         .word c_led, cmd_led
+        .word c_md, cmd_md
+        .word c_mkdir, cmd_md
         .word c_mem, cmd_mem
         .word c_reboot, cmd_reboot
+        .word c_rd, cmd_rd
         .word c_ren, cmd_ren
         .word c_rename, cmd_ren
+        .word c_rmdir, cmd_rd
         .word c_shutdown, cmd_shutdown
         .word c_time, cmd_time
         .word c_type, cmd_type
@@ -3020,7 +3037,9 @@ commands:
         .word 0, 0
 
 s_banner:   .asciz "MyDOS Version 3.0\n(C)Copyright MyCPU Project 2026.\n"
-s_prompt:   .asciz "C:\\>"
+s_prompt:   .asciz "C:"
+s_dot:      .ascii ".          "            ; ディレクトリの「.」「..」の項目の名前（11 文字）
+s_dotdot:   .ascii "..         "
 s_bad:      .asciz "Bad command or file name\n"
 s_notready: .asciz "Not ready reading drive C\n"
 s_createerr: .asciz "File creation error\n"
@@ -3034,13 +3053,19 @@ s_fault_div:   .asciz "divide by zero"
 s_fault_other: .asciz "exception"
 s_at:       .asciz " at "
 s_autoexec: .asciz "AUTOEXEC.BAT"
-s_mydos:    .asciz "MYDOS.SYS"
+s_mydos:    .asciz "\\MYDOS.SYS"
 s_nohigh:   .asciz "Built-in commands need 8MB SDRAM\n"
 badchars:   .asciz "*?/\\:\"<>|+=,;[]"
 x_exe:      .ascii "EXE"
 x_com:      .ascii "COM"
 x_bat:      .ascii "BAT"
 exts:       .ascii "EXE\0COM\0BAT\0\0"
+c_cd:       .asciz "CD"
+c_chdir:    .asciz "CHDIR"
+c_md:       .asciz "MD"
+c_mkdir:    .asciz "MKDIR"
+c_rd:       .asciz "RD"
+c_rmdir:    .asciz "RMDIR"
 c_cls:      .asciz "CLS"
 c_color:    .asciz "COLOR"
 c_copy:     .asciz "COPY"
@@ -3113,8 +3138,13 @@ ent:        .reserve 32
 dent:       .reserve 32
 name83:     .reserve 12
 newname:    .reserve 12
+oldname:    .reserve 12
+dir_clus:   .reserve 4                  ; fs_find・dir_slot・dir_next が見るディレクトリ（0 = ルート）
+cwd_clus:   .reserve 4                  ; 今のディレクトリ
+cwd_path:   .reserve RPATH_MAX          ; その名前（"\INCLUDE" など）
+rpath:      .reserve RPATH_MAX          ; path83 がたどったディレクトリの名前
 vol_label:  .reserve 12
-numbuf:     .reserve 12
+numbuf:     .reserve 40                 ; fmtdec の置き場（幅 28 まで右寄せ）
 cbuf:       .reserve 4
 linebuf:    .reserve 128
 batargs:    .reserve 128
@@ -3130,6 +3160,82 @@ bss_end:
         .phase HIGH_BASE
 high_start:
         .ascii "HIGH"                   ; 読み込めたかの印
+
+; CD [パス]：今のディレクトリを変える。パスがなければ今のディレクトリを出す
+cmd_cd:
+        ADDI32 sp, sp, -8
+        STORE32_32 lr, sp, 0
+        LOAD8U_32 r17, r16, 0
+        CMPNEI32 p1, r17, 0
+        BR32 p1, .go
+        ADDI32 r16, r0, s_prompt
+        CALL32 puts
+        ADDI32 r16, r0, cwd_path
+        CALL32 puts
+        ADDI32 r16, r0, 10
+        CALL32 putc
+        JMP32 .ret
+.go:    CALL32 f_chdir
+        CMPGEI32 p1, r16, 0
+        BR32 p1, .ret
+        CALL32 dir_err
+.ret:   LOAD32_32 lr, sp, 0
+        ADDI32 sp, sp, 8
+        RET32
+
+; MD パス：ディレクトリを作る
+cmd_md:
+        ADDI32 sp, sp, -8
+        STORE32_32 lr, sp, 0
+        CALL32 need_arg
+        CMPEQI32 p1, r16, 0
+        BR32 p1, .ret
+        CALL32 f_mkdir
+        CMPGEI32 p1, r16, 0
+        BR32 p1, .ret
+        CALL32 dir_err
+.ret:   LOAD32_32 lr, sp, 0
+        ADDI32 sp, sp, 8
+        RET32
+
+; RD パス：空のディレクトリを消す
+cmd_rd:
+        ADDI32 sp, sp, -8
+        STORE32_32 lr, sp, 0
+        CALL32 need_arg
+        CMPEQI32 p1, r16, 0
+        BR32 p1, .ret
+        CALL32 f_rmdir
+        CMPGEI32 p1, r16, 0
+        BR32 p1, .ret
+        CALL32 dir_err
+.ret:   LOAD32_32 lr, sp, 0
+        ADDI32 sp, sp, 8
+        RET32
+
+; need_arg(r16 = 引数) → r16 = 引数（なければ "Required parameter missing" を出して 0）
+need_arg:
+        LOAD8U_32 r17, r16, 0
+        CMPNEI32 p1, r17, 0
+        BR32 p1, .ok
+        ADDR32 r20, lr, r0
+        ADDI32 r16, r0, s_missing
+        CALL32 puts
+        ADDI32 r16, r0, 0
+        JMPR32 r20
+.ok:    RET32
+
+; dir_err(r16 = エラーの番号)：CD・MD・RD のエラーを出す（-2 → "Path not found"、-6 → "Invalid directory"、ほかは ferr）
+dir_err:
+        CMPEQI32 p1, r16, -2
+        ADDI32 r17, r0, s_nopath
+        BR32 p1, .say
+        CMPEQI32 p1, r16, -6
+        ADDI32 r17, r0, s_badpath
+        BR32 p1, .say
+        JMP32 ferr
+.say:   ADDR32 r16, r17, r0
+        JMP32 puts
 
 cmd_help:
         ADDI32 r16, r0, s_help
@@ -3216,18 +3322,44 @@ show_vol:
         ADDI32 sp, sp, 8
         RET32
 
-; DIR：ルートディレクトリの一覧
+; DIR [パス]：ディレクトリの一覧（なければ今のディレクトリ）
 cmd_dir:
         ADDI32 sp, sp, -16
         STORE32_32 lr, sp, 0
         STORE32_32 r24, sp, 4
         STORE32_32 r25, sp, 8
         STORE32_32 r26, sp, 12
+        ADDR32 r24, r16, r0             ; 引数（ディレクトリ。なければ今のディレクトリ）
         CALL32 need_fs
         CMPEQI32 p1, r16, 0
         BR32 p1, .ret
-        CALL32 show_vol
-        ADDI32 r16, r0, s_dirof
+        ADDR32 r16, r24, r0
+        CALL32 path83
+        CMPEQI32 p1, r16, 2
+        BR32 p1, .show
+        CMPEQI32 p1, r16, 1
+        BR32 p1, .name
+        CALL32 path_err
+        CALL32 dir_err
+        JMP32 .ret
+.name:  CALL32 fs_find                  ; 最後の名前がディレクトリなら、その中を
+        CMPEQI32 p1, r16, 0
+        ADDI32 r16, r0, -2
+        BR32 p1, .bad
+        LOAD8U_32 r17, r0, ent + 11
+        ANDI32 r17, r17, 0x10
+        CMPEQI32 p1, r17, 0
+        ADDI32 r16, r0, -6
+        BR32 p1, .bad
+        CALL32 ent_first
+        STORE32_32 r16, r0, dir_clus
+        CALL32 rp_push
+.show:  CALL32 show_vol
+        ADDI32 r16, r0, s_dirof         ; " Directory of C:\…"
+        CALL32 puts
+        ADDI32 r16, r0, rpath
+        CALL32 puts
+        ADDI32 r16, r0, s_nl2
         CALL32 puts
         ADDI32 r25, r0, 0               ; ファイルの数
         ADDI32 r26, r0, 0               ; 合計の大きさ
@@ -3333,6 +3465,8 @@ cmd_dir:
         CALL32 putdec_w
         ADDI32 r16, r0, s_freekb
         CALL32 puts
+        JMP32 .ret
+.bad:   CALL32 dir_err
 .ret:   LOAD32_32 lr, sp, 0
         LOAD32_32 r24, sp, 4
         LOAD32_32 r25, sp, 8
@@ -3798,7 +3932,10 @@ s_help:     .ascii "CLS       Clears the screen.\n"
             .ascii "COLOR xy  Sets colors (x = background, y = text, hex). COLOR alone resets.\n"
             .ascii "COPY      Copies a file. COPY CON name creates a file from the keyboard (end with Ctrl-Z).\n"
             .ascii "DEL       Deletes a file.\n"
-            .ascii "DIR       Displays the files on drive C: (SD card).\n"
+            .ascii "CD        Changes the current directory. CD alone shows it. (also CHDIR)\n"
+            .ascii "DIR       Displays the files in a directory (default: the current one).\n"
+            .ascii "MD        Makes a directory. (also MKDIR)\n"
+            .ascii "RD        Removes an empty directory. (also RMDIR)\n"
             .ascii "ECHO      Displays a message.\n"
             .ascii "LED xx    Turns the board LEDs on/off (hex).\n"
             .ascii "MEM       Displays the memory map.\n"
@@ -3813,7 +3950,8 @@ s_help:     .ascii "CLS       Clears the screen.\n"
             .asciz "Add > file or >> file to a command to send its output to a file.\n"
 s_vol1:     .asciz " Volume in drive C is "
 s_vol2:     .asciz "\n Volume Serial Number is "
-s_dirof:    .asciz " Directory of C:\\\n\n"
+s_dirof:    .asciz " Directory of C:"
+s_nl2:      .asciz "\n\n"
 s_dirtag:   .asciz "    <DIR>  "
 s_sp2:      .asciz "  "
 s_files:    .asciz " file(s)"
@@ -3823,6 +3961,8 @@ s_freekb:   .asciz " KB free\n"
 s_notfound: .asciz "File not found\n"
 s_missing:  .asciz "Required parameter missing\n"
 s_denied:   .asciz "Access denied\n"
+s_nopath:   .asciz "Path not found\n"
+s_badpath:  .asciz "Invalid directory\n"
 s_toomany:  .asciz "Too many open files\n"
 s_diskfull: .asciz "Insufficient disk space\n"
 s_dupname:  .asciz "Duplicate file name or file not found\n"

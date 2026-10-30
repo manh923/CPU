@@ -27,7 +27,7 @@ const cpu = new CPU({ xlen: 32, onTx: (b) => { out += String.fromCharCode(b); },
 cpu.load(assemble(fs.readFileSync(path.join(ROOT, 'examples/bios.asm'), 'utf8')).image);
 cpu.pushRx(Buffer.from(' ' + cmds.join('\r') + '\r', 'latin1'));
 
-const prompts = () => out.split('C:\\>').length - 1;
+const prompts = () => (out.match(/C:\\[^>\n]*>/g) || []).length;   // C:\> や C:\SUB> の数
 const t = Date.now();
 const max = Number(process.env.MAX || 5e9);
 const log = [];
