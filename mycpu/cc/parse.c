@@ -2063,10 +2063,27 @@ static double eval_double(Node *node) {
 // However, if a given expression is of form `A.x op= C`, the input is
 // converted to `tmp = &A, (*tmp).x = (*tmp).x op C` to handle assignments
 // to bitfields.
+// 求めても何も起きず、番地の計算も要らない左辺値か（MyCPU）：変数、a.x、p->x、*p（p はただの変数）
+static bool is_plain_lvalue(Node *node) {
+  switch (node->kind) {
+  case ND_VAR:
+    return true;
+  case ND_MEMBER:
+    return is_plain_lvalue(node->lhs);
+  case ND_DEREF:
+    return node->lhs->kind == ND_VAR;
+  }
+  return false;
+}
+
 static Node *to_assign(Node *binary) {
   add_type(binary->lhs);
   add_type(binary->rhs);
   Token *tok = binary->tok;
+
+  // MyCPU：A がただの変数・p->x などなら `A = A op B`（番地を一時変数に取らない。変数をレジスタに置ける）
+  if (is_plain_lvalue(binary->lhs) && !binary->lhs->ty->is_atomic)
+    return new_binary(ND_ASSIGN, binary->lhs, new_binary(binary->kind, binary->lhs, binary->rhs, tok), tok);
 
   // Convert `A.x op= C` to `tmp = &A, (*tmp).x = (*tmp).x op C`.
   if (binary->lhs->kind == ND_MEMBER) {
@@ -2380,6 +2397,15 @@ static Node *shift(Token **rest, Token *tok) {
 // so that p+n points to the location n elements (not bytes) ahead of p.
 // In other words, we need to scale an integer value before adding to a
 // pointer value. This function takes care of the scaling.
+// ポインタに足す数を要素の大きさ倍に（MyCPU：大きさ 1 なら掛けない、定数なら掛けた定数にする）
+static Node *scale(Node *rhs, int size, Token *tok) {
+  if (size == 1)
+    return rhs;
+  if (rhs->kind == ND_NUM)
+    return new_long(rhs->val * size, tok);
+  return new_binary(ND_MUL, rhs, new_long(size, tok), tok);
+}
+
 static Node *new_add(Node *lhs, Node *rhs, Token *tok) {
   add_type(lhs);
   add_type(rhs);
@@ -2405,7 +2431,7 @@ static Node *new_add(Node *lhs, Node *rhs, Token *tok) {
   }
 
   // ptr + num
-  rhs = new_binary(ND_MUL, rhs, new_long(lhs->ty->base->size, tok), tok);
+  rhs = scale(rhs, lhs->ty->base->size, tok);
   return new_binary(ND_ADD, lhs, rhs, tok);
 }
 
@@ -2429,7 +2455,7 @@ static Node *new_sub(Node *lhs, Node *rhs, Token *tok) {
 
   // ptr - num
   if (lhs->ty->base && is_integer(rhs->ty)) {
-    rhs = new_binary(ND_MUL, rhs, new_long(lhs->ty->base->size, tok), tok);
+    rhs = scale(rhs, lhs->ty->base->size, tok);
     add_type(rhs);
     Node *node = new_binary(ND_SUB, lhs, rhs, tok);
     node->ty = lhs->ty;

@@ -89,7 +89,7 @@ static Token *skip_line(Token *tok) {
 }
 
 static Token *copy_token(Token *tok) {
-  Token *t = calloc(1, sizeof(Token));
+  Token *t = malloc(sizeof(Token));   // MyCPU：すぐ全部を写すので 0 で埋めない
   *t = *tok;
   t->next = NULL;
   return t;

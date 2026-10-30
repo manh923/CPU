@@ -316,6 +316,10 @@ if (spawnSync('gcc', ['--version']).error) {
   check('数学の関数（libc/math.c）：sqrt・fmod などは正確、sin・exp・pow などは 2 ulp 以内（glibc の long double と比べる）',
     r.status === 0, r.stdout.trim());
 
+  gcc('scanftest', ['test/scanftest.c']);
+  r = runExe('scanftest', ['100000']);
+  check('scanf の仲間（libc/scanf.c）：glibc の sscanf と同じ戻り値・同じ値（10 万通り）', r.status === 0, r.stdout.trim());
+
   // 同じプログラムを、この CPU（シミュレータ）と PC で動かして、出力が同じ
   execFileSync('gcc', ['-O0', '-ffp-contract=off', '-fno-builtin', '-o', exe('cfloat'), path.join(ROOT, 'test/cfloat.c'), path.join(ROOT, 'libc/math.c'), '-lm']);
   const want = runExe('cfloat', []).stdout;

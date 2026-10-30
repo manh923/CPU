@@ -218,10 +218,8 @@ int fputs(const char *s, FILE *fp) {
     __syscall(SYS_PUTS, (int)s, 0, 0);
     return 0;
   }
-  for (; *s; s++)
-    if (fputc(*s, fp) == EOF)
-      return EOF;
-  return 0;
+  size_t len = strlen(s);
+  return fwrite(s, 1, len, fp) == len ? 0 : EOF;
 }
 
 int puts(const char *s) {
@@ -304,7 +302,7 @@ size_t fread(void *p, size_t size, size_t n, FILE *fp) {
 
 size_t fwrite(const void *p, size_t size, size_t n, FILE *fp) {
   const unsigned char *s = p;
-  size_t want = size * n;
+  size_t want = size * n, done = 0;
   if (fp->fd == -1) {
     for (size_t i = 0; i < want; i++)
       __syscall(SYS_PUTC, s[i], 0, 0);
@@ -312,10 +310,49 @@ size_t fwrite(const void *p, size_t size, size_t n, FILE *fp) {
   }
   if (fp->mode != 'w')
     return 0;
-  for (size_t i = 0; i < want; i++)
-    if (put_byte(fp, s[i]) == EOF)
-      return size ? i / size : 0;
-  return n;
+  if (fp->fd == -3) {                    // open_memstream：足りなければ大きくする（最後の 0 の分も）
+    if (fp->pos + want + 1 > fp->len) {
+      size_t len = fp->len * 2;
+      if (len < fp->pos + want + 1)
+        len = fp->pos + want + 1;
+      unsigned char *nb = realloc(fp->buf, len);
+      if (!nb) {
+        fp->err = 1;
+        return 0;
+      }
+      fp->buf = nb;
+      fp->len = len;
+    }
+    memcpy(fp->buf + fp->pos, s, want);
+    fp->pos += want;
+    return n;
+  }
+  while (done < want) {
+    if (fp->pos == 0 && want - done >= BUFSIZ) {   // 大きければ直接書く
+      int k = (want - done) / BUFSIZ * BUFSIZ;
+      int r = __syscall(SYS_WRITE, fp->fd, (int)(s + done), k);
+      if (r < 0) {
+        fp->err = 1;
+        set_errno(r);
+        break;
+      }
+      done += r;
+      if (r < k) {
+        fp->err = 1;
+        break;
+      }
+      continue;
+    }
+    size_t k = BUFSIZ - fp->pos;           // ためる
+    if (k > want - done)
+      k = want - done;
+    memcpy(fp->buf + fp->pos, s + done, k);
+    fp->pos += k;
+    done += k;
+    if (fp->pos == BUFSIZ && fflush(fp) < 0)
+      break;
+  }
+  return size ? done / size : 0;
 }
 
 int feof(FILE *fp) { return fp->eof; }
@@ -400,13 +437,29 @@ static void out_c(Out *o, int c) {
   o->len++;
 }
 
+// 文字列 s の len バイトをまとめて出す
+static void out_s(Out *o, const char *s, size_t len) {
+  if (o->fp) {
+    fwrite(s, 1, len, o->fp);
+  } else if (o->buf && o->len + 1 < o->n) {
+    size_t k = o->n - 1 - o->len;
+    memcpy(o->buf + o->len, s, k < len ? k : len);
+  }
+  o->len += len;
+}
+
 static void out_pad(Out *o, int c, int n) {
   while (n-- > 0)
     out_c(o, c);
 }
 
-// 数を文字列に（逆順にためて返す）。戻り値は桁数
-static int utoa_rev(unsigned long long v, int base, int upper, char *tmp) {
+// ---- long long・小数の表示は、使うプログラムだけ ----
+// __mycpu_weak_ll・__mycpu_weak_dtoa（関数を指す変数）を通して呼ぶ。AS -lib は「___mycpu_weak_」で始まる変数を、
+// プログラムが名前で使ったときだけ本当の値（と、その先の関数）で入れ、使わなければ 0 にして先の関数を入れない。
+// codegen.c が、long long・float・double を使うファイルにこの名前を使う印を付ける（だから printf だけなら小さい）
+
+// 64bit の数を文字列に（逆順にためて返す）。戻り値は桁数
+static int utoa64_rev(unsigned long long v, int base, int upper, char *tmp) {
   char *digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
   int n = 0;
   do {
@@ -415,13 +468,40 @@ static int utoa_rev(unsigned long long v, int base, int upper, char *tmp) {
   } while (v);
   return n;
 }
+int (*__mycpu_weak_ll)(unsigned long long, int, int, char *) = utoa64_rev;
 
 int __mycpu_dtoa(double x, int conv, int prec, int alt, char *out);
 
+// 小数の数字（libc/fltio.c が作る）
+static char *float_digits(double v, int conv, int prec, int alt) {
+  static char fbuf[1400];
+  __mycpu_dtoa(v, conv, prec, alt, fbuf);
+  return fbuf;
+}
+char *(*__mycpu_weak_dtoa)(double, int, int, int) = float_digits;
+
+// 数を文字列に（逆順にためて返す）。戻り値は桁数。32bit に入らなければ utoa64_rev で
+static int utoa_rev(unsigned long long v, int base, int upper, char *tmp) {
+  if ((v >> 32) && __mycpu_weak_ll)
+    return __mycpu_weak_ll(v, base, upper, tmp);
+  char *digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
+  unsigned u = (unsigned)v;
+  int n = 0;
+  do {
+    tmp[n++] = digits[u % base];
+    u /= base;
+  } while (u);
+  return n;
+}
+
 static int format(Out *o, const char *f, va_list ap) {
   for (; *f; f++) {
-    if (*f != '%') {
-      out_c(o, *f);
+    if (*f != '%') {                   // % までの文字はまとめて
+      const char *q = f;
+      while (*q && *q != '%')
+        q++;
+      out_s(o, f, q - f);
+      f = q - 1;
       continue;
     }
     f++;
@@ -533,16 +613,16 @@ static int format(Out *o, const char *f, va_list ap) {
     case 'g':
     case 'G': {
       // 数字は libc/fltio.c が作る。inf・nan は 0 で埋めない
-      static char fbuf[1400];
       double v = va_arg(ap, double);
       unsigned hi;
       memcpy(&hi, (char *)&v + 4, 4);
       int upper = *f < 'a';
-      char *body = fbuf;
+      char *body = "?";
       int finite = (hi & 0x7FF00000) != 0x7FF00000;
       prefix = hi >> 31 ? "-" : plus ? "+" : space ? " " : "";
       if (finite) {
-        __mycpu_dtoa(v, *f, prec, alt, fbuf);
+        if (__mycpu_weak_dtoa)
+          body = __mycpu_weak_dtoa(v, *f, prec, alt);
       } else {
         unsigned lo;
         memcpy(&lo, &v, 4);
@@ -581,8 +661,7 @@ static int format(Out *o, const char *f, va_list ap) {
         len++;
       if (!left)
         out_pad(o, ' ', width - len);
-      for (int i = 0; i < len; i++)
-        out_c(o, s[i]);
+      out_s(o, s, len);
       if (left)
         out_pad(o, ' ', width - len);
       break;

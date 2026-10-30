@@ -4,8 +4,11 @@
 //     -bin  そのままのバイト列（いちばん小さい番地から）を作る
 //     -b    最初の番地（なければ 0。C のプログラムは 0x1000000 = SDRAM）
 //     -lib  先にアセンブルしてあるライブラリ（名前.BIN と、名前と番地の表 名前.SYM。tools/cc.js が作る）を使う：
-//           表の名前を知っている状態でアセンブルし、名前.BIN の後ろ（-b がなければそこから）にプログラムを置いて、
-//           .EXE・-bin には名前.BIN も入れる。プログラムで同じ名前を定義すれば、プログラムの方を使う
+//           表の名前を知っている状態でアセンブルし、名前.BIN の後ろ（-b がなければそこから）にプログラムを置く。
+//           .EXE には、ライブラリのうちプログラムが使う関数・変数（名前.SYM の @chunk。使うものからたどれるものも）
+//           だけを入れる（区切りのある .EXE。ライブラリは動かさないので、番地はとびとび）。-bin には名前.BIN を全部入れる。
+//           弱いかたまり（@chunk の w）は、プログラムが名前で使ったときだけ中身を入れ、ほかは 0 で埋める（先もたどらない）
+//           プログラムで同じ名前を定義すれば、プログラムの方を使う
 // ファイルをいくつも渡すと、1 つのプログラムにまとめる（リンカの代わり。tools/cc.js と同じ並べ方）：
 //   「; @text」「; @data」の行で分けてあれば、全部のファイルのコードを前に、データを後ろにまとめ、
 //   「; @common 名前 大きさ 揃え」（初期値なしの大域変数）は、どこにも定義がなければ 1 つだけ置き、
@@ -43,6 +46,7 @@ typedef struct {
   char *name;
   i64 value;
   int lib;                       // -lib の表から（プログラムで定義し直してよい）
+  int used;                      // プログラムが使った（-lib の名前のとき）
 } Sym;
 
 static Sym *syms;
@@ -289,6 +293,7 @@ static i64 unary(void) {
       unknown = 1;
       return 0;
     }
+    s->used = 1;
     return s->value;
   }
   ep++;
@@ -950,7 +955,83 @@ static void run_pass(int p) {
 static char *lib_name;
 static i64 lib_base = -1, lib_end;
 
-// 名前.SYM を読む：「@base 16 進」「@end 16 進」と「名前 16 進」の行（; で始まる行は飛ばす）
+// ライブラリのかたまり（関数・変数）：番地の範囲 [ck_start, ck_end) と、使うかたまりの番号 deps[ck_dep[i] .. ck_dep[i + 1])
+static int nchunks, cap_chunks;
+static i64 *ck_start, *ck_end;
+static int *ck_dep;
+static char *ck_weak;
+static char *ck_used;            // 1 = 入れる、2 = 0 で埋めて入れる（弱いかたまりを、ほかのかたまりが使うだけ）
+static int *deps, ndeps, cap_deps;
+
+// 「@chunk 始め 終わり 番号 …」の「始め」から後ろ
+static void add_chunk(char *p) {
+  if (nchunks + 2 > cap_chunks) {
+    cap_chunks = cap_chunks ? cap_chunks * 2 : 1024;
+    ck_start = realloc(ck_start, cap_chunks * sizeof(i64));
+    ck_end = realloc(ck_end, cap_chunks * sizeof(i64));
+    ck_dep = realloc(ck_dep, (cap_chunks + 1) * sizeof(int));
+    ck_weak = realloc(ck_weak, cap_chunks);
+  }
+  ck_start[nchunks] = (i64)strtoul(p, &p, 16);
+  ck_end[nchunks] = (i64)strtoul(p, &p, 16);
+  ck_dep[nchunks] = ndeps;
+  while (*p == ' ')
+    p++;
+  ck_weak[nchunks] = *p == 'w';
+  if (*p == 'w')
+    p++;
+  for (;;) {
+    while (*p == ' ')
+      p++;
+    if (!isdigit((unsigned char)*p))
+      break;
+    if (ndeps + 1 > cap_deps) {
+      cap_deps = cap_deps ? cap_deps * 2 : 4096;
+      deps = realloc(deps, cap_deps * sizeof(int));
+    }
+    deps[ndeps++] = (int)strtoul(p, &p, 10);
+  }
+  nchunks++;
+  ck_dep[nchunks] = ndeps;
+}
+
+// 番地 a を含むかたまりと、それが使うかたまりに印を付ける
+static void use_chunk_at(i64 a) {
+  int lo_i = 0, hi_i = nchunks - 1, k = -1;
+  while (lo_i <= hi_i) {
+    int m = (lo_i + hi_i) / 2;
+    if (a < ck_start[m])
+      hi_i = m - 1;
+    else if (a >= ck_end[m])
+      lo_i = m + 1;
+    else {
+      k = m;
+      break;
+    }
+  }
+  if (k < 0 || ck_used[k] == 1)
+    return;
+  int *stack = malloc((nchunks + 1) * sizeof(int)), sp = 0;
+  ck_used[k] = 1;
+  stack[sp++] = k;
+  while (sp) {
+    int c = stack[--sp];
+    for (int i = ck_dep[c]; i < ck_dep[c + 1]; i++) {
+      int d = deps[i];
+      if (d < 0 || d >= nchunks || ck_used[d] == 1)
+        continue;
+      if (ck_weak[d]) {                // 弱いかたまり：0 で埋めて入れるだけ
+        ck_used[d] = 2;
+        continue;
+      }
+      ck_used[d] = 1;
+      stack[sp++] = d;
+    }
+  }
+  free(stack);
+}
+
+// 名前.SYM を読む：「@base 16 進」「@end 16 進」「@chunk …」と「名前 16 進」の行（; で始まる行は飛ばす）
 static int load_lib_syms(void) {
   char path[64];
   snprintf(path, sizeof(path), "%s.SYM", lib_name);
@@ -968,6 +1049,10 @@ static int load_lib_syms(void) {
     if (!*p)
       continue;
     *p++ = 0;
+    if (!strcmp(name, "@chunk")) {
+      add_chunk(p);
+      continue;
+    }
     i64 v = (i64)strtoul(p, 0, 16);
     if (!strcmp(name, "@base"))
       lib_base = v;
@@ -1007,6 +1092,63 @@ static int copy_lib_bin(FILE *fp) {
     return 0;
   }
   return 1;
+}
+
+// 区切りのある .EXE の本体：ライブラリのうち使うかたまり（続いているものはまとめる）と、プログラムを
+// 「番地（4 バイト）・長さ（4 バイト）・中身」の並びで書く。lowest に いちばん小さい番地。本体の大きさを返す（失敗なら −1）
+static void put_le32(FILE *fp, unsigned v);
+
+static i64 write_segments(FILE *fp, i64 *lowest) {
+  unsigned char *lib = 0;
+  if (fp) {
+    char path[64];
+    snprintf(path, sizeof(path), "%s.BIN", lib_name);
+    FILE *in = fopen(path, "rb");
+    lib = malloc(lib_end - lib_base + 1);
+    if (!in || !lib || fread(lib, 1, lib_end - lib_base, in) != (size_t)(lib_end - lib_base)) {
+      fprintf(stderr, "%s: cannot read\n", path);
+      if (in)
+        fclose(in);
+      return -1;
+    }
+    fclose(in);
+  }
+  i64 size = 0;
+  *lowest = lo;
+  for (int i = 0; i < nchunks;) {
+    if (!ck_used[i] || ck_end[i] <= ck_start[i]) {
+      i++;
+      continue;
+    }
+    int first = i;
+    i64 a = ck_start[i], b = ck_end[i];
+    for (i++; i < nchunks && (ck_used[i] || ck_end[i] <= ck_start[i]) && ck_start[i] == b; i++)
+      b = ck_end[i];
+    if (a < lib_base || b > lib_end) {
+      fprintf(stderr, "%s.SYM: bad @chunk\n", lib_name);
+      return -1;
+    }
+    if (a < *lowest)
+      *lowest = a;
+    size += 8 + (b - a);
+    if (fp) {
+      put_le32(fp, (unsigned)a);
+      put_le32(fp, (unsigned)(b - a));
+      for (int j = first; j < i; j++) {    // 0 で埋めるかたまりは 0 を
+        if (ck_used[j] == 2)
+          memset(lib + (ck_start[j] - lib_base), 0, ck_end[j] - ck_start[j]);
+      }
+      fwrite(lib + (a - lib_base), 1, b - a, fp);
+    }
+  }
+  size += 8 + (hi - lo);
+  if (fp) {
+    put_le32(fp, (unsigned)lo);
+    put_le32(fp, (unsigned)(hi - lo));
+    fwrite(image, 1, hi - lo, fp);
+  }
+  free(lib);
+  return size;
 }
 
 // ライブラリ・すき間（0）・プログラムを書く
@@ -1093,6 +1235,25 @@ int main(int argc, char **argv) {
     }
     fputc('M', fp);
     fputc('Z', fp);
+    if (lib_name && nchunks) {
+      // 区切りのある .EXE（ヘッダの大きさの欄が 0x8010）：プログラムが使うライブラリのかたまりに印を付けてから
+      ck_used = calloc(nchunks + 1, 1);
+      for (int i = 0; i < cap_syms; i++)
+        if (syms[i].name && syms[i].lib && syms[i].used)
+          use_chunk_at(syms[i].value);
+      i64 lowest, size = write_segments(0, &lowest);
+      fputc(0x10, fp);
+      fputc(0x80, fp);
+      put_le32(fp, (unsigned)lowest);
+      put_le32(fp, (unsigned)(st ? st->value : lo));
+      put_le32(fp, (unsigned)size);
+      if (size < 0 || write_segments(fp, &lowest) < 0 || fclose(fp)) {
+        fprintf(stderr, "%s: cannot write\n", out_exe);
+        return 1;
+      }
+      printf("%s: %d bytes\n", out_exe, (int)(size + 16));
+      return 0;
+    }
     fputc(16, fp);
     fputc(0, fp);
     i64 start = lib_name ? lib_base : lo;

@@ -145,18 +145,21 @@ static int from_hex(char c) {
 }
 
 // Read a punctuator token from p and returns its length.
+// MyCPU：表（<<= >>= ... == != <= >= -> += -= *= /= ++ -- %= &= |= ^= && || << >> ##）と 1 つずつ比べずに、
+// 1・2 文字目で決める（記号のたびに呼ばれるので）
 static int read_punct(char *p) {
-  static char *kw[] = {
-    "<<=", ">>=", "...", "==", "!=", "<=", ">=", "->", "+=",
-    "-=", "*=", "/=", "++", "--", "%=", "&=", "|=", "^=", "&&",
-    "||", "<<", ">>", "##",
-  };
-
-  for (int i = 0; i < sizeof(kw) / sizeof(*kw); i++)
-    if (startswith(p, kw[i]))
-      return strlen(kw[i]);
-
-  return ispunct(*p) ? 1 : 0;
+  char c = p[0], d = p[1];
+  if (c == '.' && d == '.' && p[2] == '.')
+    return 3;
+  if ((c == '<' || c == '>') && d == c)
+    return p[2] == '=' ? 3 : 2;
+  if (d == '=' && c && strchr("=!<>+-*/%&|^", c))
+    return 2;
+  if (d == c && c && strchr("+-&|#", c))
+    return 2;
+  if (c == '-' && d == '>')
+    return 2;
+  return ispunct(c) ? 1 : 0;
 }
 
 static bool is_keyword(Token *tok) {
@@ -358,7 +361,7 @@ static bool convert_pp_int(Token *tok) {
     base = 8;
   }
 
-  int64_t val = strtoul(p, &p, base);
+  int64_t val = strtoull(p, &p, base);   // MyCPU：strtoul は 32bit（long が 4 バイト）なので 64bit 版で
 
   // Read U, L or LL suffixes.（MyCPU：LL は long long。long は 4 バイトなので別に扱う）
   bool l = false;
@@ -511,9 +514,10 @@ Token *tokenize(File *file) {
   at_bol = true;
   has_space = false;
 
+  // MyCPU：1 文字ずつ見るところは startswith を呼ばずに直接比べる
   while (*p) {
     // Skip line comments.
-    if (startswith(p, "//")) {
+    if (p[0] == '/' && p[1] == '/') {
       p += 2;
       while (*p != '\n')
         p++;
@@ -522,7 +526,7 @@ Token *tokenize(File *file) {
     }
 
     // Skip block comments.
-    if (startswith(p, "/*")) {
+    if (p[0] == '/' && p[1] == '*') {
       char *q = strstr(p + 2, "*/");
       if (!q)
         error_at(p, "unclosed block comment");
@@ -569,28 +573,28 @@ Token *tokenize(File *file) {
     }
 
     // UTF-8 string literal
-    if (startswith(p, "u8\"")) {
+    if (p[0] == 'u' && p[1] == '8' && p[2] == '"') {
       cur = cur->next = read_string_literal(p, p + 2);
       p += cur->len;
       continue;
     }
 
     // UTF-16 string literal
-    if (startswith(p, "u\"")) {
+    if (p[0] == 'u' && p[1] == '"') {
       cur = cur->next = read_utf16_string_literal(p, p + 1);
       p += cur->len;
       continue;
     }
 
     // Wide string literal
-    if (startswith(p, "L\"")) {
+    if (p[0] == 'L' && p[1] == '"') {
       cur = cur->next = read_utf32_string_literal(p, p + 1, ty_int);
       p += cur->len;
       continue;
     }
 
     // UTF-32 string literal
-    if (startswith(p, "U\"")) {
+    if (p[0] == 'U' && p[1] == '"') {
       cur = cur->next = read_utf32_string_literal(p, p + 1, ty_uint);
       p += cur->len;
       continue;
@@ -605,7 +609,7 @@ Token *tokenize(File *file) {
     }
 
     // UTF-16 character literal
-    if (startswith(p, "u'")) {
+    if (p[0] == 'u' && p[1] == '\'') {
       cur = cur->next = read_char_literal(p, p + 1, ty_ushort);
       cur->val &= 0xffff;
       p += cur->len;
@@ -613,14 +617,14 @@ Token *tokenize(File *file) {
     }
 
     // Wide character literal
-    if (startswith(p, "L'")) {
+    if (p[0] == 'L' && p[1] == '\'') {
       cur = cur->next = read_char_literal(p, p + 1, ty_int);
       p += cur->len;
       continue;
     }
 
     // UTF-32 character literal
-    if (startswith(p, "U'")) {
+    if (p[0] == 'U' && p[1] == '\'') {
       cur = cur->next = read_char_literal(p, p + 1, ty_uint);
       p += cur->len;
       continue;
@@ -762,7 +766,7 @@ static void convert_universal_chars(char *p) {
   char *q = p;
 
   while (*p) {
-    if (startswith(p, "\\u")) {
+    if (p[0] == '\\' && p[1] == 'u') {             // MyCPU：startswith を呼ばずに（1 文字ずつ見るので）
       uint32_t c = read_universal_char(p + 2, 4);
       if (c) {
         p += 6;
@@ -770,7 +774,7 @@ static void convert_universal_chars(char *p) {
       } else {
         *q++ = *p++;
       }
-    } else if (startswith(p, "\\U")) {
+    } else if (p[0] == '\\' && p[1] == 'U') {
       uint32_t c = read_universal_char(p + 2, 8);
       if (c) {
         p += 10;
