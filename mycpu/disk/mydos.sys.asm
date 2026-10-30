@@ -49,6 +49,9 @@ SD_TYPE      = BDA + 16
 USER_FAULT   = BDA + 24
 SDRAM_KB     = BDA + 28                 ; BIOS が調べた SDRAM の大きさ（KB）
 SDRAM        = 0x01000000               ; SDRAM の先頭（.EXE をここに読み込んでもよい）
+HIGH_BASE    = 0x017F0000               ; MyDOS の後ろ半分を置く場所（8MB の SDRAM の最後の 64KB）
+HIGH_MAX     = 0x10000
+HIGH_FILE    = 0x6000                   ; MYDOS.SYS の中で、後ろ半分が始まる位置（BIOS が読むのは ここまで）
 VEC          = 0x0002B100               ; SYSCALL の表
 SECBUF       = 0x0002B200               ; セクタの置き場（1 つだけ覚えておく。書いたら後でまとめて書き戻す）
 FATBUF       = 0x0002B400               ; FAT のセクタの置き場（同じく）
@@ -94,11 +97,16 @@ dos_start:
         JMP32 .v
 .vdone: ADDI32 r16, r0, dos_fault       ; プログラムの例外を受け取る
         STORE32_32 r16, r0, USER_FAULT
+        LOAD32_32 r16, r0, SDRAM_KB     ; SDRAM のプログラムが使える終わり（後ろ半分を読み込んだら HIGH_BASE）
+        SHLI32 r16, r16, 10
+        ADDI32 r16, r16, SDRAM
+        STORE32_32 r16, r0, user_top
         ADDI32 r16, r0, s_banner
         CALL32 puts
-        CALL32 fs_mount                 ; カードが読めて AUTOEXEC.BAT があれば実行する
+        CALL32 fs_mount                 ; カードが読めたら、後ろ半分を読み込み、AUTOEXEC.BAT があれば実行する
         CMPEQI32 p1, r16, 0
         BR32 p1, shell
+        CALL32 load_high
         ADDI32 r16, r0, s_autoexec
         CALL32 to83
         CALL32 fs_find
@@ -138,6 +146,43 @@ dos_vectors:                            ; SYSCALL の表に入れる MyDOS の�
         .word 21, f_rename
         .word 22, f_seek
         .word -1
+
+; load_high()：MYDOS.SYS の HIGH_FILE から後ろ（後ろ半分）を HIGH_BASE に読み込む。SDRAM が 8MB なければ読まない。
+; 読めたら high_ok ← 1、SDRAM のプログラムが使えるのは user_top（HIGH_BASE）まで
+load_high:
+        ADDI32 sp, sp, -8
+        STORE32_32 lr, sp, 0
+        STORE32_32 r24, sp, 4
+        LOAD32_32 r16, r0, SDRAM_KB
+        CMPLTI32 p1, r16, 8192
+        BR32 p1, .ret
+        ADDI32 r16, r0, s_mydos
+        ADDI32 r17, r0, 0
+        CALL32 f_open
+        CMPLTI32 p1, r16, 0
+        BR32 p1, .ret
+        ADDR32 r24, r16, r0
+        ADDI32 r17, r0, HIGH_FILE
+        ADDI32 r18, r0, 0
+        CALL32 f_seek
+        ADDR32 r16, r24, r0
+        ADDI32 r17, r0, HIGH_BASE
+        ADDI32 r18, r0, HIGH_MAX
+        CALL32 f_read
+        ADDR32 r16, r24, r0
+        CALL32 f_close
+        LOAD32_32 r16, r0, HIGH_BASE    ; 印 "HIGH"
+        ADDI32 r17, r0, 0x48474948
+        CMPNER32 p1, r16, r17
+        BR32 p1, .ret
+        ADDI32 r16, r0, 1
+        STORE32_32 r16, r0, high_ok
+        ADDI32 r16, r0, HIGH_BASE
+        STORE32_32 r16, r0, user_top
+.ret:   LOAD32_32 lr, sp, 0
+        LOAD32_32 r24, sp, 4
+        ADDI32 sp, sp, 8
+        RET32
 
 ; ==================================================================
 ; 1 行の実行
@@ -206,8 +251,14 @@ run_line:
         ADDI32 r24, r24, 8
         JMP32 .find
 .call:  LOAD32_32 r17, r24, 4
+        LOAD32_32 r16, r0, high_ok      ; 組み込みのコマンドは後ろ半分にある
+        CMPEQI32 p1, r16, 0
+        BR32 p1, .nohigh
         LOAD32_32 r16, r0, args
         CALLR32 r17
+        JMP32 .ret
+.nohigh: ADDI32 r16, r0, s_nohigh
+        CALL32 puts
         JMP32 .ret
 .file:  CALL32 run_file                 ; .EXE・.COM・.BAT
         CMPNEI32 p1, r16, 0
@@ -481,12 +532,12 @@ run_prog:
         CMPLTUR32 p1, r20, r21          ; TPA ≦ 読み込む番地 < TPA_END
         SUBR32 r21, r21, r20            ; 残りの大きさ
         BR32 p1, .fit
-        LOAD32_32 r21, r0, SDRAM_KB
-        CMPEQI32 p1, r21, 0
+        LOAD32_32 r21, r0, user_top     ; SDRAM で使えるのは user_top まで（後ろ半分の手前）
+        ADDI32 r21, r21, -SDRAM
+        CMPLTI32 p1, r21, 1
         BR32 p1, .big1
         ADDI32 r20, r18, -SDRAM
-        SHLI32 r21, r21, 10
-        CMPGEUR32 p1, r20, r21          ; SDRAM ≦ 読み込む番地 < SDRAM の終わり
+        CMPGEUR32 p1, r20, r21          ; SDRAM ≦ 読み込む番地 < user_top
         BR32 p1, .big1
         SUBR32 r21, r21, r20
 .fit:   CMPLTUR32 p1, r21, r19          ; 本体が入りきるか
@@ -514,12 +565,10 @@ run_prog:
         BR32 p1, .sdram
         CMPLTUR32 p1, r18, r28
         BR32 p1, .sgo
-.sdram: LOAD32_32 r21, r0, SDRAM_KB
-        CMPEQI32 p1, r21, 0
-        BR32 p1, .big1
+.sdram: LOAD32_32 r28, r0, user_top
         ADDI32 r27, r0, SDRAM
-        SHLI32 r21, r21, 10
-        ADDI32 r28, r21, SDRAM
+        CMPGEUR32 p1, r27, r28
+        BR32 p1, .big1
         CMPLTUR32 p1, r18, r27
         BR32 p1, .big1
         CMPGEUR32 p1, r18, r28
@@ -567,12 +616,10 @@ run_prog:
         STORE32_32 r16, r0, running
         STORE32_32 sp, r0, saved_sp     ; 終了（SYSCALL 0）・例外のときは .back へ
         ADDI32 lr, r0, exit_stub        ; RET32 で戻ってきたら SYSCALL 0
-        LOAD32_32 r16, r0, prog_base    ; SDRAM のプログラムは、スタックも SDRAM の末尾に
+        LOAD32_32 r16, r0, prog_base    ; SDRAM のプログラムは、スタックも SDRAM の終わり（user_top）から
         CMPLTUI32 p1, r16, SDRAM
         BR32 p1, .stk
-        LOAD32_32 r16, r0, SDRAM_KB
-        SHLI32 r16, r16, 10
-        ADDI32 sp, r16, SDRAM
+        LOAD32_32 sp, r0, user_top
 .stk:   ADDR32 epc, r26, r0
         ADDI32 status, r0, 4            ; ERET で「例外の直前の特権 = ユーザー」に戻る → ユーザーモード
         LOAD32_32 r16, r0, args
@@ -2387,6 +2434,118 @@ commands:
         .word c_vol, cmd_vol
         .word 0, 0
 
+s_banner:   .asciz "MyDOS Version 3.0\n(C)Copyright MyCPU Project 2026.\n"
+s_prompt:   .asciz "C:\\>"
+s_bad:      .asciz "Bad command or file name\n"
+s_notready: .asciz "Not ready reading drive C\n"
+s_createerr: .asciz "File creation error\n"
+s_readerr:  .asciz "Read error reading drive C\n"
+s_toobig:   .asciz "Program too big to fit in memory\n"
+s_badexe:   .asciz "Invalid EXE file\n"
+s_term:     .asciz "\nProgram terminated: "
+s_fault_align: .asciz "alignment error"
+s_fault_priv:  .asciz "privileged instruction"
+s_fault_div:   .asciz "divide by zero"
+s_fault_other: .asciz "exception"
+s_at:       .asciz " at "
+s_autoexec: .asciz "AUTOEXEC.BAT"
+s_mydos:    .asciz "MYDOS.SYS"
+s_nohigh:   .asciz "Built-in commands need 8MB SDRAM\n"
+badchars:   .asciz "*?/\\:\"<>|+=,;[]"
+x_exe:      .ascii "EXE"
+x_com:      .ascii "COM"
+x_bat:      .ascii "BAT"
+exts:       .ascii "EXE\0COM\0BAT\0\0"
+c_cls:      .asciz "CLS"
+c_color:    .asciz "COLOR"
+c_copy:     .asciz "COPY"
+c_del:      .asciz "DEL"
+c_erase:    .asciz "ERASE"
+c_dir:      .asciz "DIR"
+c_echo:     .asciz "ECHO"
+c_help:     .asciz "HELP"
+c_led:      .asciz "LED"
+c_mem:      .asciz "MEM"
+c_reboot:   .asciz "REBOOT"
+c_ren:      .asciz "REN"
+c_rename:   .asciz "RENAME"
+c_shutdown: .asciz "SHUTDOWN"
+c_time:     .asciz "TIME"
+c_type:     .asciz "TYPE"
+c_ver:      .asciz "VER"
+c_vol:      .asciz "VOL"
+
+; ---- 変数（起動時に 0 にする。MYDOS.SYS には入らない） ----
+        .align 4
+bss_start:
+fs_ok:      .reserve 4
+exehdr:     .reserve 16                 ; .EXE のヘッダ
+prog_base:  .reserve 4                  ; 実行中のプログラムを読み込んだ番地
+fs_type:    .reserve 4
+fat_lba:    .reserve 4
+fat_sz:     .reserve 4
+nfats:      .reserve 4
+root_lba:   .reserve 4
+root_secs:  .reserve 4
+root_clus:  .reserve 4
+data_lba:   .reserve 4
+spc:        .reserve 4
+clus_bytes: .reserve 4
+nclus:      .reserve 4
+fs_serial:  .reserve 4
+fs_free:    .reserve 4
+free_hint:  .reserve 4
+fsinfo_lba: .reserve 4
+sb_lba:     .reserve 4
+sb_dirty:   .reserve 4
+fc_sec:     .reserve 4
+fc_dirty:   .reserve 4
+d_lba:      .reserve 4
+d_left:     .reserve 4
+d_clus:     .reserve 4
+d_idx:      .reserve 4
+d_cur:      .reserve 4
+d_end:      .reserve 4
+e_lba:      .reserve 4
+e_off:      .reserve 4
+f_lba:      .reserve 4
+f_off:      .reserve 4
+lfn_n:      .reserve 4
+lfn:        .reserve 160
+bat_ptr:    .reserve 4
+bat_end:    .reserve 4
+redir_h:    .reserve 4
+quiet:      .reserve 4
+running:    .reserve 4
+saved_sp:   .reserve 4
+saved_attr: .reserve 4
+tmp:        .reserve 4
+high_ok:    .reserve 4                  ; 後ろ半分を読み込めた
+user_top:   .reserve 4                  ; SDRAM のプログラムが使える終わり（スタックはここから）
+args:       .reserve 4
+handles:    .reserve 32 * NFILES
+ent:        .reserve 32
+dent:       .reserve 32
+name83:     .reserve 12
+newname:    .reserve 12
+vol_label:  .reserve 12
+numbuf:     .reserve 12
+cbuf:       .reserve 4
+linebuf:    .reserve 128
+batargs:    .reserve 128
+cmdbuf:     .reserve 128
+conbuf:     .reserve 128
+bss_end:
+
+; ==================================================================
+; 後ろ半分：SDRAM の上（HIGH_BASE〜、64KB まで）で動く。MYDOS.SYS の 24KB から後ろにあり、
+; 起動時に load_high が読み込む（BIOS が読むのは前の 24KB だけ）。組み込みのコマンドはここ
+; ==================================================================
+        .org 0x26000
+        .phase HIGH_BASE
+high_start:
+        .ascii "HIGH"                   ; 読み込めたかの印
+
 cmd_help:
         ADDI32 r16, r0, s_help
         JMP32 puts
@@ -3049,9 +3208,6 @@ cmd_led:
         ADDI32 sp, sp, 8
         RET32
 
-s_banner:   .asciz "MyDOS Version 3.0\n(C)Copyright MyCPU Project 2026.\n"
-s_prompt:   .asciz "C:\\>"
-s_bad:      .asciz "Bad command or file name\n"
 s_ver:      .asciz "\nMyDOS Version 3.0 (MyCPU-32, FAT16/FAT32)\n"
 s_help:     .ascii "CLS       Clears the screen.\n"
             .ascii "COLOR xy  Sets colors (x = background, y = text, hex). COLOR alone resets.\n"
@@ -3079,119 +3235,28 @@ s_files:    .asciz " file(s)"
 s_bytes:    .asciz " bytes\n"
 s_free:     .asciz " bytes free\n"
 s_freekb:   .asciz " KB free\n"
-s_notready: .asciz "Not ready reading drive C\n"
 s_notfound: .asciz "File not found\n"
 s_missing:  .asciz "Required parameter missing\n"
 s_denied:   .asciz "Access denied\n"
 s_toomany:  .asciz "Too many open files\n"
 s_diskfull: .asciz "Insufficient disk space\n"
-s_createerr: .asciz "File creation error\n"
-s_readerr:  .asciz "Read error reading drive C\n"
-s_toobig:   .asciz "Program too big to fit in memory\n"
-s_badexe:   .asciz "Invalid EXE file\n"
 s_dupname:  .asciz "Duplicate file name or file not found\n"
 s_onto:     .asciz "File cannot be copied onto itself\n"
 s_copied0:  .asciz "        0 file(s) copied\n"
 s_copied1:  .asciz "        1 file(s) copied\n"
 s_ctrlz:    .asciz "^Z\n"
-s_term:     .asciz "\nProgram terminated: "
-s_fault_align: .asciz "alignment error"
-s_fault_priv:  .asciz "privileged instruction"
-s_fault_div:   .asciz "divide by zero"
-s_fault_other: .asciz "exception"
-s_at:       .asciz " at "
 s_mem:      .ascii "\n   49152 bytes total memory\n"
             .ascii "   24576 bytes for MyDOS    (0x20000-0x25FFF)\n"
             .ascii "   20480 bytes for programs (0x26000-0x2AFFF)\n"
             .asciz "    4096 bytes for BIOS     (0x2B000-0x2BFFF)\n"
-s_mem_sdram: .asciz " bytes SDRAM        (0x1000000-0x17FFFFF, free for programs)\n"
+s_mem_sdram: .ascii " bytes SDRAM        (0x1000000-)\n"
+            .ascii " 8323072 bytes for programs (0x1000000-0x17EFFFF)\n"
+            .asciz "   65536 bytes for MyDOS    (0x17F0000-0x17FFFFF, built-in commands)\n"
 s_uptime:   .asciz "Uptime: "
 s_sec:      .asciz " seconds\n"
 s_color_usage: .asciz "Usage: COLOR xy  (x = background, y = text, 0-F)\n"
 s_led_usage:   .asciz "Usage: LED xx  (hex, lower 6 bits)\n"
 s_safe:     .asciz "\n\n          It's now safe to turn off your computer.\n"
-s_autoexec: .asciz "AUTOEXEC.BAT"
-badchars:   .asciz "*?/\\:\"<>|+=,;[]"
-x_exe:      .ascii "EXE"
-x_com:      .ascii "COM"
-x_bat:      .ascii "BAT"
 x_con:      .ascii "CON        "
-exts:       .ascii "EXE\0COM\0BAT\0\0"
-c_cls:      .asciz "CLS"
-c_color:    .asciz "COLOR"
-c_copy:     .asciz "COPY"
-c_del:      .asciz "DEL"
-c_erase:    .asciz "ERASE"
-c_dir:      .asciz "DIR"
-c_echo:     .asciz "ECHO"
-c_help:     .asciz "HELP"
-c_led:      .asciz "LED"
-c_mem:      .asciz "MEM"
-c_reboot:   .asciz "REBOOT"
-c_ren:      .asciz "REN"
-c_rename:   .asciz "RENAME"
-c_shutdown: .asciz "SHUTDOWN"
-c_time:     .asciz "TIME"
-c_type:     .asciz "TYPE"
-c_ver:      .asciz "VER"
-c_vol:      .asciz "VOL"
-
-; ---- 変数（起動時に 0 にする。MYDOS.SYS には入らない） ----
-        .align 4
-bss_start:
-fs_ok:      .reserve 4
-exehdr:     .reserve 16                 ; .EXE のヘッダ
-prog_base:  .reserve 4                  ; 実行中のプログラムを読み込んだ番地
-fs_type:    .reserve 4
-fat_lba:    .reserve 4
-fat_sz:     .reserve 4
-nfats:      .reserve 4
-root_lba:   .reserve 4
-root_secs:  .reserve 4
-root_clus:  .reserve 4
-data_lba:   .reserve 4
-spc:        .reserve 4
-clus_bytes: .reserve 4
-nclus:      .reserve 4
-fs_serial:  .reserve 4
-fs_free:    .reserve 4
-free_hint:  .reserve 4
-fsinfo_lba: .reserve 4
-sb_lba:     .reserve 4
-sb_dirty:   .reserve 4
-fc_sec:     .reserve 4
-fc_dirty:   .reserve 4
-d_lba:      .reserve 4
-d_left:     .reserve 4
-d_clus:     .reserve 4
-d_idx:      .reserve 4
-d_cur:      .reserve 4
-d_end:      .reserve 4
-e_lba:      .reserve 4
-e_off:      .reserve 4
-f_lba:      .reserve 4
-f_off:      .reserve 4
-lfn_n:      .reserve 4
-lfn:        .reserve 160
-bat_ptr:    .reserve 4
-bat_end:    .reserve 4
-redir_h:    .reserve 4
-quiet:      .reserve 4
-running:    .reserve 4
-saved_sp:   .reserve 4
-saved_attr: .reserve 4
-tmp:        .reserve 4
-args:       .reserve 4
-handles:    .reserve 32 * NFILES
-ent:        .reserve 32
-dent:       .reserve 32
-name83:     .reserve 12
-newname:    .reserve 12
-vol_label:  .reserve 12
-numbuf:     .reserve 12
-cbuf:       .reserve 4
-linebuf:    .reserve 128
-batargs:    .reserve 128
-cmdbuf:     .reserve 128
-conbuf:     .reserve 128
-bss_end:
+high_end:
+        .dephase

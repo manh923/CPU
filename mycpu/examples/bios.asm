@@ -24,7 +24,7 @@ COLS        = 160
 ROWS        = 45
 OS_BASE     = 0x00020000                ; MYDOS.SYS・UART 起動のプログラムを置く場所（内蔵 RAM の先頭）
 OS_MAX      = 0xB000                    ; UART 起動で読み込めるのは 0x20000〜0x2AFFF（44KB）まで
-SYS_MAX     = 0x6000                    ; MYDOS.SYS は 24KB まで（0x26000 からはプログラム用）
+SYS_MAX     = 0x6000                    ; MYDOS.SYS の前の 24KB だけ読む（0x26000 からはプログラム用。後ろは MyDOS が自分で読む）
 SD_DATA     = 0x00010030                ; SPI：書くと 1 バイト送り、読むと受け取った 1 バイト
 SD_CTRL     = 0x00010034                ; bit0 = CS（1 で選ぶ）、bit15〜8 = SCK の分周
 SD_STATUS   = 0x00010038                ; bit0 = 送受信中
@@ -1315,9 +1315,9 @@ load_sys:
         LOAD32_32 r25, r24, 28          ; 大きさ
         CMPEQI32 p1, r25, 0
         BR32 p1, .fail
-        ADDI32 r16, r0, SYS_MAX
+        ADDI32 r16, r0, SYS_MAX         ; 大きければ前の SYS_MAX バイトだけ
         CMPLTUR32 p1, r16, r25
-        BR32 p1, .fail
+        SEL32 r25, r16, r25, p1
         ADDI32 r24, r0, OS_BASE         ; r24 = 書く先、r25 = 終わり
         ADDI32 r25, r25, OS_BASE
 .clus:  CMPLTUI32 p1, r26, 2
