@@ -24,16 +24,21 @@
     // 内蔵 RAM は 40KB：0x28000〜0x29FFF はない（BSRAM をデータキャッシュに回した）。0x2A000〜 はデータだけ（命令は読めない）
     RAM_HOLE_BASE: 0x00028000, RAM_HOLE_SIZE: 8 * 1024, RAM_DATA_BASE: 0x0002A000,
     SDRAM_BASE: 0x01000000, SDRAM_SIZE: 8 * 1024 * 1024,
+    // 同じ SDRAM を、データキャッシュを通さずに読み書きする番地（グラフィックのフレームバッファ用。7.3）
+    SDRAM_UC_BASE: 0x02000000,
   };
   var IO = {
     UART_TX: 0x00, UART_STATUS: 0x04, UART_RX: 0x08,
     TIMER_COUNT: 0x10, TIMER_CMP: 0x14, TIMER_CTRL: 0x18,
     LED: 0x20,
     SD_DATA: 0x30, SD_CTRL: 0x34, SD_STATUS: 0x38,
+    VIDEO_MODE: 0x40, FB_BASE: 0x44, PAL_INDEX: 0x48, PAL_DATA: 0x4C,   // 7.3
   };
   var IRQ = { UART_RX: 0, TIMER: 1 };
   var CAUSE = { ILLEGAL: 0, ALIGN: 1, PRIV: 2, SYSCALL: 3, DIVZERO: 4, RESET: 0xFFFF };
   var TEXT = { COLS: 160, ROWS: 45, CELL_W: 8, CELL_H: 16 };
+  // グラフィック（7.3）：320 × 200・256 色を 3 倍にして 720p の真ん中（左上が 160, 60）に。FB_BASE の最初の値
+  var GFX = { W: 320, H: 200, SCALE: 3, X0: 160, Y0: 60, FB_DEFAULT: 0x017E0000 };
 
   // レジスタの種類（3.2）
   function regKind(n) {
@@ -144,7 +149,7 @@
 
   return {
     OPCODES: OPCODES, WIDTH_BITS: WIDTH_BITS, INSN_LEN: INSN_LEN,
-    SPECIAL: SPECIAL, MAP: MAP, IO: IO, IRQ: IRQ, CAUSE: CAUSE, TEXT: TEXT,
+    SPECIAL: SPECIAL, MAP: MAP, IO: IO, IRQ: IRQ, CAUSE: CAUSE, TEXT: TEXT, GFX: GFX,
     byOpcode: byOpcode, byMnemonic: byMnemonic,
     regKind: regKind, regName: regName, parseReg: parseReg, checkReg: checkReg,
     encodeHeader: encodeHeader, decodeHeader: decodeHeader, disasm: disasm,

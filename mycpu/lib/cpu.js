@@ -37,6 +37,7 @@
     this.ram = new Uint8Array(MAP.RAM_SIZE);
     this.sdram = null; // 使ったときに確保（8MB）
     this.vramDirty = new Uint8Array(isa.TEXT.COLS * isa.TEXT.ROWS);
+    this.palette = new Uint32Array(256);   // パレット：電源を入れたときは全部黒。リセットでは変わらない（Verilog も同じ）
     this.vramChanged = false;
     this.decodeCache = new Map();
     this.reset();
@@ -56,6 +57,7 @@
     this.timerBase = 0; this.timerCmp = 0; this.timerEn = false;
     this.led = 0;
     this.sdCtrl = 0; this.sdRx = 0xFF;
+    this.videoMode = 0; this.fbBase = isa.GFX.FB_DEFAULT; this.palIndex = 0;
     this.steps = 0;
     this.ticks = 0;
     this.wfi = false;
@@ -117,6 +119,11 @@
       if (!this.sdram) this.sdram = new Uint8Array(MAP.SDRAM_SIZE);
       return { mem: this.sdram, off: a - MAP.SDRAM_BASE };
     }
+    // キャッシュを通さない SDRAM（シミュレータにはキャッシュがないので、同じもの）
+    if (a >= MAP.SDRAM_UC_BASE && a + size <= MAP.SDRAM_UC_BASE + MAP.SDRAM_SIZE) {
+      if (!this.sdram) this.sdram = new Uint8Array(MAP.SDRAM_SIZE);
+      return { mem: this.sdram, off: a - MAP.SDRAM_UC_BASE };
+    }
     return null;
   };
 
@@ -170,6 +177,10 @@
       case IO.SD_DATA: return this.sdRx;
       case IO.SD_CTRL: return this.sdCtrl;
       case IO.SD_STATUS: return 0;   // 送受信は一瞬で終わる
+      case IO.VIDEO_MODE: return this.videoMode;
+      case IO.FB_BASE: return this.fbBase;
+      case IO.PAL_INDEX: return this.palIndex;
+      case IO.PAL_DATA: return this.palette[this.palIndex];
       default: return 0;
     }
   };
@@ -187,6 +198,14 @@
       case IO.SD_CTRL:
         if ((this.sdCtrl & 1) && !(v & 1) && this.sd) this.sd.deselect();
         this.sdCtrl = v & 0xFF01;
+        break;
+      case IO.VIDEO_MODE: this.videoMode = v & 1; this.vramChanged = true; break;
+      case IO.FB_BASE: this.fbBase = (v & 0x007FFFC0) | MAP.SDRAM_BASE; this.vramChanged = true; break;   // SDRAM の中、64 バイト単位
+      case IO.PAL_INDEX: this.palIndex = v & 0xFF; break;
+      case IO.PAL_DATA:                   // 書くと番号が 1 進む
+        this.palette[this.palIndex] = v & 0xFFFFFF;
+        this.palIndex = (this.palIndex + 1) & 0xFF;
+        this.vramChanged = true;
         break;
     }
   };

@@ -8,8 +8,8 @@ The ROM holds only the BIOS. It loads MYDOS.SYS from this SD card
 
 Programs run in user mode and talk to MyDOS with SYSCALL (like INT 21h).
 If a program crashes, MyDOS stops it and comes back to C:\>.
-Programs may use the SDRAM (0x1000000-0x17EFFFF) freely.
-The last 64 KB holds the second half of MyDOS.
+Programs may use the SDRAM (0x1000000-0x17DFFFF) freely.
+Then come the graphics frame buffer (64 KB) and the second half of MyDOS.
 
 Programs
   HELLO.EXE    Says hello. Try HELLO yourname.
@@ -23,6 +23,15 @@ Programs
   DEMO.BAT     A batch file that runs some of the above.
   PRIMES.EXE   Prime numbers (written in C).
   EDIT.EXE     A full-screen text editor. EDIT NOTE.TXT (Ctrl-S, Ctrl-X).
+  GDEMO.EXE    The Mandelbrot set on the 320x200 256-color graphics
+               screen (written in C with GFX.H). Press a key to quit.
+  BLOCKS.EXE   A block-breaking game on the graphics screen. Left/Right
+               (or A/D) move the paddle, Space serves, ESC quits.
+               Until you press a key, it plays by itself.
+  LIFE.EXE     A cellular automaton on the whole graphics screen. Colors
+               show the age of each cell. Enter runs/stops, arrows (WASD
+               for 8) move the cursor, Space flips a cell, N steps,
+               R fills at random, C clears, G puts a glider gun, ESC quits.
 
 The C compiler is on this card too:
   CC.EXE       chibicc, compiled for this CPU. CC FILE.C writes FILE.S.

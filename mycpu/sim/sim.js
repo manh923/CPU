@@ -189,7 +189,7 @@ function main() {
       else fs.writeFileSync(o.regs, cpu.dumpRegs());
     }
     if (o.png || o.ppm) {
-      const rgb = video.render(cpu.vram);
+      const rgb = video.renderCpu(cpu);
       if (o.png) fs.writeFileSync(o.png, png(rgb, video.WIDTH, video.HEIGHT));
       if (o.ppm) fs.writeFileSync(o.ppm, ppm(rgb, video.WIDTH, video.HEIGHT));
     }

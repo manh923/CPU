@@ -46,6 +46,7 @@ BIOS_SDWRITE = 0x68
 BIOS_SETATTR = 0x78
 TIMER_COUNT  = 0x00010010
 LED          = 0x00010020
+VIDEO_MODE   = 0x00010040               ; 0 = テキスト、1 = グラフィック（7.3）
 VRAM         = 0x00018000
 COLS         = 160
 ROWS         = 45
@@ -56,6 +57,7 @@ USER_FAULT   = BDA + 24
 SDRAM_KB     = BDA + 28                 ; BIOS が調べた SDRAM の大きさ（KB）
 SDRAM        = 0x01000000               ; SDRAM の先頭（.EXE をここに読み込んでもよい）
 HIGH_BASE    = 0x017F0000               ; MyDOS の後ろ半分を置く場所（8MB の SDRAM の最後の 64KB）
+FB_AREA      = 0x017E0000               ; グラフィックのフレームバッファ（64KB。FB_BASE の最初の値）。プログラムには使わせない
 HIGH_MAX     = 0x10000
 RPATH_MAX    = 80                       ; パスの文字列（cwd_path・rpath）の大きさ
 HIGH_FILE    = 0x6000                   ; MYDOS.SYS の中で、後ろ半分が始まる位置（BIOS が読むのは ここまで）
@@ -160,7 +162,7 @@ dos_vectors:                            ; SYSCALL の表に入れる MyDOS の�
         .word -1
 
 ; load_high()：MYDOS.SYS の HIGH_FILE から後ろ（後ろ半分）を HIGH_BASE に読み込む。SDRAM が 8MB なければ読まない。
-; 読めたら high_ok ← 1、SDRAM のプログラムが使えるのは user_top（HIGH_BASE）まで
+; 読めたら high_ok ← 1、SDRAM のプログラムが使えるのは user_top（FB_AREA。その後ろはフレームバッファと後ろ半分）まで
 load_high:
         ADDI32 sp, sp, -8
         STORE32_32 lr, sp, 0
@@ -189,7 +191,7 @@ load_high:
         BR32 p1, .ret
         ADDI32 r16, r0, 1
         STORE32_32 r16, r0, high_ok
-        ADDI32 r16, r0, HIGH_BASE
+        ADDI32 r16, r0, FB_AREA         ; その手前の 64KB はフレームバッファ
         STORE32_32 r16, r0, user_top
 .ret:   LOAD32_32 lr, sp, 0
         LOAD32_32 r24, sp, 4
@@ -1192,6 +1194,7 @@ run_prog:
         ADDI32 status, r0, 0
         STORE32_32 r0, r0, running
         CALL32 close_all                ; 開けたままのファイルを閉じる
+        STORE32_32 r0, r0, VIDEO_MODE   ; グラフィックのままならテキストに戻す
         LOAD32_32 r16, r0, saved_attr
         CALL32 BIOS_SETATTR
         JMP32 .ret
@@ -3976,7 +3979,8 @@ s_mem:      .ascii "\n   40960 bytes total memory\n"
             .ascii "    4096 bytes free, data   (0x2A000-0x2AFFF)\n"
             .asciz "    4096 bytes for BIOS     (0x2B000-0x2BFFF)\n"
 s_mem_sdram: .ascii " bytes SDRAM        (0x1000000-)\n"
-            .ascii " 8323072 bytes for programs (0x1000000-0x17EFFFF)\n"
+            .ascii " 8257536 bytes for programs (0x1000000-0x17DFFFF)\n"
+            .ascii "   65536 bytes for graphics (0x17E0000-0x17EFFFF, 320x200 frame buffer)\n"
             .asciz "   65536 bytes for MyDOS    (0x17F0000-0x17FFFFF, built-in commands)\n"
 s_uptime:   .asciz "Uptime: "
 s_sec:      .asciz " seconds\n"

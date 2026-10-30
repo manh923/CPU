@@ -1,6 +1,7 @@
-// テキスト VRAM を絵にする（7.1）。Verilog の表示回路と同じ規則で描く。
-//   1 文字 2 バイト：偶数番地 = 文字コード、奇数番地 = 色（下位 4bit 文字色、上位 4bit 背景色）
-//   160 × 45 文字、1 文字 8 × 16 ドット → 1280 × 720
+// 画面を絵にする。Verilog の表示回路と同じ規則で描く。
+//   テキスト（7.1）：1 文字 2 バイト：偶数番地 = 文字コード、奇数番地 = 色（下位 4bit 文字色、上位 4bit 背景色）
+//     160 × 45 文字、1 文字 8 × 16 ドット → 1280 × 720
+//   グラフィック（7.3）：SDRAM のフレームバッファ（320 × 200、1 点 1 バイト = パレットの番号）を 3 倍にして真ん中に
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory(require('./isa.js'), require('./font.js'));
   else root.MyCPU.video = factory(root.MyCPU.isa, root.MyCPU.FONT);
@@ -54,5 +55,29 @@
     return lines.join('\n');
   }
 
-  return { WIDTH: WIDTH, HEIGHT: HEIGHT, PALETTE: PALETTE, drawCell: drawCell, render: render, text: text };
+  // グラフィック：sdram は SDRAM の中身（Uint8Array）、fbBase はフレームバッファの番地、palette は 0xRRGGBB × 256
+  var G = isa.GFX;
+  function renderGfx(sdram, fbBase, palette, out, stride) {
+    stride = stride || 3;
+    out = out || new Uint8Array(WIDTH * HEIGHT * stride);
+    var fb = fbBase - isa.MAP.SDRAM_BASE;
+    for (var y = 0; y < HEIGHT; y++) {
+      var gy = Math.floor((y - G.Y0) / G.SCALE), o = y * WIDTH * stride;
+      for (var x = 0; x < WIDTH; x++, o += stride) {
+        var gx = Math.floor((x - G.X0) / G.SCALE), c = 0;
+        if (gx >= 0 && gx < G.W && gy >= 0 && gy < G.H) c = palette[sdram ? sdram[fb + gy * G.W + gx] : 0];
+        out[o] = c >> 16; out[o + 1] = (c >> 8) & 255; out[o + 2] = c & 255;
+        if (stride === 4) out[o + 3] = 255;
+      }
+    }
+    return out;
+  }
+
+  // CPU（lib/cpu.js）の今の画面
+  function renderCpu(cpu, out, stride) {
+    return cpu.videoMode ? renderGfx(cpu.sdram, cpu.fbBase, cpu.palette, out, stride) : render(cpu.vram, out, stride);
+  }
+
+  return { WIDTH: WIDTH, HEIGHT: HEIGHT, PALETTE: PALETTE, drawCell: drawCell, render: render, text: text,
+    renderGfx: renderGfx, renderCpu: renderCpu };
 });

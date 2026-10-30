@@ -193,7 +193,7 @@ const cases = [];
     check(`MyDOS（${type}）：ユーザーモードのプログラム（SYSCALL）`, o.includes(nl('Hello, World!\n')) && o.includes(nl('Hello, claude!\n')) &&
       o.includes(nl('fib(12) = 144\n')) && o.includes('LED chaser'), '');
     check(`MyDOS（${type}）：SDRAM に読み込む .EXE（スタックも SDRAM）`,
-      o.includes(nl('Hello from SDRAM! PC = 01000024, SP = 017EFFF8\nRecursion depth: 10000\n')), '');
+      o.includes(nl('Hello from SDRAM! PC = 01000024, SP = 017DFFF8\nRecursion depth: 10000\n')), '');
     check(`MyDOS（${type}）：C で書いたプログラム（PRIMES.EXE、cc/ と libc/ で作る）`,
       o.includes(nl('=== MyCPU Prime Search ===\nSearching primes from 2 to 1000...\nFound: 10 primes\n')) &&
       o.includes(nl('Found: 160 primes\nSearch complete!\nTotal primes: 168\n')), '');
@@ -279,6 +279,7 @@ const cases = [];
     { name: 'fib', file: 'fib.asm', max: 60_000_000 },
     { name: 'console', file: 'console.asm', input },
     { name: 'colors', file: 'colors.asm', ppm: true },
+    { name: 'gfx', file: 'gfx.asm', ppm: true },   // グラフィック画面（SDRAM のフレームバッファ・パレット）
   );
 }
 
@@ -417,7 +418,7 @@ if (spawnSync('iverilog', ['-V']).error) {
       check(`${c.name}：レジスタが一致`, regs === sim.cpu.dumpRegs(), regs + '≠\n' + sim.cpu.dumpRegs());
     }
     if (c.ppm) {
-      const want = Buffer.concat([Buffer.from(`P6\n${video.WIDTH} ${video.HEIGHT}\n255\n`), Buffer.from(video.render(sim.cpu.vram))]);
+      const want = Buffer.concat([Buffer.from(`P6\n${video.WIDTH} ${video.HEIGHT}\n255\n`), Buffer.from(video.renderCpu(sim.cpu))]);
       const got = fs.readFileSync(base + '.ppm');
       let diff = -1;
       for (let i = 0; i < want.length; i++) if (want[i] !== got[i]) { diff = i; break; }

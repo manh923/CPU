@@ -39,12 +39,18 @@ module tb;
     .sd_sclk(sd_sclk), .sd_mosi(sd_mosi), .sd_miso(sd_miso), .sd_cs_n(sd_cs_n),
     .sdram_clk(dr_clk), .sdram_cke(dr_cke), .sdram_cs_n(dr_cs_n), .sdram_ras_n(dr_ras_n), .sdram_cas_n(dr_cas_n),
     .sdram_we_n(dr_we_n), .sdram_a(dr_a), .sdram_ba(dr_ba), .sdram_dqm(dr_dqm), .sdram_dq(dr_dq),
-    .halted(halted), .halt_code(halt_code), .vclk(vclk), .vaddr(vaddr), .vdata(vdata)
+    .halted(halted), .halt_code(halt_code), .vclk(vclk), .vaddr(vaddr), .vdata(vdata),
+    .gaddr(gaddr), .gdata(gdata), .paddr(paddr), .pdata(pdata), .gmode(gmode), .greq_t(greq_t), .greq_y(greq_y)
   );
   wire [7:0] r, g, b;
   wire hs, vs, de;
+  wire [7:0]  gaddr, paddr, greq_y;
+  wire [31:0] gdata;
+  wire [23:0] pdata;
+  wire        gmode, greq_t;
   mycpu_video #(.FONT_HEX(FONT_HEX)) video (
-    .pclk(vclk), .rst(rst), .vaddr(vaddr), .vdata(vdata), .r(r), .g(g), .b(b), .hs(hs), .vs(vs), .de(de)
+    .pclk(vclk), .rst(rst), .vaddr(vaddr), .vdata(vdata), .r(r), .g(g), .b(b), .hs(hs), .vs(vs), .de(de),
+    .gmode(gmode), .gaddr(gaddr), .gdata(gdata), .paddr(paddr), .pdata(pdata), .greq_t(greq_t), .greq_y(greq_y)
   );
 
   reg [1023:0] path;
