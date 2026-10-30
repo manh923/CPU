@@ -1303,7 +1303,7 @@ run_batch:
         CMPGEUR32 p1, r16, r17
         BR32 p1, .ret
         ADDI32 r18, r0, linebuf
-        ADDI32 r20, r0, linebuf + 127
+        ADDI32 r20, r0, linebuf + 191
 .c:     CMPGEUR32 p1, r16, r17
         BR32 p1, .eol
         LOAD8U_32 r19, r16, 0
@@ -3146,7 +3146,7 @@ rpath:      .reserve RPATH_MAX          ; path83 がたどったディレクト�
 vol_label:  .reserve 12
 numbuf:     .reserve 40                 ; fmtdec の置き場（幅 28 まで右寄せ）
 cbuf:       .reserve 4
-linebuf:    .reserve 128
+linebuf:    .reserve 192                ; 1 行（.BAT の行は 191 文字まで）
 batargs:    .reserve 128
 cmdbuf:     .reserve 128
 conbuf:     .reserve 128

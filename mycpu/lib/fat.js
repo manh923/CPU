@@ -3,7 +3,8 @@
 //     files = [{ name: 'HELLO.EXE', data: Uint8Array, longName?: 'hello-world.exe' }]
 //   disk.sectors / disk.read(lba) → Uint8Array(512) / disk.toBuffer() → Uint8Array（イメージ全体）
 // 中身のあるセクタだけ覚えておくので、大きなイメージでも軽い。
-// ファイルはルートディレクトリに置く。longName を付けると長いファイル名（LFN）の項目も書く。
+// name に「/」か「\」があればサブディレクトリに置く（'INCLUDE/STDIO.H'。ディレクトリは作る）。
+// longName を付けると長いファイル名（LFN）の項目も書く。
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory();
   else root.MyCPU.fat = factory();
@@ -163,31 +164,63 @@
     }
     function clusLba(c) { return dataLba + (c - 2) * spc; }
 
-    var entries = [];
-    var vol = ascii(label, 11).concat([0x08], new Array(20).fill(0));
-    entries.push(vol);
-    var rootClus = 0;
-    var dirBytes = (files.length * 4 + 2) * 32;  // LFN の分も見込んでおく
-    if (fat32) rootClus = alloc(Math.ceil(dirBytes / (spc * 512)));
-
+    // ディレクトリの木：{ files: [ファイル], dirs: Map(名前 → ディレクトリ), clus, parent }
+    function newDir(parent) { return { files: [], dirs: new Map(), clus: 0, parent: parent }; }
+    var root = newDir(null);
     files.forEach(function (f) {
-      var sn = shortName(f.name);
-      if (f.longName) lfnEntries(f.longName, sn).forEach(function (e) { entries.push(e); });
-      var size = f.data.length;
-      var first = size ? alloc(Math.ceil(size / (spc * 512))) : 0;
-      if (first) disk.write(clusLba(first), 0, f.data);
-      var d = f.date || date;
-      entries.push(sn.concat([0x20, 0, 0], le(2, fatTime(d)), le(2, fatDate(d)), le(2, fatDate(d)),
-        le(2, first >> 16), le(2, fatTime(d)), le(2, fatDate(d)), le(2, first & 0xFFFF), le(4, size)));
+      var parts = f.name.split(/[\/\\]/), d = root;
+      for (var i = 0; i < parts.length - 1; i++) {
+        var key = parts[i].toUpperCase();
+        shortName(key);
+        if (!d.dirs.has(key)) d.dirs.set(key, newDir(d));
+        d = d.dirs.get(key);
+      }
+      d.files.push({ f: f, name: parts[parts.length - 1] });
     });
-    if (next - 2 > clusters) throw new Error('ファイルが入りきらない');
-
-    var dirData = [].concat.apply([], entries);
-    if (fat32) disk.write(clusLba(rootClus), 0, dirData);
-    else {
-      if (entries.length > rootEnts) throw new Error('ルートディレクトリがいっぱい');
-      disk.write(rootLba, 0, dirData);
+    function lfnCount(f) { return f.longName ? Math.ceil((f.longName.length + 1) / 13) : 0; }
+    function entryCount(d) {
+      var n = d === root ? 1 : 2;                 // ルートはボリュームラベル、ほかは「.」「..」
+      d.files.forEach(function (x) { n += 1 + lfnCount(x.f); });
+      return n + d.dirs.size;
     }
+    // ディレクトリのクラスタを先に取る（FAT32 のルートも。FAT16 のルートは決まった場所）
+    (function place(d) {
+      if (d !== root || fat32) d.clus = alloc(Math.max(1, Math.ceil(entryCount(d) * 32 / (spc * 512))));
+      d.dirs.forEach(place);
+    })(root);
+    var rootClus = root.clus;
+
+    function dirEntry(sn, attr, first, size, d) {
+      return sn.concat([attr, 0, 0], le(2, fatTime(d)), le(2, fatDate(d)), le(2, fatDate(d)),
+        le(2, first >> 16), le(2, fatTime(d)), le(2, fatDate(d)), le(2, first & 0xFFFF), le(4, size));
+    }
+    function writeDir(d) {
+      var entries = [];
+      if (d === root) entries.push(ascii(label, 11).concat([0x08], new Array(20).fill(0)));
+      else {
+        entries.push(dirEntry(ascii('.', 11), 0x10, d.clus, 0, date));
+        entries.push(dirEntry(ascii('..', 11), 0x10, d.parent === root ? 0 : d.parent.clus, 0, date));
+      }
+      d.files.forEach(function (x) {
+        var f = x.f, sn = shortName(x.name);
+        if (f.longName) lfnEntries(f.longName, sn).forEach(function (e) { entries.push(e); });
+        var size = f.data.length;
+        var first = size ? alloc(Math.ceil(size / (spc * 512))) : 0;
+        if (first) disk.write(clusLba(first), 0, f.data);
+        entries.push(dirEntry(sn, 0x20, first, size, f.date || date));
+      });
+      d.dirs.forEach(function (sub, name) { entries.push(dirEntry(shortName(name), 0x10, sub.clus, 0, date)); });
+      var data = [].concat.apply([], entries);
+      if (d === root && !fat32) {
+        if (entries.length > rootEnts) throw new Error('ルートディレクトリがいっぱい');
+        disk.write(rootLba, 0, data);
+      } else {
+        disk.write(clusLba(d.clus), 0, data);
+      }
+      d.dirs.forEach(writeDir);
+    }
+    writeDir(root);
+    if (next - 2 > clusters) throw new Error('ファイルが入りきらない');
 
     // FAT（2 つとも同じ）
     var fatBytes = [];

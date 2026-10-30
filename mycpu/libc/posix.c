@@ -1,5 +1,5 @@
 // POSIX のほんの一部（unistd.h・sys/stat.h・glob.h・libgen.h・strings.h）。chibicc を MyDOS で動かすため。
-// MyDOS にはディレクトリもプロセスもないので、多くは「いつも失敗する」だけ
+// MyDOS にはプロセスがないので、fork などは「いつも失敗する」だけ。ディレクトリ（mkdir・chdir など）は MyDOS の SYSCALL で
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -11,6 +11,48 @@
 #include <errno.h>
 #include <ctype.h>
 #include <string.h>
+#include <mycpu.h>
+
+// MyDOS のエラー（負の数）→ errno
+static int dos_err(int r) {
+  static int map[] = {0, EBADF, ENOENT, EMFILE, ENOSPC, EACCES, EINVAL, EIO};
+  errno = (r < 0 && r >= -7) ? map[-r] : EIO;
+  return -1;
+}
+
+static int dir_call(int n, const char *path) {
+  char name[DOSPATH];
+  int r = __syscall(n, (int)__mycpu_dosname(path, name), 0, 0);
+  return r < 0 ? dos_err(r) : 0;
+}
+
+int mkdir(const char *path, mode_t mode) { return dir_call(SYS_MKDIR, path); }
+int rmdir(const char *path) { return dir_call(SYS_RMDIR, path); }
+int chdir(const char *path) { return dir_call(SYS_CHDIR, path); }
+
+// 今のディレクトリ（"C:\INCLUDE" のように）。buf が NULL なら malloc する
+char *getcwd(char *buf, size_t size) {
+  char tmp[DOSPATH];
+  int r = __syscall(SYS_GETCWD, (int)tmp, sizeof(tmp), 0);
+  if (r < 0) {
+    errno = EIO;
+    return 0;
+  }
+  if (!buf) {
+    size = size > (size_t)r ? size : (size_t)r + 1;
+    buf = malloc(size);
+    if (!buf) {
+      errno = ENOMEM;
+      return 0;
+    }
+  }
+  if ((size_t)r + 1 > size) {
+    errno = ERANGE;
+    return 0;
+  }
+  memcpy(buf, tmp, r + 1);
+  return buf;
+}
 
 // 大きさを知るために開いて終わりまで seek する
 int stat(const char *name, struct stat *st) {

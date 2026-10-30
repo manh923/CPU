@@ -8,7 +8,8 @@ The ROM holds only the BIOS. It loads MYDOS.SYS from this SD card
 
 Programs run in user mode and talk to MyDOS with SYSCALL (like INT 21h).
 If a program crashes, MyDOS stops it and comes back to C:\>.
-Programs may use the 8 MB SDRAM (0x1000000-0x17FFFFF) freely.
+Programs may use the SDRAM (0x1000000-0x17EFFFF) freely.
+The last 64 KB holds the second half of MyDOS.
 
 Programs
   HELLO.EXE    Says hello. Try HELLO yourname.
@@ -28,9 +29,12 @@ The C compiler is on this card too:
   AS.EXE       The assembler. Links FILE.S with CRT0.S and LIBC.S.
   BUILD.BAT    BUILD NAME = CC NAME.C, then AS. Makes NAME.EXE.
   Try: EDIT HI.C, write a main(), BUILD HI, then HI.
-  The headers (STDIO.H ...) and chibicc's own source are here as well.
+  INCLUDE\     The headers (STDIO.H ...).
+  LIB\         CRT0.S and the C library (LIBC.S, LIBC.BIN, LIBC.SYM).
+  SRC\CC\      chibicc's own source. SELFHOST CC CC2 builds C:\CC2.EXE.
 
 Try writing: COPY CON NOTE.TXT, DIR > LIST.TXT, REN, DEL.
+Directories: MD WORK, CD WORK, CD .., DIR SRC\CC, RD WORK.
 
 Or in assembly: write it with .org 0x26000 (or .org 0x1000000 for a
 big .EXE in SDRAM), then tools/mkdisk.js turns

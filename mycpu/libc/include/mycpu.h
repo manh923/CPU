@@ -24,5 +24,13 @@ int __syscall(int n, int a, int b, int c);
 #define SYS_DELETE  20
 #define SYS_RENAME  21
 #define SYS_SEEK    22
+#define SYS_MKDIR   23
+#define SYS_RMDIR   24
+#define SYS_CHDIR   25
+#define SYS_GETCWD  26
+
+// パスを MyDOS の名前にする（libc/stdio.c）：区切りは \、名前は 1 つずつ 8.3 に縮める。out は DOSPATH バイト
+#define DOSPATH 128
+const char *__mycpu_dosname(const char *path, char *out);
 
 #endif

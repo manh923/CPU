@@ -235,9 +235,11 @@ function dosName(name) {
 }
 
 // MyDOS の上の C コンパイラ一式（disk/ のカードに入れる）：
-//   CC.EXE（cc/ を この CPU 向けにコンパイルしたもの。アセンブル済みのバイト列）、CRT0.S と LIBC.S（リンク用。
-//   libc をコンパイルしてつないだもの）、LIBC.BIN・LIBC.SYM（LIBC.S を先にアセンブルしたもの。AS -lib LIBC で速くつなぐ）、ヘッダ（cc/include・libc/include・libc/include/sys を 8.3 の名前で）、
-//   chibicc のソース（セルフホスト用。preprocess.c → PREPROCE.C）
+//   CC.EXE（cc/ を この CPU 向けにコンパイルしたもの。アセンブル済みのバイト列。ルートに）、
+//   LIB\：CRT0.S と LIBC.S（リンク用。libc をコンパイルしてつないだもの）、LIBC.BIN・LIBC.SYM（LIBC.S を先にアセンブル
+//     したもの。AS -lib \LIB\LIBC で速くつなぐ）、
+//   INCLUDE\：ヘッダ（cc/include と libc/include を 8.3 の名前で。libc/include/sys は INCLUDE\SYS\）、
+//   SRC\CC\：chibicc のソース（セルフホスト用。preprocess.c → PREPROCE.C）
 let compilerCache = null;
 function compilerFiles() {
   const srcs = fs.readdirSync(CC_DIR).filter((f) => /\.[ch]$/.test(f)).sort();
@@ -259,21 +261,18 @@ function compilerFiles() {
   out.push({ name: 'LIBC.S', contents: Buffer.from(libc.join('\n')) });
   const lib = buildLib();
   out.push({ name: 'LIBC.BIN', contents: lib.bin }, { name: 'LIBC.SYM', contents: Buffer.from(lib.sym) });
+  for (const f of out) if (f.name !== 'CC.EXE') f.name = 'LIB/' + f.name;   // CRT0.S・LIBC.*
   const seen = new Set(out.map((f) => f.name));
+  const add = (name, file) => {
+    if (seen.has(name)) throw new Error(`カードの名前がぶつかる：${name}`);
+    seen.add(name);
+    out.push({ name, contents: fs.readFileSync(file) });
+  };
   for (const d of incs) {
-    for (const f of fs.readdirSync(d).filter((f) => f.endsWith('.h')).sort()) {
-      const n = dosName(f);
-      if (seen.has(n)) throw new Error(`カードの名前がぶつかる：${n}`);
-      seen.add(n);
-      out.push({ name: n, contents: fs.readFileSync(path.join(d, f)) });
-    }
+    const dir = d.endsWith('sys') ? 'INCLUDE/SYS/' : 'INCLUDE/';
+    for (const f of fs.readdirSync(d).filter((f) => f.endsWith('.h')).sort()) add(dir + dosName(f), path.join(d, f));
   }
-  for (const f of srcs) {
-    const n = dosName(f);
-    if (seen.has(n)) throw new Error(`カードの名前がぶつかる：${n}`);
-    seen.add(n);
-    out.push({ name: n, contents: fs.readFileSync(path.join(CC_DIR, f)) });
-  }
+  for (const f of srcs) add('SRC/CC/' + dosName(f), path.join(CC_DIR, f));
   compilerCache = { stamp, files: out };
   return out;
 }

@@ -33,6 +33,7 @@ function main(argv) {
       fs.mkdirSync(filesDir, { recursive: true });
       for (const s of sources) {
         const f = makeFile(s.name, s.contents);
+        fs.mkdirSync(path.dirname(path.join(filesDir, f.name)), { recursive: true });   // INCLUDE/ など
         fs.writeFileSync(path.join(filesDir, f.name), f.data);
         console.log(`${f.name.padEnd(12)} ${String(f.data.length).padStart(7)} バイト`);
       }
