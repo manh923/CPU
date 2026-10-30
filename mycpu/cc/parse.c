@@ -31,6 +31,8 @@ typedef struct {
 typedef struct Scope Scope;
 struct Scope {
   Scope *next;
+  int lo;        // MyCPU：入ったときの番号（codegen.c のレジスタの割り当てが使う。ND_BLOCK・ND_FOR の val にも）
+  Obj *mark;     // MyCPU：入ったときの locals（ここから先がこのスコープの変数）
 
   // C has two block scopes; one is for variables/typedefs and
   // the other is for struct/union/enum tags.
@@ -160,13 +162,25 @@ static int align_down(int n, int align) {
   return align_to(n - align + 1, align);
 }
 
+// MyCPU：スコープに番号を付ける（関数ごとに 1 から。入るときと出るときに 1 つずつ進む）。
+// 出るとき、このスコープで作った変数に範囲 [lo, hi] を書く。範囲が重ならない変数は、同時には生きていない
+static int scope_seq;
+
 static void enter_scope(void) {
   Scope *sc = arena_alloc(sizeof(Scope));
   sc->next = scope;
+  sc->lo = ++scope_seq;
+  sc->mark = locals;
   scope = sc;
 }
 
 static void leave_scope(void) {
+  int hi = ++scope_seq;
+  for (Obj *v = locals; v && v != scope->mark; v = v->next)
+    if (!v->sc_hi) {
+      v->sc_lo = scope->lo;
+      v->sc_hi = hi;
+    }
   scope = scope->next;
 }
 
@@ -1650,6 +1664,7 @@ static Node *stmt(Token **rest, Token *tok) {
     tok = skip(tok->next, "(");
 
     enter_scope();
+    node->val = scope->lo;
 
     char *brk = brk_label;
     char *cont = cont_label;
@@ -1779,6 +1794,7 @@ static Node *compound_stmt(Token **rest, Token *tok) {
   Node *cur = &head;
 
   enter_scope();
+  node->val = scope->lo;
 
   while (!equal(tok, "}")) {
     if (is_typename(tok) && !equal(tok->next, ":")) {
@@ -2430,7 +2446,19 @@ static Node *new_add(Node *lhs, Node *rhs, Token *tok) {
     return new_binary(ND_ADD, lhs, rhs, tok);
   }
 
-  // ptr + num
+  // ptr + num。MyCPU：num が「式 ± 定数」なら (ptr + 式) + 定数 × 大きさ にする
+  // （codegen.c の gen_addr_op が、定数の分を読み書きの命令の即値に入れる。p[i + 1] など）
+  //  （足し算の両側には同じ型でもキャストが付いているので、整数どうしの 4 バイトのキャストは外して見る）
+  if ((rhs->kind == ND_ADD || rhs->kind == ND_SUB) && is_integer(rhs->ty) && rhs->ty->size <= 4) {
+    Node *k = rhs->rhs;
+    while (k->kind == ND_CAST && is_integer(k->ty) && k->ty->size == 4 && is_integer(k->lhs->ty) && k->lhs->ty->size == 4)
+      k = k->lhs;
+    if (k->kind == ND_NUM || (is_integer(k->ty) && is_const_expr(k))) {   // 定数の式（マクロ）も
+      int64_t v = k->kind == ND_NUM ? k->val : eval(k);
+      int64_t c = rhs->kind == ND_ADD ? v : -v;
+      return new_binary(ND_ADD, new_add(lhs, rhs->lhs, tok), new_long(c * lhs->ty->base->size, tok), tok);
+    }
+  }
   rhs = scale(rhs, lhs->ty->base->size, tok);
   return new_binary(ND_ADD, lhs, rhs, tok);
 }
@@ -3045,7 +3073,9 @@ static Node *primary(Token **rest, Token *tok) {
   if (equal(tok, "(") && equal(tok->next, "{")) {
     // This is a GNU statement expresssion.
     Node *node = new_node(ND_STMT_EXPR, tok);
-    node->body = compound_stmt(&tok, tok->next->next)->body;
+    Node *blk = compound_stmt(&tok, tok->next->next);
+    node->body = blk->body;
+    node->val = blk->val;               // MyCPU：スコープの番号
     *rest = skip(tok, ")");
     return node;
   }
@@ -3286,6 +3316,7 @@ static Token *function(Token *tok, Type *basety, VarAttr *attr) {
 
   current_fn = fn;
   locals = NULL;
+  scope_seq = 0;
   enter_scope();
   create_param_lvars(ty->params);
 
@@ -3316,6 +3347,7 @@ static Token *function(Token *tok, Type *basety, VarAttr *attr) {
   fn->body = compound_stmt(&tok, tok);
   fn->locals = locals;
   leave_scope();
+  fn->ra_nscopes = scope_seq;
   resolve_goto_labels();
   return tok;
 }
