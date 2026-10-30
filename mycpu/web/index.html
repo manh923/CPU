@@ -256,8 +256,17 @@
     return true;
   }
 
+  var lastMode = 0;
   function redraw(all) {
     if (!cpu) return;
+    // グラフィック画面（7.3）：フレームバッファは SDRAM なので、どこが変わったかわからない。毎回全部描く
+    if (cpu.videoMode) {
+      lastMode = 1;
+      M.video.renderGfx(cpu.sdram, cpu.fbBase, cpu.palette, image.data, 4);
+      ctx.putImageData(image, 0, 0);
+      return;
+    }
+    if (lastMode) { lastMode = 0; all = true; }
     if (all) cpu.vramDirty.fill(1);
     if (!cpu.vramChanged && !all) return;
     cpu.vramChanged = false;

@@ -5,6 +5,7 @@
 //   0x0002_0000 内蔵 RAM 32KB（命令もデータも）
 //   0x0002_A000 内蔵 RAM 8KB（データだけ。BIOS の変数・スタック。0x0002_8000〜0x0002_9FFF はない）
 //   0x0100_0000 SDRAM 8MB（rtl/sdram.v。命令キャッシュとデータキャッシュ（どちらも 8KB）を通す）
+//   0x0200_0000 同じ SDRAM を、データキャッシュを通さずに 1 語ずつ読み書きする（グラフィックのフレームバッファ用）
 // CPU とは「命令の口」と「データの口」の 2 つでつなぐ（rtl/cpu.v の先頭に約束事）。
 // ROM と内蔵 RAM は、偶数番目の 4 バイトと奇数番目の 4 バイトで別のメモリにしてあるので、
 // 命令の口はどこから始まる 8 バイトでも 1 クロックで読める。どちらのメモリも 2 ポートで、
@@ -42,7 +43,17 @@ module mycpu_soc #(
   // 表示回路からの VRAM 読み出し（4 バイト単位の番地、1 クロック後にデータ）
   input  wire        vclk,
   input  wire [11:0] vaddr,
-  output wire [31:0] vdata
+  output wire [31:0] vdata,
+  // グラフィック（7.3。どれも vclk 側）：行バッファ（4 バイト単位の番地、1 クロック後に gdata）・
+  // パレット（1 クロック後に pdata）・モード（clk 側のレジスタ。表示回路で揃える）、
+  // 表示回路からの「この行を読んで」（greq_t が変わるたびに greq_y の行を、行の番号の偶奇の行バッファへ）
+  input  wire [7:0]  gaddr,
+  output reg  [31:0] gdata,
+  input  wire [7:0]  paddr,
+  output reg  [23:0] pdata,
+  output reg         gmode,
+  input  wire        greq_t,
+  input  wire [7:0]  greq_y
 );
   // ---- CPU ----
   wire        i_req, d_req;
@@ -71,12 +82,13 @@ module mycpu_soc #(
   function in_ramb(input [31:0] a);  in_ramb  = a[31:13] == 19'h15;                       endfunction // 0x0002_A000〜0x0002_BFFF（データだけ）
   function in_ram(input [31:0] a);   in_ram   = in_rama(a) || in_ramb(a);                 endfunction
   function in_sdram(input [31:0] a); in_sdram = a[31:23] == 9'h2;                         endfunction // 0x0100_0000〜0x017F_FFFF
+  function in_uc(input [31:0] a);    in_uc    = a[31:23] == 9'h4;                         endfunction // 0x0200_0000〜0x027F_FFFF
 
   // データの口
   wire sel_rom = in_rom(d_addr), sel_io = in_io(d_addr), sel_vram = in_vram(d_addr);
-  wire sel_ram = in_ram(d_addr), sel_sdram = in_sdram(d_addr);
+  wire sel_ram = in_ram(d_addr), sel_sdram = in_sdram(d_addr), sel_uc = in_uc(d_addr);
   wire wr = d_wstrb != 4'd0;
-  assign d_err = d_req && (!(sel_rom || sel_io || sel_vram || sel_ram || sel_sdram) || (sel_rom && wr));
+  assign d_err = d_req && (!(sel_rom || sel_io || sel_vram || sel_ram || sel_sdram || sel_uc) || (sel_rom && wr));
   wire d_go = d_req && d_gnt && !d_err;         // このクロックで受け付けた
   wire d_odd = d_addr[2];                        // 奇数番目の 4 バイト
 
@@ -154,9 +166,10 @@ module mycpu_soc #(
   wire [31:0] ic_qe, ic_qo;
   wire        sdr_bvalid;
   wire [31:0] sdram_q;
-  reg         sdr_who;           // SDRAM を使っているのは 0 = データキャッシュ、1 = 命令キャッシュ
+  reg  [1:0]  sdr_who;           // SDRAM を使っているのは
+  localparam [1:0] W_DC = 2'd0, W_IC = 2'd1, W_UC = 2'd2, W_VID = 2'd3;   // データキャッシュ・命令キャッシュ・キャッシュなし・表示
   wire [10:0] ic_ww = {ic_line[12:6], ic_n};
-  wire        ic_wr = sdr_bvalid && sdr_who && ic_state == IC_FILL;
+  wire        ic_wr = sdr_bvalid && sdr_who == W_IC && ic_state == IC_FILL;
   mycpu_icram ic_e (.clk(clk), .addra(ic_rw1[10:1]), .douta(ic_qe),
                     .web(ic_wr && !ic_n[0]), .addrb(ic_ww[10:1]), .dinb(sdram_q));
   mycpu_icram ic_o (.clk(clk), .addra(ic_rw[10:1]), .douta(ic_qo),
@@ -183,7 +196,7 @@ module mycpu_soc #(
   // データ（4 バイト × 2048、1 ポート）：ふだんはデータの口、外れの処理中は写す・読み込む場所
   wire [10:0] dc_ra = dc_state == DC_COPY ? {dc_vline[6:0], dc_cnt[3:0]} :
                       dc_state == DC_FILL ? {dc_fline[6:0], dc_n} : d_addr[12:2];
-  wire        dc_fwr = dc_state == DC_FILL && sdr_bvalid && !sdr_who;
+  wire        dc_fwr = dc_state == DC_FILL && sdr_bvalid && sdr_who == W_DC;
   wire [31:0] dc_q;
   generate
     for (g = 0; g < 4; g = g + 1) begin : dlane
@@ -194,15 +207,19 @@ module mycpu_soc #(
     end
   endgenerate
 
-  // ---- SDRAM：データキャッシュ（書き戻し・ライン読み込み）と命令キャッシュのライン読み込みで取り合う（データが先） ----
+  // ---- SDRAM：データキャッシュ（書き戻し・ライン読み込み）、キャッシュを通さない読み書き、表示回路の行読み込み、
+  //      命令キャッシュのライン読み込みで取り合う（この順で先） ----
   wire        sdr_ack;
   reg         sdr_busy;          // 制御回路が動いている
   wire d_sdram = d_req && sel_sdram && !d_err;
   wire i_sdram_req = i_req && i_sdram;
   wire i_hit = ic_hit0 && ic_hit1;
   // 命令キャッシュが読んでいるラインへの書き込みは、読み終えるまで待つ（読み終えてから無効にする）
-  wire ic_filling_d = sdr_busy && sdr_who && d_addr[22:6] == ic_line[22:6];
-  assign d_gnt = !d_sdram || (dc_state == DC_IDLE && dc_hit && !(wr && ic_filling_d));
+  wire ic_filling_d = sdr_busy && sdr_who == W_IC && d_addr[22:6] == ic_line[22:6];
+  // キャッシュを通さない読み書き（0x0200_0000〜）：SDRAM が空いていれば 1 語、終わったら返事
+  wire d_uc = d_req && sel_uc && !d_err;
+  wire uc_go = d_uc && dc_state == DC_IDLE && !sdr_busy;
+  assign d_gnt = (!d_sdram || (dc_state == DC_IDLE && dc_hit && !(wr && ic_filling_d))) && (!d_uc || uc_go);
   assign i_gnt = !i_sdram_req || i_hit || ic_state == IC_IDLE;
   wire ic_miss = i_sdram_req && !i_hit && i_gnt;           // 外れを受け付けた
   // 次に読むライン：まず 1 つ目の語のライン、それがあれば 2 つ目の語のライン
@@ -216,13 +233,34 @@ module mycpu_soc #(
   wire dc_snoop = dc_state == DC_IDLE && !d_sdram && ic_want && ic_snoop;  // 命令キャッシュのための書き戻しを始める
   wire dc_wb_go   = dc_state == DC_WBW && !sdr_busy;
   wire dc_fill_go = dc_state == DC_FILLW && !sdr_busy;
+
+  // グラフィックの行読み込み：表示回路が頼んだ行（320 バイト = 16 語 × 5）をバーストで読み、行バッファへ。
+  // 行バッファの番地は {行の番号の最下位, 語の番号（0〜79）}。グラフィックのときだけ読む
+  reg  [2:0]  vq_s;              // 頼みのトグルを clk に揃える（2 段）＋ 変わったかを見る 1 段
+  reg  [7:0]  vf_y;              // 読んでいる行
+  reg  [2:0]  vf_n;              // 読み終えたバースト（0〜4）
+  reg  [3:0]  vf_w;              // バーストの中の語
+  reg         vf_pend;
+  reg  [16:0] fb_base;           // FB_BASE（SDRAM の中の番地の [22:6]）
+  wire [22:0] vf_addr = {fb_base, 6'd0} + {7'd0, vf_y, 8'd0} + {9'd0, vf_y, 6'd0} + {14'd0, vf_n, 6'd0};
+  wire vf_go = vf_pend && !sdr_busy && !dc_wb_go && !dc_fill_go && !uc_go;
+  reg  [31:0] lbuf [0:255];      // 行バッファ（LUT の RAM。BSRAM は使い切っている）
+`ifdef MYCPU_SIM
+  integer li;
+  initial for (li = 0; li < 256; li = li + 1) lbuf[li] = 32'd0;
+`endif
+  always @(posedge clk) if (sdr_bvalid && sdr_who == W_VID) lbuf[{vf_y[0], vf_n, vf_w}] <= sdram_q;
+  always @(posedge vclk) gdata <= lbuf[gaddr];
+
   reg  ic_go;                    // このクロックで命令キャッシュのライン読み込みを始める
-  always @* ic_go = ic_want && !sdr_busy && dc_state == DC_IDLE && !dc_miss && !ic_snoop;
+  always @* ic_go = ic_want && !sdr_busy && dc_state == DC_IDLE && !dc_miss && !ic_snoop && !uc_go && !vf_go;
   mycpu_sdram #(.SDRAM_HZ(SDRAM_HZ)) sdram (
     .clk(clk), .rst(rst),
-    .req(dc_wb_go || dc_fill_go || ic_go),
-    .waddr(dc_wb_go ? {dc_vline, 4'd0} : dc_fill_go ? {dc_fline, 4'd0} : ic_next_line[22:2]),
-    .wstrb(dc_wb_go ? 4'hF : 4'd0), .wdata(32'd0), .burst(1'b1), .bwdata(wbuf[sdr_bidx]), .bidx(sdr_bidx),
+    .req(dc_wb_go || dc_fill_go || uc_go || vf_go || ic_go),
+    .waddr(dc_wb_go ? {dc_vline, 4'd0} : dc_fill_go ? {dc_fline, 4'd0} : uc_go ? d_addr[22:2] :
+           vf_go ? vf_addr[22:2] : ic_next_line[22:2]),
+    .wstrb(dc_wb_go ? 4'hF : uc_go ? d_wstrb : 4'd0), .wdata(d_wdata), .burst(!uc_go),
+    .bwdata(wbuf[sdr_bidx]), .bidx(sdr_bidx),
     .ack(sdr_ack), .bvalid(sdr_bvalid), .rdata(sdram_q), .ready_init(),
     .sdram_clk(sdram_clk), .sdram_cke(sdram_cke), .sdram_cs_n(sdram_cs_n), .sdram_ras_n(sdram_ras_n),
     .sdram_cas_n(sdram_cas_n), .sdram_we_n(sdram_we_n), .sdram_a(sdram_a), .sdram_ba(sdram_ba),
@@ -230,17 +268,28 @@ module mycpu_soc #(
   );
   always @(posedge clk) begin
     if (rst) begin
-      sdr_busy <= 1'b0; sdr_who <= 1'b0; ic_state <= IC_IDLE; ic_addr <= 32'd0; ic_line <= 32'd0; ic_n <= 4'd0;
+      sdr_busy <= 1'b0; sdr_who <= W_DC; ic_state <= IC_IDLE;
+      vq_s <= 3'd0; vf_y <= 8'd0; vf_n <= 3'd0; vf_w <= 4'd0; vf_pend <= 1'b0; ic_addr <= 32'd0; ic_line <= 32'd0; ic_n <= 4'd0;
       ic_valid <= 128'd0;
       dc_state <= DC_IDLE; dc_valid <= 128'd0; dc_dirty <= 128'd0; dc_vline <= 17'd0; dc_fline <= 17'd0;
       dc_fill_after <= 1'b0; dc_cnt <= 5'd0; dc_n <= 4'd0;
     end else begin
-      if (dc_wb_go || dc_fill_go) begin sdr_busy <= 1'b1; sdr_who <= 1'b0; end
-      else if (ic_go) begin sdr_busy <= 1'b1; sdr_who <= 1'b1; ic_line <= ic_next_line; ic_n <= 4'd0; end
+      if (dc_wb_go || dc_fill_go) begin sdr_busy <= 1'b1; sdr_who <= W_DC; end
+      else if (uc_go) begin sdr_busy <= 1'b1; sdr_who <= W_UC; end
+      else if (vf_go) begin sdr_busy <= 1'b1; sdr_who <= W_VID; vf_w <= 4'd0; end
+      else if (ic_go) begin sdr_busy <= 1'b1; sdr_who <= W_IC; ic_line <= ic_next_line; ic_n <= 4'd0; end
       else if (sdr_ack) sdr_busy <= 1'b0;
+      // 表示回路の行読み込み
+      vq_s <= {vq_s[1:0], greq_t};
+      if (vq_s[2] != vq_s[1] && gmode) begin vf_y <= greq_y; vf_n <= 3'd0; vf_pend <= 1'b1; end
+      else if (sdr_who == W_VID && sdr_ack) begin
+        if (vf_n == 3'd4) vf_pend <= 1'b0;
+        vf_n <= vf_n + 3'd1;
+      end
+      if (sdr_who == W_VID && sdr_bvalid) vf_w <= vf_w + 4'd1;
       // 命令キャッシュのライン読み込み：届いた語を書き、最後の語でタグを書く
       if (ic_wr) ic_n <= ic_n + 4'd1;
-      if (ic_state == IC_FILL && sdr_who && sdr_ack) begin
+      if (ic_state == IC_FILL && sdr_who == W_IC && sdr_ack) begin
         ic_valid[ic_line[12:6]] <= 1'b1;
         ic_tag[ic_line[12:6]] <= ic_line[22:13];
       end
@@ -250,7 +299,7 @@ module mycpu_soc #(
         default:  ic_state <= IC_IDLE;                   // IC_REPLY
       endcase
       // データの口で SDRAM の番地に書いたら、命令キャッシュのそのラインを無効に
-      if (d_go && sel_sdram && wr && ic_hasd) ic_valid[d_idx] <= 1'b0;
+      if (d_go && (sel_sdram || sel_uc) && wr && ic_hasd) ic_valid[d_idx] <= 1'b0;
 
       // データキャッシュ
       if (d_go && sel_sdram && wr) dc_dirty[d_idx] <= 1'b1;
@@ -296,7 +345,8 @@ module mycpu_soc #(
   localparam [14:0] IO_UART_TX = 15'h00, IO_UART_STATUS = 15'h04, IO_UART_RX = 15'h08,
                     IO_TIMER_COUNT = 15'h10, IO_TIMER_CMP = 15'h14, IO_TIMER_CTRL = 15'h18,
                     IO_LED = 15'h20,
-                    IO_SD_DATA = 15'h30, IO_SD_CTRL = 15'h34, IO_SD_STATUS = 15'h38;
+                    IO_SD_DATA = 15'h30, IO_SD_CTRL = 15'h34, IO_SD_STATUS = 15'h38,
+                    IO_VIDEO_MODE = 15'h40, IO_FB_BASE = 15'h44, IO_PAL_INDEX = 15'h48, IO_PAL_DATA = 15'h4C;
   wire [14:0] io_off = {d_addr[14:2], 2'b00};
   // 書き込み：レジスタの先頭バイトを含むときだけ効く。書かないバイトは 0
   wire [31:0] wmask = {{8{d_wstrb[3]}}, {8{d_wstrb[2]}}, {8{d_wstrb[1]}}, {8{d_wstrb[0]}}};
@@ -358,10 +408,22 @@ module mycpu_soc #(
     end
   end
 
+  // グラフィック（7.3）：モード・フレームバッファの番地・パレット（256 色 × 24bit。PAL_DATA に書くと番号が 1 進む。
+  // 電源を入れたときは黒、リセットでは変わらない。LUT の RAM で、読むのは表示回路だけ）
+  reg  [7:0]  pal_idx;
+  reg  [23:0] pal [0:255];
+`ifdef MYCPU_SIM
+  integer pi;
+  initial for (pi = 0; pi < 256; pi = pi + 1) pal[pi] = 24'd0;
+`endif
+  always @(posedge clk) if (io_we && io_off == IO_PAL_DATA) pal[pal_idx] <= io_w[23:0];
+  always @(posedge vclk) pdata <= pal[paddr];
+
   reg [31:0] io_q;
   always @(posedge clk) begin
     if (rst) begin
       t_count <= 32'd0; t_cmp <= 32'd0; t_en <= 1'b0; t_pre <= 16'd0; led <= 6'd0;
+      gmode <= 1'b0; fb_base <= 17'h1F800; pal_idx <= 8'd0;   // FB_BASE は 0x017E0000
     end else begin
       if (t_pre == US_DIV - 1) begin t_pre <= 16'd0; t_count <= t_count + 32'd1; end
       else t_pre <= t_pre + 16'd1;
@@ -370,6 +432,10 @@ module mycpu_soc #(
         IO_TIMER_CMP:   t_cmp <= io_w;
         IO_TIMER_CTRL:  t_en <= io_w[0];
         IO_LED:         led <= io_w[5:0];
+        IO_VIDEO_MODE:  gmode <= io_w[0];
+        IO_FB_BASE:     fb_base <= io_w[22:6];
+        IO_PAL_INDEX:   pal_idx <= io_w[7:0];
+        IO_PAL_DATA:    pal_idx <= pal_idx + 8'd1;
         default: ;
       endcase
     end
@@ -383,12 +449,15 @@ module mycpu_soc #(
       IO_SD_DATA:     io_q <= {24'd0, spi_rx};
       IO_SD_CTRL:     io_q <= {16'd0, spi_ctrl};
       IO_SD_STATUS:   io_q <= {31'd0, spi_busy};
-      default:        io_q <= 32'd0;
+      IO_VIDEO_MODE:  io_q <= {31'd0, gmode};
+      IO_FB_BASE:     io_q <= {9'h2, fb_base, 6'd0};
+      IO_PAL_INDEX:   io_q <= {24'd0, pal_idx};
+      default:        io_q <= 32'd0;          // PAL_DATA は書くだけ
     endcase
   end
 
   // ---- 応答（SDRAM は返事が来たとき、ほかは次のクロック） ----
-  reg [2:0] d_which;   // 0 = ROM、1 = 入出力、2 = VRAM、3 = RAM（前）、4 = SDRAM、5 = RAM（後ろ）
+  reg [2:0] d_which;   // 0 = ROM、1 = 入出力、2 = VRAM、3 = RAM（前）、4 = SDRAM、5 = RAM（後ろ）、6 = キャッシュなしの SDRAM
   reg       d_odd_q;
   reg [1:0] i_which;   // 0 = ROM、1 = RAM、2 = SDRAM、3 = なし
   reg       i_odd_q;
@@ -399,9 +468,10 @@ module mycpu_soc #(
       i_which <= 2'd0; i_odd_q <= 1'b0; i_err <= 2'b00;
     end else begin
       // データの口
-      d_rvalid <= d_go;                  // どこも次のクロックに返す（SDRAM はデータキャッシュに当たったときだけ受け付ける）
+      // キャッシュを通さない SDRAM は終わったとき、ほかは次のクロックに返す（SDRAM はデータキャッシュに当たったときだけ受け付ける）
+      d_rvalid <= (d_go && !sel_uc) || (sdr_ack && sdr_busy && sdr_who == W_UC);
       if (d_go) begin
-        d_which <= sel_io ? 3'd1 : sel_vram ? 3'd2 : d_ramb ? 3'd5 : sel_ram ? 3'd3 : sel_sdram ? 3'd4 : 3'd0;
+        d_which <= sel_io ? 3'd1 : sel_vram ? 3'd2 : d_ramb ? 3'd5 : sel_ram ? 3'd3 : sel_sdram ? 3'd4 : sel_uc ? 3'd6 : 3'd0;
         d_odd_q <= d_odd;
       end
       // 命令の口：2 つ目の 4 バイトが同じ場所になければ、そこは読めない印
@@ -424,7 +494,7 @@ module mycpu_soc #(
   wire [31:0] rom_d = d_odd_q ? rom_do : rom_de;
   wire [31:0] ram_d = d_odd_q ? ram_do : ram_de;
   assign d_rdata = d_which == 3'd0 ? rom_d : d_which == 3'd1 ? io_q : d_which == 3'd2 ? vram_q :
-                   d_which == 3'd3 ? ram_d : d_which == 3'd5 ? ramb_q : dc_q;
+                   d_which == 3'd3 ? ram_d : d_which == 3'd5 ? ramb_q : d_which == 3'd6 ? sdram_q : dc_q;
   wire [63:0] rom_i = i_odd_q ? {rom_ie, rom_io} : {rom_io, rom_ie};
   wire [63:0] ram_i = i_odd_q ? {ram_ie, ram_io} : {ram_io, ram_ie};
   wire [63:0] ic_i  = i_odd_q ? {ic_qe, ic_qo} : {ic_qo, ic_qe};

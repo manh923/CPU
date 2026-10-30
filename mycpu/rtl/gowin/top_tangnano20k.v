@@ -63,6 +63,10 @@ module top_tangnano20k (
   // ---- CPU とメモリ ----
   wire [11:0] vaddr;
   wire [31:0] vdata;
+  wire [7:0]  gaddr, paddr, greq_y;   // グラフィック（7.3）：行バッファ・パレットの読み出しと、行の頼み
+  wire [31:0] gdata;
+  wire [23:0] pdata;
+  wire        gmode, greq_t;
   wire [5:0]  led;
   wire        halted;
   wire [1:0]  halt_code;
@@ -73,7 +77,8 @@ module top_tangnano20k (
     .sdram_cas_n(O_sdram_cas_n), .sdram_we_n(O_sdram_wen_n), .sdram_a(O_sdram_addr), .sdram_ba(O_sdram_ba),
     .sdram_dqm(O_sdram_dqm), .sdram_dq(IO_sdram_dq),
     .led(led), .halted(halted), .halt_code(halt_code),
-    .vclk(clk_pix), .vaddr(vaddr), .vdata(vdata)
+    .vclk(clk_pix), .vaddr(vaddr), .vdata(vdata),
+    .gaddr(gaddr), .gdata(gdata), .paddr(paddr), .pdata(pdata), .gmode(gmode), .greq_t(greq_t), .greq_y(greq_y)
   );
   assign sd_dat1 = 1'b1;
   assign sd_dat2 = 1'b1;
@@ -86,6 +91,7 @@ module top_tangnano20k (
   wire hs, vs, de;
   mycpu_video #(.FONT_HEX("font8x16.hex")) video (
     .pclk(clk_pix), .rst(prst[1]), .vaddr(vaddr), .vdata(vdata),
+    .gmode(gmode), .gaddr(gaddr), .gdata(gdata), .paddr(paddr), .pdata(pdata), .greq_t(greq_t), .greq_y(greq_y),
     .r(r), .g(g), .b(b), .hs(hs), .vs(vs), .de(de)
   );
 
