@@ -25,6 +25,9 @@ Programs
   EDIT.EXE     A full-screen text editor. EDIT NOTE.TXT (Ctrl-S, Ctrl-X).
   GDEMO.EXE    The Mandelbrot set on the 320x200 256-color graphics
                screen (written in C with GFX.H). Press a key to quit.
+  BLOCKS.EXE   A block-breaking game on the graphics screen. Left/Right
+               (or A/D) move the paddle, Space serves, ESC quits.
+               Until you press a key, it plays by itself.
 
 The C compiler is on this card too:
   CC.EXE       chibicc, compiled for this CPU. CC FILE.C writes FILE.S.
