@@ -353,6 +353,10 @@ to83:
         BR32 p1, .end
         CMPEQI32 p1, r17, ' '
         BR32 p1, .end
+        CMPEQI32 p1, r17, '\\'          ; パスの区切りでも終わり
+        BR32 p1, .end
+        CMPEQI32 p1, r17, '/'
+        BR32 p1, .end
         CMPNEI32 p1, r17, '.'
         BR32 p1, .ch
         CMPEQI32 p1, r20, 11            ; 2 つ目の '.'
@@ -391,6 +395,527 @@ to83:
         RET32
 
 ; ==================================================================
+; パス（サブディレクトリ）
+; ==================================================================
+; ディレクトリはクラスタの番号で表す（0 = ルート）。今のディレクトリは cwd_clus、その名前は cwd_path（"\" か "\INCLUDE\SYS"）。
+; fs_find・dir_slot・dir_next は dir_clus のディレクトリを見る
+
+; path83(r16 = パス) → r16 = 1：最後の名前を name83 に、それがあるディレクトリを dir_clus に
+;                            2：パスがディレクトリそのもの（「\」「..」、最後が「\」など）。そのディレクトリを dir_clus に
+;                            0：名前が正しくない、3：途中のディレクトリがない
+;   「C:」で始まってもよい。「\」「/」で区切る。「\」で始まればルートから、ほかは今のディレクトリから。「.」「..」も使える。
+;   空白か 0 で終わる。たどったディレクトリの名前を rpath に作る（CD・DIR が使う）
+path83:
+        ADDI32 sp, sp, -16
+        STORE32_32 lr, sp, 0
+        STORE32_32 r24, sp, 4
+        STORE32_32 r25, sp, 8
+        STORE32_32 r26, sp, 12
+        ADDR32 r24, r16, r0             ; r24 = 読む位置
+        LOAD8U_32 r17, r24, 1           ; 「C:」は飛ばす
+        CMPNEI32 p1, r17, ':'
+        BR32 p1, .nodrv
+        ADDI32 r24, r24, 2
+.nodrv: LOAD32_32 r25, r0, cwd_clus     ; r25 = たどっているディレクトリ
+        ADDI32 r16, r0, rpath
+        ADDI32 r17, r0, cwd_path
+        CALL32 strcpy0
+        LOAD8U_32 r17, r24, 0
+        CMPEQI32 p1, r17, '\\'
+        BR32 p1, .root
+        CMPNEI32 p1, r17, '/'
+        BR32 p1, .comp
+.root:  ADDI32 r25, r0, 0
+        ADDI32 r17, r0, '\\'
+        STORE16_32 r17, r0, rpath       ; rpath ← "\"
+        ADDI32 r24, r24, 1
+.comp:  ADDR32 r26, r24, r0             ; 1 つの部分 [r24, r26)
+.e:     LOAD8U_32 r17, r26, 0
+        CMPEQI32 p1, r17, 0
+        BR32 p1, .eend
+        CMPEQI32 p1, r17, ' '
+        BR32 p1, .eend
+        CMPEQI32 p1, r17, '\\'
+        BR32 p1, .eend
+        CMPEQI32 p1, r17, '/'
+        BR32 p1, .eend
+        ADDI32 r26, r26, 1
+        JMP32 .e
+.eend:  SUBR32 r18, r26, r24            ; 長さ
+        CMPEQI32 p1, r18, 0
+        BR32 p1, .last
+        LOAD8U_32 r19, r24, 0           ; 「.」「..」
+        CMPNEI32 p1, r19, '.'
+        BR32 p1, .name
+        CMPEQI32 p1, r18, 1
+        BR32 p1, .last
+        CMPNEI32 p1, r18, 2
+        BR32 p1, .name                  ; 「.X」などは to83 が間違いにする
+        LOAD8U_32 r19, r24, 1
+        CMPNEI32 p1, r19, '.'
+        BR32 p1, .name
+        CMPEQI32 p1, r25, 0             ; ルートの親はルート
+        BR32 p1, .last
+        ADDR32 r16, r25, r0
+        CALL32 parent_of
+        CMPLTI32 p1, r16, 0
+        BR32 p1, .nf
+        ADDR32 r25, r16, r0
+        CALL32 rp_pop
+.last:  LOAD8U_32 r17, r26, 0           ; 空・「.」・「..」：後ろに続くか、ここで終わりか
+        CMPEQI32 p1, r17, '\\'
+        BR32 p1, .more
+        CMPEQI32 p1, r17, '/'
+        BR32 p1, .more
+        STORE32_32 r25, r0, dir_clus    ; ディレクトリそのもの
+        ADDI32 r16, r0, 2
+        JMP32 .ret
+.more:  ADDI32 r24, r26, 1
+        JMP32 .comp
+.name:  ADDR32 r16, r24, r0
+        CALL32 to83                     ; 区切りの手前まで
+        CMPEQI32 p1, r16, 0
+        BR32 p1, .ret
+        STORE32_32 r25, r0, dir_clus
+        LOAD8U_32 r17, r26, 0
+        CMPEQI32 p1, r17, '\\'
+        BR32 p1, .sub
+        CMPEQI32 p1, r17, '/'
+        BR32 p1, .sub
+        ADDI32 r16, r0, 1               ; 最後の名前
+        JMP32 .ret
+.sub:   CALL32 fs_find                  ; 途中のディレクトリへ
+        CMPEQI32 p1, r16, 0
+        BR32 p1, .nf
+        LOAD8U_32 r17, r0, ent + 11
+        ANDI32 r17, r17, 0x10
+        CMPEQI32 p1, r17, 0
+        BR32 p1, .nf
+        CALL32 ent_first
+        ADDR32 r25, r16, r0
+        CALL32 rp_push
+        CMPEQI32 p1, r16, 0
+        BR32 p1, .nf
+        JMP32 .more
+.nf:    ADDI32 r16, r0, 3
+.ret:   LOAD32_32 lr, sp, 0
+        LOAD32_32 r24, sp, 4
+        LOAD32_32 r25, sp, 8
+        LOAD32_32 r26, sp, 12
+        ADDI32 sp, sp, 16
+        RET32
+
+; path_err(r16 = path83 の結果で 1 でないもの) → r16 = エラーの番号（0 → -6、2 → -5、3 → -2）
+path_err:
+        CMPEQI32 p2, r16, 2
+        ADDI32 r17, r0, -6
+        ADDI32 r18, r0, -5
+        SEL32 r17, r18, r17, p2
+        CMPEQI32 p3, r16, 3
+        ADDI32 r18, r0, -2
+        SEL32 r16, r18, r17, p3
+        RET32
+
+; ent_first() → r16 = ent（fs_find が写した項目）の最初のクラスタ
+ent_first:
+        LOAD16U_32 r16, r0, ent + 26
+        LOAD16U_32 r17, r0, ent + 20
+        LOAD32_32 r18, r0, fs_type
+        CMPEQI32 p1, r18, 32
+        SHLI32 r17, r17, 16
+        SEL32 r17, r17, r0, p1
+        ORR32 r16, r16, r17
+        RET32
+
+; parent_of(r16 = ディレクトリ) → r16 = 親（「..」の項目。0 ならルート）。読めなければ負。name83 を壊す
+parent_of:
+        ADDI32 sp, sp, -8
+        STORE32_32 lr, sp, 0
+        STORE32_32 r16, r0, dir_clus
+        ADDI32 r16, r0, 0x20202E2E      ; 「..」と空白
+        STORE32_32 r16, r0, name83
+        ADDI32 r16, r0, 0x20202020
+        STORE32_32 r16, r0, name83 + 4
+        STORE32_32 r16, r0, name83 + 8
+        CALL32 fs_find
+        CMPEQI32 p1, r16, 0
+        ADDI32 r16, r0, -1
+        BR32 p1, .ret
+        CALL32 ent_first
+        LOAD32_32 r17, r0, root_clus    ; FAT32 でルートの番号が書いてあっても 0（ルート）に
+        CMPEQR32 p1, r16, r17
+        SEL32 r16, r0, r16, p1
+.ret:   LOAD32_32 lr, sp, 0
+        ADDI32 sp, sp, 8
+        RET32
+
+; rp_push() → r16 = 1：rpath の後ろに「\」と name83 の名前（NAME.EXT）を足す。長すぎれば 0
+rp_push:
+        ADDI32 r16, r0, rpath
+.e:     LOAD8U_32 r17, r16, 0
+        CMPEQI32 p1, r17, 0
+        BR32 p1, .end
+        ADDI32 r16, r16, 1
+        JMP32 .e
+.end:   ADDI32 r17, r16, -rpath
+        CMPGEI32 p1, r17, RPATH_MAX - 14
+        BR32 p1, .long
+        CMPEQI32 p1, r17, 1             ; 「\」だけなら区切りは足さない
+        BR32 p1, .nm
+        ADDI32 r17, r0, '\\'
+        STORE8_32 r17, r16, 0
+        ADDI32 r16, r16, 1
+.nm:    ADDI32 r18, r0, 0               ; 名前（空白の手前まで）
+.n:     LOAD8U_32 r17, r18, name83
+        CMPEQI32 p1, r17, ' '
+        BR32 p1, .x
+        STORE8_32 r17, r16, 0
+        ADDI32 r16, r16, 1
+        ADDI32 r18, r18, 1
+        CMPLTI32 p1, r18, 8
+        BR32 p1, .n
+.x:     LOAD8U_32 r17, r0, name83 + 8   ; 拡張子
+        CMPEQI32 p1, r17, ' '
+        BR32 p1, .z
+        ADDI32 r17, r0, '.'
+        STORE8_32 r17, r16, 0
+        ADDI32 r16, r16, 1
+        ADDI32 r18, r0, 8
+.xx:    LOAD8U_32 r17, r18, name83
+        CMPEQI32 p1, r17, ' '
+        BR32 p1, .z
+        STORE8_32 r17, r16, 0
+        ADDI32 r16, r16, 1
+        ADDI32 r18, r18, 1
+        CMPLTI32 p1, r18, 11
+        BR32 p1, .xx
+.z:     STORE8_32 r0, r16, 0
+        ADDI32 r16, r0, 1
+        RET32
+.long:  ADDI32 r16, r0, 0
+        RET32
+
+; rp_pop()：rpath の最後の「\名前」を除く（ルートの「\」は残す）
+rp_pop:
+        ADDI32 r16, r0, rpath
+        ADDI32 r18, r0, rpath           ; 最後の「\」
+.l:     LOAD8U_32 r17, r16, 0
+        CMPEQI32 p1, r17, 0
+        BR32 p1, .cut
+        CMPNEI32 p1, r17, '\\'
+        BR32 p1, .n
+        ADDR32 r18, r16, r0
+.n:     ADDI32 r16, r16, 1
+        JMP32 .l
+.cut:   ADDI32 r17, r0, rpath
+        CMPEQR32 p1, r18, r17
+        ADDI32 r19, r18, 1
+        SEL32 r18, r19, r18, p1
+        STORE8_32 r0, r18, 0
+        RET32
+
+; strcpy0(r16 = 先, r17 = 元)：0 までを写す
+strcpy0:
+        LOAD8U_32 r18, r17, 0
+        STORE8_32 r18, r16, 0
+        ADDI32 r16, r16, 1
+        ADDI32 r17, r17, 1
+        CMPNEI32 p1, r18, 0
+        BR32 p1, strcpy0
+        RET32
+
+; has_sep(r16 = 文字列) → r16 = 1 なら「\」「/」「:」がある（パスを書いた）
+has_sep:
+        LOAD8U_32 r17, r16, 0
+        CMPEQI32 p1, r17, 0
+        BR32 p1, .no
+        CMPEQI32 p1, r17, '\\'
+        BR32 p1, .yes
+        CMPEQI32 p1, r17, '/'
+        BR32 p1, .yes
+        CMPEQI32 p1, r17, ':'
+        BR32 p1, .yes
+        ADDI32 r16, r16, 1
+        JMP32 has_sep
+.yes:   ADDI32 r16, r0, 1
+        RET32
+.no:    ADDI32 r16, r0, 0
+        RET32
+
+; copy12(r16 = 先, r17 = 元)：12 バイト（8.3 の名前）を写す
+copy12:
+        LOAD32_32 r18, r17, 0
+        STORE32_32 r18, r16, 0
+        LOAD32_32 r18, r17, 4
+        STORE32_32 r18, r16, 4
+        LOAD32_32 r18, r17, 8
+        STORE32_32 r18, r16, 8
+        RET32
+
+; put_prompt()：「C:\今のディレクトリ>」
+put_prompt:
+        ADDI32 sp, sp, -8
+        STORE32_32 lr, sp, 0
+        ADDI32 r16, r0, s_prompt
+        CALL32 puts
+        ADDI32 r16, r0, cwd_path
+        CALL32 puts
+        ADDI32 r16, r0, '>'
+        CALL32 putc
+        LOAD32_32 lr, sp, 0
+        ADDI32 sp, sp, 8
+        RET32
+
+; make_dirent(r16 = 項目, r17 = 名前 11 バイト, r18 = 最初のクラスタ, r19 = 属性)：大きさ 0 の項目を作る
+make_dirent:
+        ADDI32 r20, r0, 0
+.cp:    ADDR32 r21, r17, r20
+        LOAD8U_32 r21, r21, 0
+        ADDR32 r22, r16, r20
+        STORE8_32 r21, r22, 0
+        ADDI32 r20, r20, 1
+        CMPLTI32 p1, r20, 11
+        BR32 p1, .cp
+        STORE8_32 r19, r16, 11
+        STORE8_32 r0, r16, 12
+        STORE8_32 r0, r16, 13
+        STORE16_32 r0, r16, 14
+        STORE32_32 r0, r16, 20
+        STORE32_32 r0, r16, 24
+        STORE32_32 r0, r16, 28
+        ADDI32 r21, r0, FAT_DATE        ; 作った日・使った日・書いた日（時刻は 0:00）
+        STORE16_32 r21, r16, 16
+        STORE16_32 r21, r16, 18
+        STORE16_32 r21, r16, 24
+        STORE16_32 r18, r16, 26         ; クラスタの下と上
+        SHRI32 r21, r18, 16
+        STORE16_32 r21, r16, 20
+        RET32
+
+; f_mkdir(r16 = パス) → r16 = 0 なら成功。SYSCALL 23
+f_mkdir:
+        ADDI32 sp, sp, -24
+        STORE32_32 lr, sp, 0
+        STORE32_32 r24, sp, 4
+        STORE32_32 r25, sp, 8
+        STORE32_32 r26, sp, 12
+        STORE32_32 r27, sp, 16
+        ADDR32 r24, r16, r0
+        CALL32 mounted
+        CMPEQI32 p1, r16, 0
+        ADDI32 r16, r0, -7
+        BR32 p1, .ret
+        ADDR32 r16, r24, r0
+        CALL32 path83
+        CMPEQI32 p1, r16, 1
+        BR32 p1, .ok
+        CALL32 path_err
+        JMP32 .ret
+.ok:    CALL32 fs_find                  ; 同じ名前がもうある
+        CMPNEI32 p1, r16, 0
+        ADDI32 r16, r0, -5
+        BR32 p1, .ret
+        LOAD32_32 r25, r0, dir_clus     ; r25 = 親
+        CALL32 alloc                    ; r24 = 新しいディレクトリのクラスタ
+        CMPEQI32 p1, r16, 0
+        ADDI32 r16, r0, -4
+        BR32 p1, .ret
+        ADDR32 r24, r16, r0
+        CALL32 clus_lba                 ; 0 で埋める
+        ADDR32 r26, r16, r0
+        LOAD32_32 r27, r0, spc
+.z:     ADDR32 r16, r26, r0
+        CALL32 sb_new
+        ADDI32 r26, r26, 1
+        ADDI32 r27, r27, -1
+        CMPNEI32 p1, r27, 0
+        BR32 p1, .z
+        ADDR32 r16, r24, r0             ; 「.」（自分）と「..」（親。ルートなら 0）
+        CALL32 clus_lba
+        ADDR32 r26, r16, r0
+        ADDI32 r17, r0, 0
+        CALL32 ent_ptr
+        CMPEQI32 p1, r16, 0
+        BR32 p1, .nr
+        ADDI32 r17, r0, s_dot
+        ADDR32 r18, r24, r0
+        ADDI32 r19, r0, 0x10
+        CALL32 make_dirent
+        ADDR32 r16, r26, r0
+        ADDI32 r17, r0, 32
+        CALL32 ent_ptr
+        ADDI32 r17, r0, s_dotdot
+        ADDR32 r18, r25, r0
+        ADDI32 r19, r0, 0x10
+        CALL32 make_dirent
+        STORE32_32 r25, r0, dir_clus    ; 親に項目を作る
+        CALL32 dir_slot
+        CMPEQI32 p1, r16, 0
+        BR32 p1, .full
+        LOAD32_32 r16, r0, e_lba
+        LOAD32_32 r17, r0, e_off
+        CALL32 ent_ptr
+        CMPEQI32 p1, r16, 0
+        BR32 p1, .nr
+        ADDI32 r17, r0, name83
+        ADDR32 r18, r24, r0
+        ADDI32 r19, r0, 0x10
+        CALL32 make_dirent
+        CALL32 fs_sync
+        ADDI32 r16, r0, 0
+        JMP32 .ret
+.full:  ADDR32 r16, r24, r0
+        CALL32 free_chain
+        CALL32 fs_sync
+        ADDI32 r16, r0, -4
+        JMP32 .ret
+.nr:    ADDI32 r16, r0, -7
+.ret:   LOAD32_32 lr, sp, 0
+        LOAD32_32 r24, sp, 4
+        LOAD32_32 r25, sp, 8
+        LOAD32_32 r26, sp, 12
+        LOAD32_32 r27, sp, 16
+        ADDI32 sp, sp, 24
+        RET32
+
+; f_rmdir(r16 = パス) → r16 = 0 なら成功。空のディレクトリだけ。今のディレクトリは消せない。SYSCALL 24
+f_rmdir:
+        ADDI32 sp, sp, -16
+        STORE32_32 lr, sp, 0
+        STORE32_32 r24, sp, 4
+        STORE32_32 r25, sp, 8
+        ADDR32 r24, r16, r0
+        CALL32 mounted
+        CMPEQI32 p1, r16, 0
+        ADDI32 r16, r0, -7
+        BR32 p1, .ret
+        ADDR32 r16, r24, r0
+        CALL32 path83
+        CMPEQI32 p1, r16, 1
+        BR32 p1, .ok
+        CALL32 path_err
+        JMP32 .ret
+.ok:    CALL32 fs_find
+        CMPEQI32 p1, r16, 0
+        ADDI32 r16, r0, -2
+        BR32 p1, .ret
+        LOAD8U_32 r17, r0, ent + 11     ; ディレクトリで、読み出し専用でない
+        ANDI32 r17, r17, 0x11
+        CMPNEI32 p1, r17, 0x10
+        ADDI32 r16, r0, -5
+        BR32 p1, .ret
+        CALL32 ent_first
+        ADDR32 r24, r16, r0             ; r24 = 消すディレクトリ
+        LOAD32_32 r17, r0, cwd_clus
+        CMPEQR32 p1, r24, r17
+        ADDI32 r16, r0, -5
+        BR32 p1, .ret
+        LOAD32_32 r25, r0, dir_clus     ; r25 = 親
+        STORE32_32 r24, r0, dir_clus    ; 中が空か（「.」「..」のほかに項目がない）
+        CALL32 dir_open
+.l:     CALL32 dir_next
+        CMPEQI32 p1, r16, 0
+        BR32 p1, .empty
+        LOAD8U_32 r17, r0, dent
+        CMPEQI32 p1, r17, '.'
+        BR32 p1, .l
+        ADDI32 r16, r0, -5
+        JMP32 .ret
+.empty: STORE32_32 r25, r0, dir_clus    ; 親の中の項目をもう一度探して消す（長い名前の項目も）
+        CALL32 fs_find
+        CMPEQI32 p1, r16, 0
+        ADDI32 r16, r0, -2
+        BR32 p1, .ret
+        CALL32 kill_lfn
+        LOAD32_32 r16, r0, f_lba
+        LOAD32_32 r17, r0, f_off
+        CALL32 ent_ptr
+        CMPEQI32 p1, r16, 0
+        ADDI32 r17, r0, -7
+        SEL32 r16, r17, r16, p1
+        BR32 p1, .ret
+        ADDI32 r17, r0, 0xE5
+        STORE8_32 r17, r16, 0
+        ADDR32 r16, r24, r0
+        CALL32 free_chain
+        CALL32 fs_sync
+        ADDI32 r16, r0, 0
+.ret:   LOAD32_32 lr, sp, 0
+        LOAD32_32 r24, sp, 4
+        LOAD32_32 r25, sp, 8
+        ADDI32 sp, sp, 16
+        RET32
+
+; f_chdir(r16 = パス) → r16 = 0 なら成功。今のディレクトリを変える。SYSCALL 25
+f_chdir:
+        ADDI32 sp, sp, -8
+        STORE32_32 lr, sp, 0
+        STORE32_32 r24, sp, 4
+        ADDR32 r24, r16, r0
+        CALL32 mounted
+        CMPEQI32 p1, r16, 0
+        ADDI32 r16, r0, -7
+        BR32 p1, .ret
+        ADDR32 r16, r24, r0
+        CALL32 path83
+        CMPEQI32 p1, r16, 2
+        BR32 p1, .dir
+        CMPEQI32 p1, r16, 1
+        BR32 p1, .name
+        CALL32 path_err
+        JMP32 .ret
+.name:  CALL32 fs_find                  ; 最後の名前がディレクトリであること
+        CMPEQI32 p1, r16, 0
+        ADDI32 r16, r0, -2
+        BR32 p1, .ret
+        LOAD8U_32 r17, r0, ent + 11
+        ANDI32 r17, r17, 0x10
+        CMPEQI32 p1, r17, 0
+        ADDI32 r16, r0, -5
+        BR32 p1, .ret
+        CALL32 ent_first
+        STORE32_32 r16, r0, dir_clus
+        CALL32 rp_push
+        CMPEQI32 p1, r16, 0
+        ADDI32 r16, r0, -6
+        BR32 p1, .ret
+.dir:   LOAD32_32 r16, r0, dir_clus
+        STORE32_32 r16, r0, cwd_clus
+        ADDI32 r16, r0, cwd_path
+        ADDI32 r17, r0, rpath
+        CALL32 strcpy0
+        ADDI32 r16, r0, 0
+.ret:   LOAD32_32 lr, sp, 0
+        LOAD32_32 r24, sp, 4
+        ADDI32 sp, sp, 8
+        RET32
+
+; f_getcwd(r16 = 置き場所, r17 = 大きさ) → r16 = 長さ（「C:\…」。入らなければ -1）。SYSCALL 26
+f_getcwd:
+        ADDI32 r18, r0, cwd_path        ; 長さ
+.l:     LOAD8U_32 r19, r18, 0
+        ADDI32 r18, r18, 1
+        CMPNEI32 p1, r19, 0
+        BR32 p1, .l
+        ADDI32 r18, r18, -cwd_path - 1
+        ADDI32 r19, r18, 3              ; 「C:」と最後の 0
+        CMPLTUR32 p1, r17, r19
+        BR32 p1, .bad
+        ADDI32 r19, r0, 'C'
+        STORE8_32 r19, r16, 0
+        ADDI32 r19, r0, ':'
+        STORE8_32 r19, r16, 1
+        ADDI32 r20, r18, 2
+        ADDI32 r16, r16, 2
+        ADDI32 r17, r0, cwd_path
+        ADDR32 r21, lr, r0
+        CALL32 strcpy0
+        ADDR32 r16, r20, r0
+        JMPR32 r21
+.bad:   ADDI32 r16, r0, -1
+        RET32
+
+; ==================================================================
 ; ファイルの実行
 ; ==================================================================
 
@@ -399,34 +924,32 @@ run_file:
         ADDI32 sp, sp, -8
         STORE32_32 lr, sp, 0
         STORE32_32 r24, sp, 4
-        ADDI32 r16, r0, cmdbuf
-        CALL32 to83
-        CMPEQI32 p1, r16, 0
-        BR32 p1, .no
         CALL32 need_fs
         CMPEQI32 p1, r16, 0
         BR32 p1, .yes                   ; カードが読めない（メッセージは出した）
-        LOAD8U_32 r16, r0, name83 + 8   ; 拡張子があればその名前で
-        CMPEQI32 p1, r16, ' '
-        BR32 p1, .noext
-        CALL32 fs_find
-        CMPEQI32 p1, r16, 0
+        ADDI32 r16, r0, cmdbuf
+        CALL32 path83
+        CMPNEI32 p1, r16, 1
         BR32 p1, .no
-        JMP32 .kind
-.noext: ADDI32 r24, r0, exts            ; .EXE → .COM → .BAT
-.try:   LOAD8U_32 r16, r24, 0
-        CMPEQI32 p1, r16, 0
-        BR32 p1, .no
-        STORE8_32 r16, r0, name83 + 8
-        LOAD8U_32 r16, r24, 1
-        STORE8_32 r16, r0, name83 + 9
-        LOAD8U_32 r16, r24, 2
-        STORE8_32 r16, r0, name83 + 10
-        CALL32 fs_find
+        LOAD8U_32 r24, r0, name83 + 8   ; r24 = 拡張子がない（.EXE → .COM → .BAT の順に探す）
+        CMPEQI32 p1, r24, ' '
+        BTOI32 r24, p1
+        ADDR32 r16, r24, r0
+        CALL32 find_prog
         CMPNEI32 p1, r16, 0
         BR32 p1, .kind
-        ADDI32 r24, r24, 4
-        JMP32 .try
+        LOAD32_32 r16, r0, dir_clus     ; なければ、パスを書いていないときはルートでも探す
+        CMPEQI32 p1, r16, 0
+        BR32 p1, .no
+        ADDI32 r16, r0, cmdbuf
+        CALL32 has_sep
+        CMPNEI32 p1, r16, 0
+        BR32 p1, .no
+        STORE32_32 r0, r0, dir_clus
+        ADDR32 r16, r24, r0
+        CALL32 find_prog
+        CMPEQI32 p1, r16, 0
+        BR32 p1, .no
 .kind:  ADDI32 r16, r0, ent + 8         ; 拡張子で分ける
         ADDI32 r17, r0, x_bat
         CALL32 ext_is
@@ -448,6 +971,34 @@ run_file:
         JMP32 .yes
 .prog:  CALL32 run_prog
 .yes:   ADDI32 r16, r0, 1
+.ret:   LOAD32_32 lr, sp, 0
+        LOAD32_32 r24, sp, 4
+        ADDI32 sp, sp, 8
+        RET32
+
+; find_prog(r16 = 1 なら拡張子を EXE・COM・BAT の順に試す) → r16 = 1 なら dir_clus に name83 があった（ent に）
+find_prog:
+        ADDI32 sp, sp, -8
+        STORE32_32 lr, sp, 0
+        STORE32_32 r24, sp, 4
+        CMPNEI32 p1, r16, 0
+        BR32 p1, .noext
+        CALL32 fs_find
+        JMP32 .ret
+.noext: ADDI32 r24, r0, exts
+.try:   LOAD8U_32 r16, r24, 0
+        CMPEQI32 p1, r16, 0
+        BR32 p1, .ret
+        STORE8_32 r16, r0, name83 + 8
+        LOAD8U_32 r16, r24, 1
+        STORE8_32 r16, r0, name83 + 9
+        LOAD8U_32 r16, r24, 2
+        STORE8_32 r16, r0, name83 + 10
+        CALL32 fs_find
+        CMPNEI32 p1, r16, 0
+        BR32 p1, .ret
+        ADDI32 r24, r24, 4
+        JMP32 .try
 .ret:   LOAD32_32 lr, sp, 0
         LOAD32_32 r24, sp, 4
         ADDI32 sp, sp, 8
@@ -1026,6 +1577,10 @@ fs_mount:
         STORE32_32 r25, sp, 8
         STORE32_32 r26, sp, 12
         STORE32_32 r0, r0, fs_ok
+        STORE32_32 r0, r0, dir_clus     ; ルートから（今のディレクトリもルートに）
+        STORE32_32 r0, r0, cwd_clus
+        ADDI32 r16, r0, '\\'
+        STORE16_32 r16, r0, cwd_path
         ADDI32 r16, r0, -1              ; 置き場所はどれも空
         STORE32_32 r16, r0, sb_lba
         STORE32_32 r16, r0, fc_sec
@@ -1535,6 +2090,9 @@ dir_open:
         STORE32_32 r0, r0, d_end
         ADDI32 r16, r0, 16
         STORE32_32 r16, r0, d_idx       ; 次は新しいセクタへ進む
+        LOAD32_32 r16, r0, dir_clus     ; サブディレクトリ：クラスタのつながり
+        CMPNEI32 p1, r16, 0
+        BR32 p1, .chain
         LOAD32_32 r16, r0, fs_type
         CMPEQI32 p1, r16, 32
         BR32 p1, .f32
@@ -1544,8 +2102,8 @@ dir_open:
         STORE32_32 r16, r0, d_left
         STORE32_32 r0, r0, d_clus
         RET32
-.f32:   ADDR32 r20, lr, r0              ; FAT32：クラスタのつながり
-        LOAD32_32 r16, r0, root_clus
+.f32:   LOAD32_32 r16, r0, root_clus    ; FAT32 のルート：クラスタのつながり
+.chain: ADDR32 r20, lr, r0
         STORE32_32 r16, r0, d_clus
         CALL32 clus_lba
         STORE32_32 r16, r0, d_lba
@@ -1804,19 +2362,28 @@ h_check:
 
 ; f_open(r16 = 名前, r17 = モード) → r16 = ハンドル（負ならエラー）。SYSCALL 16
 f_open:
-        ADDI32 sp, sp, -8
+        ADDI32 sp, sp, -16
         STORE32_32 lr, sp, 0
         STORE32_32 r24, sp, 4
+        STORE32_32 r25, sp, 8
         ADDR32 r24, r17, r0
-        CALL32 to83
+        ADDR32 r25, r16, r0
+        CALL32 mounted
         CMPEQI32 p1, r16, 0
-        ADDI32 r16, r0, -6
+        ADDI32 r16, r0, -7
         BR32 p1, .ret
-        ADDR32 r16, r24, r0
+        ADDR32 r16, r25, r0
+        CALL32 path83
+        CMPEQI32 p1, r16, 1
+        BR32 p1, .ok
+        CALL32 path_err
+        JMP32 .ret
+.ok:    ADDR32 r16, r24, r0
         CALL32 f_open83
 .ret:   LOAD32_32 lr, sp, 0
         LOAD32_32 r24, sp, 4
-        ADDI32 sp, sp, 8
+        LOAD32_32 r25, sp, 8
+        ADDI32 sp, sp, 16
         RET32
 
 ; f_open83(r16 = モード) → r16 = ハンドル。名前は name83 に入っている
@@ -2299,15 +2866,18 @@ f_delete:
         ADDI32 sp, sp, -8
         STORE32_32 lr, sp, 0
         STORE32_32 r24, sp, 4
-        CALL32 to83
-        CMPEQI32 p1, r16, 0
-        ADDI32 r16, r0, -6
-        BR32 p1, .ret
+        ADDR32 r24, r16, r0
         CALL32 mounted
         CMPEQI32 p1, r16, 0
         ADDI32 r16, r0, -7
         BR32 p1, .ret
-        CALL32 fs_find
+        ADDR32 r16, r24, r0
+        CALL32 path83
+        CMPEQI32 p1, r16, 1
+        BR32 p1, .ok
+        CALL32 path_err
+        JMP32 .ret
+.ok:    CALL32 fs_find
         CMPEQI32 p1, r16, 0
         ADDI32 r16, r0, -2
         BR32 p1, .ret
@@ -2343,34 +2913,48 @@ f_delete:
 
 ; f_rename(r16 = 前の名前, r17 = 新しい名前) → r16 = 0 なら成功。SYSCALL 21
 f_rename:
-        ADDI32 sp, sp, -8
+        ADDI32 sp, sp, -16
         STORE32_32 lr, sp, 0
         STORE32_32 r24, sp, 4
+        STORE32_32 r25, sp, 8
         ADDR32 r24, r16, r0
-        ADDR32 r16, r17, r0             ; 新しい名前を newname へ
-        CALL32 to83
-        CMPEQI32 p1, r16, 0
-        ADDI32 r16, r0, -6
-        BR32 p1, .ret
-        LOAD32_32 r16, r0, name83
-        STORE32_32 r16, r0, newname
-        LOAD32_32 r16, r0, name83 + 4
-        STORE32_32 r16, r0, newname + 4
-        LOAD32_32 r16, r0, name83 + 8
-        STORE32_32 r16, r0, newname + 8
+        ADDR32 r25, r17, r0
         CALL32 mounted
         CMPEQI32 p1, r16, 0
         ADDI32 r16, r0, -7
         BR32 p1, .ret
-        CALL32 fs_find                  ; 同じ名前がもうある
+        ADDR32 r16, r25, r0             ; 新しい名前（パスは書けない。同じディレクトリの中で）を newname へ
+        CALL32 has_sep
         CMPNEI32 p1, r16, 0
-        ADDI32 r16, r0, -5
+        ADDI32 r16, r0, -6
         BR32 p1, .ret
-        ADDR32 r16, r24, r0
+        ADDR32 r16, r25, r0
         CALL32 to83
         CMPEQI32 p1, r16, 0
         ADDI32 r16, r0, -6
         BR32 p1, .ret
+        ADDI32 r16, r0, newname
+        ADDI32 r17, r0, name83
+        CALL32 copy12
+        ADDR32 r16, r24, r0             ; 前の名前（パスでよい）
+        CALL32 path83
+        CMPEQI32 p1, r16, 1
+        BR32 p1, .old
+        CALL32 path_err
+        JMP32 .ret
+.old:   ADDI32 r16, r0, oldname         ; 同じディレクトリに新しい名前がもうある
+        ADDI32 r17, r0, name83
+        CALL32 copy12
+        ADDI32 r16, r0, name83
+        ADDI32 r17, r0, newname
+        CALL32 copy12
+        CALL32 fs_find
+        CMPNEI32 p1, r16, 0
+        ADDI32 r16, r0, -5
+        BR32 p1, .ret
+        ADDI32 r16, r0, name83
+        ADDI32 r17, r0, oldname
+        CALL32 copy12
         CALL32 fs_find
         CMPEQI32 p1, r16, 0
         ADDI32 r16, r0, -2
@@ -2399,7 +2983,8 @@ f_rename:
 .nr:    ADDI32 r16, r0, -7              ; カードが読めない
 .ret:   LOAD32_32 lr, sp, 0
         LOAD32_32 r24, sp, 4
-        ADDI32 sp, sp, 8
+        LOAD32_32 r25, sp, 8
+        ADDI32 sp, sp, 16
         RET32
 
 ; mounted() → r16 = 1 ならカードが読める（メッセージは出さない）
