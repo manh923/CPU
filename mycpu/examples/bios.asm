@@ -23,7 +23,9 @@ VRAM        = 0x00018000
 COLS        = 160
 ROWS        = 45
 OS_BASE     = 0x00020000                ; MYDOS.SYS・UART 起動のプログラムを置く場所（内蔵 RAM の先頭）
-OS_MAX      = 0xB000                    ; UART 起動で読み込めるのは 0x20000〜0x2AFFF（44KB）まで
+OS_MAX      = 0x8000                    ; UART 起動で読み込めるのは 0x20000〜0x27FFF（32KB）まで
+RAM_HOLE    = 0x00028000                ; 0x28000〜0x29FFF はない（BSRAM をデータキャッシュに回した）
+RAM_DATA    = 0x0002A000                ; 0x2A000〜0x2BFFF はデータだけ（命令は読めない）
 SYS_MAX     = 0x6000                    ; MYDOS.SYS の前の 24KB だけ読む（0x26000 からはプログラム用。後ろは MyDOS が自分で読む）
 SD_DATA     = 0x00010030                ; SPI：書くと 1 バイト送り、読むと受け取った 1 バイト
 SD_CTRL     = 0x00010034                ; bit0 = CS（1 で選ぶ）、bit15〜8 = SCK の分周
@@ -100,10 +102,14 @@ bios_start:
         CALL32 bios_puts
 
         ; ---- メモリテスト ----
-        ; 0x20000〜0x2AFFF を 1KB ずつ書いて読み戻す。残りの 4KB は BIOS の変数とスタックで使っているので数えるだけ
+        ; 0x20000〜0x27FFF と 0x2A000〜0x2AFFF を 1KB ずつ書いて読み戻す（0x28000〜0x29FFF はない）。
+        ; 残りの 4KB（0x2B000〜）は BIOS の変数とスタックで使っているので数えるだけ。全部で 40KB
         ADDI32 r24, r0, OS_BASE         ; 調べる番地
         ADDI32 r25, r0, 0               ; 済んだ KB 数
-.kb:    ADDI32 r26, r24, 1024
+.kb:    CMPNEI32 p1, r24, RAM_HOLE
+        BR32 p1, .kb2
+        ADDI32 r24, r0, RAM_DATA        ; 穴を飛ばす
+.kb2:   ADDI32 r26, r24, 1024
         CMPGEUI32 p1, r24, BDA
         BR32 p1, .count
 .word:  XORI32 r17, r24, 0x5A5AA5A5     ; 番地ごとに違う値を書いて読み戻す
@@ -124,7 +130,7 @@ bios_start:
         CALL32 bios_putdec
         ADDI32 r16, r0, MEMTEST_US
         CALL32 delay
-        CMPLTI32 p1, r25, 48
+        CMPLTI32 p1, r25, 40
         BR32 p1, .kb
         ADDI32 r16, r0, s_kbok
         CALL32 bios_puts

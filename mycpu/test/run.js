@@ -160,7 +160,7 @@ const cases = [];
 
   // カードなし：BIOS が MYDOS.SYS を探せず "Non-System disk"
   r = runSim(bios, { input: ' ', max: 5_000_000 });
-  check('BIOS（カードなし）：メモリテスト 48KB、Non-System disk でキーを待つ', r.out.includes('Memory Test : 48 KB OK') &&
+  check('BIOS（カードなし）：メモリテスト 40KB、Non-System disk でキーを待つ', r.out.includes('Memory Test : 40 KB OK') &&
     r.out.includes('SD card     : not found') && r.out.includes('Non-System disk or disk error'), r.out.slice(-300));
 
   // カードの中身はあるが MYDOS.SYS がない

@@ -66,7 +66,7 @@ BATBUF       = 0x0002B600               ; .BAT を読み込む置き場
 BATMAX       = 0x400
 STACK_TOP    = 0x0002C000
 TPA          = 0x00026000               ; .EXE・.COM を読み込む場所
-TPA_END      = 0x0002B000
+TPA_END      = 0x00028000               ; 0x28000〜0x29FFF はない（BSRAM をデータキャッシュに回した）
 COPYBUF      = TPA                      ; COPY・TYPE の作業用（プログラムが動いていないときは空いている）
 NFILES       = 4                        ; 同時に開けるファイルの数
 FAT_DATE     = (2026 - 1980) << 9 | 1 << 5 | 1   ; 時計がないので、書いたファイルの日付は 2026-01-01 にする
@@ -3970,9 +3970,10 @@ s_onto:     .asciz "File cannot be copied onto itself\n"
 s_copied0:  .asciz "        0 file(s) copied\n"
 s_copied1:  .asciz "        1 file(s) copied\n"
 s_ctrlz:    .asciz "^Z\n"
-s_mem:      .ascii "\n   49152 bytes total memory\n"
+s_mem:      .ascii "\n   40960 bytes total memory\n"
             .ascii "   24576 bytes for MyDOS    (0x20000-0x25FFF)\n"
-            .ascii "   20480 bytes for programs (0x26000-0x2AFFF)\n"
+            .ascii "    8192 bytes for programs (0x26000-0x27FFF)\n"
+            .ascii "    4096 bytes free, data   (0x2A000-0x2AFFF)\n"
             .asciz "    4096 bytes for BIOS     (0x2B000-0x2BFFF)\n"
 s_mem_sdram: .ascii " bytes SDRAM        (0x1000000-)\n"
             .ascii " 8323072 bytes for programs (0x1000000-0x17EFFFF)\n"

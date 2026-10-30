@@ -43,8 +43,9 @@ module sdram_model #(
   reg [10:0] row    [0:3];
   integer    t_act  [0:3];         // ACTIVE した時刻
   integer    t_pre  [0:3];         // プリチャージが始まる（始まった）時刻
+  integer    t_wr   [0:3];         // 最後に WRITE した時刻（PRECHARGE までに tWR）
   integer    reads = 0, writes = 0;
-  initial for (i = 0; i < 4; i = i + 1) begin open[i] = 1'b0; t_act[i] = -1000; t_pre[i] = -1000; end
+  initial for (i = 0; i < 4; i = i + 1) begin open[i] = 1'b0; t_act[i] = -1000; t_pre[i] = -1000; t_wr[i] = -1000; end
 
   // 読み出しの出力（CAS レイテンシの分だけ遅らせる）
   reg [31:0] q [0:3];
@@ -96,17 +97,18 @@ module sdram_model #(
             if (a[10]) begin open[ba] = 1'b0; t_pre[ba] = (cyc + 1 > t_act[ba] + T_RAS) ? cyc + 1 : t_act[ba] + T_RAS; end
           end else begin
             writes = writes + 1;
+            t_wr[ba] = cyc;
             if (!dqm[0]) mem[waddr][7:0]   = dq[7:0];
             if (!dqm[1]) mem[waddr][15:8]  = dq[15:8];
             if (!dqm[2]) mem[waddr][23:16] = dq[23:16];
             if (!dqm[3]) mem[waddr][31:24] = dq[31:24];
             if (a[10]) begin open[ba] = 1'b0; t_pre[ba] = (cyc + T_WR > t_act[ba] + T_RAS) ? cyc + T_WR : t_act[ba] + T_RAS; end
           end
-          if (!a[10] && c == 4'b0100) err("WRITE without auto precharge (not supported)");
         end
         4'b0010: begin                                     // PRECHARGE
           for (b = 0; b < 4; b = b + 1) if (a[10] || b == ba) begin
             if (open[b] && cyc - t_act[b] < T_RAS) err("tRAS");
+            if (open[b] && cyc - t_wr[b] < T_WR) err("tWR");
             if (open[b] || t_pre[b] < 0) t_pre[b] = cyc;
             open[b] = 1'b0;
           end

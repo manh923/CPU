@@ -1,6 +1,6 @@
 // SDRAM の制御回路だけのテストベンチ（Icarus Verilog 用）。test/run.js から使う。
 //   27MHz で動かし、ランダムな番地・バイトの書き込みと読み出しを繰り返して、覚えておいた値と比べる。
-//   バースト読み出し（16 語）も、16 語を書いてから読んで比べる。
+//   バースト読み出し（16 語）も、16 語を書いて（1 語ずつか、バースト書き込みで）から読んで比べる。
 //   SDRAM のモデル（tb/sdram_model.v）がタイミング違反を見つけてもエラー
 `timescale 1ns / 1ps
 module tb_sdram;
@@ -14,6 +14,8 @@ module tb_sdram;
   reg  [31:0] wdata = 32'd0;
   reg         burst = 1'b0;
   wire        ack, ready_init, bvalid;
+  wire [3:0]  bidx;
+  reg  [31:0] bwant [0:15];
   wire [31:0] rdata;
   wire sclk, cke, cs_n, ras_n, cas_n, we_n;
   wire [10:0] a;
@@ -21,7 +23,7 @@ module tb_sdram;
   wire [3:0]  dqm;
   wire [31:0] dq;
   mycpu_sdram #(.SDRAM_HZ(27_000_000)) ctl (
-    .clk(clk), .rst(rst), .req(req), .waddr(waddr), .wstrb(wstrb), .wdata(wdata), .burst(burst), .ack(ack), .bvalid(bvalid), .rdata(rdata),
+    .clk(clk), .rst(rst), .req(req), .waddr(waddr), .wstrb(wstrb), .wdata(wdata), .burst(burst), .bwdata(bwant[bidx]), .bidx(bidx), .ack(ack), .bvalid(bvalid), .rdata(rdata),
     .ready_init(ready_init),
     .sdram_clk(sclk), .sdram_cke(cke), .sdram_cs_n(cs_n), .sdram_ras_n(ras_n), .sdram_cas_n(cas_n), .sdram_we_n(we_n),
     .sdram_a(a), .sdram_ba(ba), .sdram_dqm(dqm), .sdram_dq(dq)
@@ -33,9 +35,8 @@ module tb_sdram;
   // 使う番地を 256 個に絞る（同じ番地への読み書きが何度も起きるように）。行・バンク・列はばらばら
   reg [20:0] addrs [0:255];
   reg [31:0] shadow [0:255];
-  integer i, k, ng = 0, nr = 0, nw = 0, waits, maxwait = 0, maxburst = 0, t0;
+  integer i, k, ng = 0, nr = 0, nw = 0, nbw = 0, waits, maxwait = 0, maxburst = 0, t0;
   reg [20:0] bbase;
-  reg [31:0] bwant [0:15];
   reg [31:0] v;
 
   task access(input [20:0] ad, input [3:0] st, input [31:0] d, output [31:0] q);
@@ -85,10 +86,16 @@ module tb_sdram;
     // バースト読み出し：16 語の境目にランダムな値を書き、続けて読む
     for (i = 0; i < 300; i = i + 1) begin
       bbase = $urandom & 21'h1FFFF0;
-      for (k = 0; k < 16; k = k + 1) begin
-        bwant[k] = $urandom;
-        access(bbase + k, 4'hF, bwant[k], v);
-      end
+      for (k = 0; k < 16; k = k + 1) bwant[k] = $urandom;
+      if (i % 2) begin                 // バースト書き込み（データキャッシュの書き戻しと同じ）
+        @(posedge clk); #1;
+        req = 1'b1; burst = 1'b1; waddr = bbase; wstrb = 4'hF;
+        @(posedge clk); #1;
+        req = 1'b0; burst = 1'b0; wstrb = 4'd0;
+        while (!ack) begin @(posedge clk); #1; end
+        nbw = nbw + 1;
+      end else
+        for (k = 0; k < 16; k = k + 1) access(bbase + k, 4'hF, bwant[k], v);
       @(posedge clk); #1;
       req = 1'b1; burst = 1'b1; waddr = bbase; wstrb = 4'd0;
       @(posedge clk); #1;
@@ -108,8 +115,8 @@ module tb_sdram;
       if (k != 16) begin ng = ng + 1; $display("tb_sdram: バーストで %0d 語しか来ない", k); end
       if (waits > maxburst) maxburst = waits;
     end
-    $display("tb_sdram: 初期化 %0d クロック、書き込み %0d 回・読み出し %0d 回（いちばん長い待ち %0d クロック）、バースト 16 語 %0d クロック",
-             t0, nw, nr, maxwait, maxburst);
+    $display("tb_sdram: 初期化 %0d クロック、書き込み %0d 回・読み出し %0d 回（いちばん長い待ち %0d クロック）、バースト 16 語 %0d クロック、バースト書き込み %0d 回",
+             t0, nw, nr, maxwait, maxburst, nbw);
     $display("tb_sdram: モデルのリフレッシュ %0d 回、タイミング違反 %0d 件", m.nrefs, m.errors);
     $display("tb_sdram: %0d 件 NG", ng + m.errors);
     $finish;
