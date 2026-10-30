@@ -501,32 +501,12 @@ ___divdf3:
 .bdn32: ADDI32 r26, r24, -32
         SHLR32 r21, r18, r26
         ADDI32 r18, r0, 0
-.div:   ; 筆算：商 q = a ÷ b × 2^55 を 56 bit（上 24 bit を r26、下 32 bit を r27）。余り r20:r16
+.div:   ; 商 q = a ÷ b × 2^55（56 bit、上を r26、下を r27）を、整数部の 1 bit と 11 bit × 5 回で求める。余り r20:r16
+        ; 11 bit ずつ：余りを左へ 11、余りの上位 ÷（b の上位 + 1）を DIVU で（本当の値か 1 小さい）、
+        ; 余り −= 見積もり × b、まだ b 以上なら 1 回だけ直す。余りはいつも b より小さい
         SUBR32 r22, r22, r23
         ADDI32 r22, r22, 1023           ; 指数
-        ADDI32 r26, r0, 0
-        ADDI32 r17, r0, 24
-.q1:    CMPLTUR32 p2, r16, r18
-        BTOI32 r24, p2
-        SUBR32 r23, r20, r21
-        SUBR32 r23, r23, r24            ; 余り − b の上位（負なら引けない）
-        CMPGEI32 p1, r23, 0
-        SUBR32 r24, r16, r18
-        SEL32 r20, r23, r20, p1
-        SEL32 r16, r24, r16, p1
-        BTOI32 r24, p1
-        ADDR32 r26, r26, r26
-        ORR32 r26, r26, r24
-        ADDR32 r20, r20, r20
-        SHRI32 r24, r16, 31
-        ORR32 r20, r20, r24
-        ADDR32 r16, r16, r16
-        ADDI32 r17, r17, -1
-        CMPNEI32 p3, r17, 0
-        BR32 p3, .q1
-        ADDI32 r27, r0, 0
-        ADDI32 r17, r0, 32
-.q2:    CMPLTUR32 p2, r16, r18
+        CMPLTUR32 p2, r16, r18          ; 整数部：a ≧ b なら引いて 1
         BTOI32 r24, p2
         SUBR32 r23, r20, r21
         SUBR32 r23, r23, r24
@@ -534,16 +514,154 @@ ___divdf3:
         SUBR32 r24, r16, r18
         SEL32 r20, r23, r20, p1
         SEL32 r16, r24, r16, p1
-        BTOI32 r24, p1
-        ADDR32 r27, r27, r27
-        ORR32 r27, r27, r24
-        ADDR32 r20, r20, r20
-        SHRI32 r24, r16, 31
+        BTOI32 r27, p1
+        ADDI32 r26, r0, 0
+        ADDI32 r19, r21, 1              ; b の上位 + 1（見積もりの割る数）
+        SHLI32 r20, r20, 11
+        SHRI32 r24, r16, 21
         ORR32 r20, r20, r24
-        ADDR32 r16, r16, r16
-        ADDI32 r17, r17, -1
-        CMPNEI32 p3, r17, 0
-        BR32 p3, .q2
+        SHLI32 r16, r16, 11
+        DIVUR32 r23, r20, r19
+        MULR32 r24, r23, r18
+        MULHUR32 r17, r23, r18
+        CMPLTUR32 p2, r16, r24
+        SUBR32 r16, r16, r24
+        MULR32 r24, r23, r21
+        ADDR32 r17, r17, r24
+        BTOI32 r24, p2
+        SUBR32 r20, r20, r17
+        SUBR32 r20, r20, r24
+        CMPLTUR32 p2, r16, r18
+        BTOI32 r24, p2
+        SUBR32 r17, r20, r21
+        SUBR32 r17, r17, r24
+        CMPGEI32 p1, r17, 0
+        SUBR32 r24, r16, r18
+        SEL32 r20, r17, r20, p1
+        SEL32 r16, r24, r16, p1
+        BTOI32 r24, p1
+        ADDR32 r23, r23, r24
+        SHLI32 r26, r26, 11
+        SHRI32 r24, r27, 21
+        ORR32 r26, r26, r24
+        SHLI32 r27, r27, 11
+        ORR32 r27, r27, r23
+        SHLI32 r20, r20, 11
+        SHRI32 r24, r16, 21
+        ORR32 r20, r20, r24
+        SHLI32 r16, r16, 11
+        DIVUR32 r23, r20, r19
+        MULR32 r24, r23, r18
+        MULHUR32 r17, r23, r18
+        CMPLTUR32 p2, r16, r24
+        SUBR32 r16, r16, r24
+        MULR32 r24, r23, r21
+        ADDR32 r17, r17, r24
+        BTOI32 r24, p2
+        SUBR32 r20, r20, r17
+        SUBR32 r20, r20, r24
+        CMPLTUR32 p2, r16, r18
+        BTOI32 r24, p2
+        SUBR32 r17, r20, r21
+        SUBR32 r17, r17, r24
+        CMPGEI32 p1, r17, 0
+        SUBR32 r24, r16, r18
+        SEL32 r20, r17, r20, p1
+        SEL32 r16, r24, r16, p1
+        BTOI32 r24, p1
+        ADDR32 r23, r23, r24
+        SHLI32 r26, r26, 11
+        SHRI32 r24, r27, 21
+        ORR32 r26, r26, r24
+        SHLI32 r27, r27, 11
+        ORR32 r27, r27, r23
+        SHLI32 r20, r20, 11
+        SHRI32 r24, r16, 21
+        ORR32 r20, r20, r24
+        SHLI32 r16, r16, 11
+        DIVUR32 r23, r20, r19
+        MULR32 r24, r23, r18
+        MULHUR32 r17, r23, r18
+        CMPLTUR32 p2, r16, r24
+        SUBR32 r16, r16, r24
+        MULR32 r24, r23, r21
+        ADDR32 r17, r17, r24
+        BTOI32 r24, p2
+        SUBR32 r20, r20, r17
+        SUBR32 r20, r20, r24
+        CMPLTUR32 p2, r16, r18
+        BTOI32 r24, p2
+        SUBR32 r17, r20, r21
+        SUBR32 r17, r17, r24
+        CMPGEI32 p1, r17, 0
+        SUBR32 r24, r16, r18
+        SEL32 r20, r17, r20, p1
+        SEL32 r16, r24, r16, p1
+        BTOI32 r24, p1
+        ADDR32 r23, r23, r24
+        SHLI32 r26, r26, 11
+        SHRI32 r24, r27, 21
+        ORR32 r26, r26, r24
+        SHLI32 r27, r27, 11
+        ORR32 r27, r27, r23
+        SHLI32 r20, r20, 11
+        SHRI32 r24, r16, 21
+        ORR32 r20, r20, r24
+        SHLI32 r16, r16, 11
+        DIVUR32 r23, r20, r19
+        MULR32 r24, r23, r18
+        MULHUR32 r17, r23, r18
+        CMPLTUR32 p2, r16, r24
+        SUBR32 r16, r16, r24
+        MULR32 r24, r23, r21
+        ADDR32 r17, r17, r24
+        BTOI32 r24, p2
+        SUBR32 r20, r20, r17
+        SUBR32 r20, r20, r24
+        CMPLTUR32 p2, r16, r18
+        BTOI32 r24, p2
+        SUBR32 r17, r20, r21
+        SUBR32 r17, r17, r24
+        CMPGEI32 p1, r17, 0
+        SUBR32 r24, r16, r18
+        SEL32 r20, r17, r20, p1
+        SEL32 r16, r24, r16, p1
+        BTOI32 r24, p1
+        ADDR32 r23, r23, r24
+        SHLI32 r26, r26, 11
+        SHRI32 r24, r27, 21
+        ORR32 r26, r26, r24
+        SHLI32 r27, r27, 11
+        ORR32 r27, r27, r23
+        SHLI32 r20, r20, 11
+        SHRI32 r24, r16, 21
+        ORR32 r20, r20, r24
+        SHLI32 r16, r16, 11
+        DIVUR32 r23, r20, r19
+        MULR32 r24, r23, r18
+        MULHUR32 r17, r23, r18
+        CMPLTUR32 p2, r16, r24
+        SUBR32 r16, r16, r24
+        MULR32 r24, r23, r21
+        ADDR32 r17, r17, r24
+        BTOI32 r24, p2
+        SUBR32 r20, r20, r17
+        SUBR32 r20, r20, r24
+        CMPLTUR32 p2, r16, r18
+        BTOI32 r24, p2
+        SUBR32 r17, r20, r21
+        SUBR32 r17, r17, r24
+        CMPGEI32 p1, r17, 0
+        SUBR32 r24, r16, r18
+        SEL32 r20, r17, r20, p1
+        SEL32 r16, r24, r16, p1
+        BTOI32 r24, p1
+        ADDR32 r23, r23, r24
+        SHLI32 r26, r26, 11
+        SHRI32 r24, r27, 21
+        ORR32 r26, r26, r24
+        SHLI32 r27, r27, 11
+        ORR32 r27, r27, r23
         ; 余りがあれば最下位を 1 に
         ORR32 r20, r20, r16
         CMPNEI32 p1, r20, 0

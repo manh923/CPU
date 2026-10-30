@@ -115,14 +115,20 @@ function buildAsm(files, opts = {}) {
   const libc = fs.readdirSync(LIBC).filter((f) => f.endsWith('.c')).sort().map((f) => path.join(LIBC, f));
   ensureCompiler();
   const parts = [...files, ...libc].map((f) => ({ name: path.relative(ROOT, f), ...split(compileCached(f, includes)) }));
-  // crt0.s を先頭に、ほかの libc/*.s（setjmp など）はその後ろに。「; @fn」で関数ごとに分けてある .s
-  // （softfloat.s）は C と同じく、使う関数だけ残す
+  // crt0.s を先頭に、ほかの libc/*.s（setjmp など）はその後ろに、この順で（AS でつなぐのと同じ並び）。
+  // 「; @fn」で関数ごとに分けてある .s（softfloat.s）は C と同じく、使う関数だけ残す
   const asms = fs.readdirSync(LIBC).filter((f) => f.endsWith('.s') && f !== 'crt0.s').sort();
-  const asmText = [];
+  const asmText = [], asmItems = [];
   for (const f of [...(opts.lib ? [] : ['crt0.s']), ...asms]) {
     const t = fs.readFileSync(path.join(LIBC, f), 'utf8');
-    if (hasFn(t)) parts.push({ name: 'libc/' + f, ...split(t) });
-    else asmText.push(t);
+    if (hasFn(t)) {
+      const p = { name: 'libc/' + f, asm: true, ...split(t) };
+      parts.push(p);
+      asmItems.push(p);
+    } else {
+      asmText.push(t);
+      asmItems.push(t);
+    }
   }
   let keep = null;
   if (opts.gc !== false && !opts.lib) {
@@ -138,9 +144,9 @@ function buildAsm(files, opts = {}) {
   const out = [
     `; ${files.map((f) => path.basename(f)).join(' ')} — tools/cc.js が作ったアセンブリ（C ライブラリ込み）`,
     `        .org 0x${BASE.toString(16)}`,
-    ...asmText,
+    ...asmItems.map((x) => (typeof x === 'string' ? x : x.text)),
   ];
-  for (const p of parts) out.push(`; ---- ${p.name} ----`, p.text);
+  for (const p of parts) if (!p.asm) out.push(`; ---- ${p.name} ----`, p.text);
   out.push('', '; ---- データ ----', '        .align 64');
   for (const p of parts) out.push(`; ---- ${p.name} ----`, p.data);
   // 初期値なしの大域変数：どこにも定義がなければ、ここに 1 つだけ置く（大きさ・揃えはいちばん大きいもの）
