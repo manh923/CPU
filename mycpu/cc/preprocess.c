@@ -89,7 +89,7 @@ static Token *skip_line(Token *tok) {
 }
 
 static Token *copy_token(Token *tok) {
-  Token *t = malloc(sizeof(Token));   // MyCPU：すぐ全部を写すので 0 で埋めない
+  Token *t = arena_alloc(sizeof(Token));
   *t = *tok;
   t->next = NULL;
   return t;
@@ -103,7 +103,7 @@ static Token *new_eof(Token *tok) {
 }
 
 static Hideset *new_hideset(char *name) {
-  Hideset *hs = calloc(1, sizeof(Hideset));
+  Hideset *hs = arena_alloc(sizeof(Hideset));
   hs->name = name;
   return hs;
 }
@@ -324,7 +324,7 @@ static Macro *find_macro(Token *tok) {
 }
 
 static Macro *add_macro(char *name, bool is_objlike, Token *body) {
-  Macro *m = calloc(1, sizeof(Macro));
+  Macro *m = arena_alloc(sizeof(Macro));
   m->name = name;
   m->is_objlike = is_objlike;
   m->body = body;
@@ -355,7 +355,7 @@ static MacroParam *read_macro_params(Token **rest, Token *tok, char **va_args_na
       return head.next;
     }
 
-    MacroParam *m = calloc(1, sizeof(MacroParam));
+    MacroParam *m = arena_alloc(sizeof(MacroParam));
     m->name = strndup(tok->loc, tok->len);
     cur = cur->next = m;
     tok = tok->next;

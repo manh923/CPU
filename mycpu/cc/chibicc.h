@@ -44,6 +44,7 @@ typedef struct {
 
 void strarray_push(StringArray *arr, char *s);
 char *format(char *fmt, ...) __attribute__((format(printf, 1, 2)));
+void *arena_alloc(size_t size);
 
 //
 // tokenize.c
@@ -72,22 +73,25 @@ typedef struct {
 
 // Token type
 typedef struct Token Token;
+// トークンはたくさん作るので小さく（MyCPU で 56 バイト）：kind は 1 バイト、val・fval・str は共用
 struct Token {
-  TokenKind kind;   // Token kind
+  unsigned char kind; // Token kind（TokenKind）
+  bool at_bol;      // True if this token is at beginning of line
+  bool has_space;   // True if this token follows a space character
   Token *next;      // Next token
-  int64_t val;      // If kind is TK_NUM, its value
-  long double fval; // If kind is TK_NUM, its value
+  union {
+    int64_t val;      // If kind is TK_NUM (integer), its value
+    long double fval; // If kind is TK_NUM (floating point), its value
+    char *str;        // If kind is TK_STR: contents including terminating '\0'
+  };
   char *loc;        // Token location
   int len;          // Token length
   Type *ty;         // Used if TK_NUM or TK_STR
-  char *str;        // String literal contents including terminating '\0'
 
   File *file;       // Source location
   char *filename;   // Filename
   int line_no;      // Line number
   int line_delta;   // Line number
-  bool at_bol;      // True if this token is at beginning of line
-  bool has_space;   // True if this token follows a space character
   Hideset *hideset; // For macro expansion
   Token *origin;    // If this is expanded from a macro, the original token
 };
@@ -232,7 +236,8 @@ typedef enum {
 } NodeKind;
 
 // AST node type
-// 式のノード（node_is_small の種類）は、cond より前だけを確保する（メモリを減らすため。parse.c の new_node）
+// 式のノード（node_is_small の種類）は、cond より前だけを確保する（メモリを減らすため。parse.c の new_node）。
+// member と var、val と fval は同じ場所（どのノードも片方しか使わない）
 struct Node {
   NodeKind kind; // Node kind
   bool pass_by_stack; // 関数の引数（式）のとき
@@ -243,15 +248,16 @@ struct Node {
   Node *lhs;     // Left-hand side
   Node *rhs;     // Right-hand side
 
-  // Struct member access
-  Member *member;
+  union {
+    Member *member; // Struct member access（ND_MEMBER）
+    Obj *var;       // Variable（ND_VAR・ND_MEMZERO・ND_VLA_PTR）
+  };
 
-  // Variable
-  Obj *var;
-
-  // Numeric literal
-  int64_t val;
-  long double fval;
+  // Numeric literal（ND_NUM。整数なら val、浮動小数点なら fval）
+  union {
+    int64_t val;
+    long double fval;
+  };
 
   // ここから後ろは文・関数呼び出しなど（node_is_small でない種類）だけ
 
