@@ -32,6 +32,9 @@ Programs
                show the age of each cell. Enter runs/stops, arrows (WASD
                for 8) move the cursor, Space flips a cell, N steps,
                R fills at random, C clears, G puts a glider gun, ESC quits.
+  SNAKE.EXE    A snake game on the graphics screen. Arrows (or WASD) turn,
+               Space pauses, ESC quits. Red food +1, gold food +3 (it
+               disappears soon). Until you press a key, it plays by itself.
 
 The C compiler is on this card too:
   CC.EXE       chibicc, compiled for this CPU. CC FILE.C writes FILE.S.
