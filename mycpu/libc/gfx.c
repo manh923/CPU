@@ -1,5 +1,6 @@
 // グラフィック画面（include/gfx.h）。入出力レジスタ（lib/isa.js の IO）を直接書く
 #include <gfx.h>
+#include <string.h>
 
 #define IO_VIDEO_MODE (*(volatile unsigned *)0x00010040)
 #define IO_FB_BASE    (*(volatile unsigned *)0x00010044)
@@ -83,8 +84,5 @@ void gfx_box(int x, int y, int w, int h, int c) {
 }
 
 void gfx_present(const unsigned char *buf) {
-  const unsigned *s = (const unsigned *)buf;
-  unsigned *d = (unsigned *)gfx_fb;
-  for (int i = 0; i < GFX_W * GFX_H / 4; i++)
-    d[i] = s[i];
+  memcpy(gfx_fb, buf, GFX_W * GFX_H);   // libc/string.s：4 バイトずつ、16 バイトごとにまとめて
 }

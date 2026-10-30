@@ -28,6 +28,10 @@ Programs
   BLOCKS.EXE   A block-breaking game on the graphics screen. Left/Right
                (or A/D) move the paddle, Space serves, ESC quits.
                Until you press a key, it plays by itself.
+  LIFE.EXE     A cellular automaton on the whole graphics screen. Colors
+               show the age of each cell. Enter runs/stops, arrows (WASD
+               for 8) move the cursor, Space flips a cell, N steps,
+               R fills at random, C clears, G puts a glider gun, ESC quits.
 
 The C compiler is on this card too:
   CC.EXE       chibicc, compiled for this CPU. CC FILE.C writes FILE.S.
