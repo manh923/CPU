@@ -39,6 +39,7 @@ static char fid[16];                   // ファイルの番号（ファイル�
 typedef struct {
   int n;
   int r1, r2;
+  bool cs;       // r19〜r23（呼んだ側が保存するレジスタ）に置いた
 } Slot;
 static Slot tstack[TSTACK_MAX];
 static int tdepth;
@@ -133,6 +134,7 @@ static Slot *new_slot(void) {
 
 static void push(void) {
   Slot *s = new_slot();
+  s->cs = false;
   if (tused < ntregs) {
     s->n = 1;
     s->r1 = REG_HI - tused++;
@@ -146,6 +148,7 @@ static void push(void) {
 
 static void push64(void) {
   Slot *s = new_slot();
+  s->cs = false;
   if (tused + 2 <= ntregs) {
     s->n = 2;
     s->r1 = REG_HI - tused++;
@@ -159,12 +162,71 @@ static void push64(void) {
   push64_mem();
 }
 
+// r19〜r23 を式の途中の値に使えるか（可変長引数・asm の関数は使わない）と、今使っているもの。
+// cur_scope は、今コードを作っている場所のスコープ（parse.c の番号）
+static bool cs_ok;
+static unsigned cs_busy;
+static int cur_scope = 1;
+
+// レジスタ r に、今の場所で生きている変数がいるか（その変数のスコープの中にいる）
+static bool reg_live(int r) {
+  for (Obj *v = current_fn->locals; v; v = v->next)
+    if (v->reg == r && v->sc_lo <= cur_scope && cur_scope <= v->sc_hi)
+      return true;
+  return false;
+}
+
+static bool is64(Type *ty);
+
+// 関数を呼ばず、r19〜r22 も作業に使わない式か（浮動小数点・long long・構造体・ビットフィールド・文を含まない）
+static bool simple_tree(Node *n) {
+  if (!n)
+    return true;
+  if (n->ty && (is_flonum(n->ty) || is64(n->ty) || n->ty->kind == TY_STRUCT || n->ty->kind == TY_UNION))
+    return false;
+  switch (n->kind) {
+  case ND_NUM:
+  case ND_VAR:
+    return true;
+  case ND_MEMBER:
+    return !n->member->is_bitfield && simple_tree(n->lhs);
+  case ND_COND:
+    return simple_tree(n->cond) && simple_tree(n->then) && simple_tree(n->els);
+  case ND_ADD: case ND_SUB: case ND_MUL: case ND_DIV: case ND_MOD: case ND_NEG:
+  case ND_BITAND: case ND_BITOR: case ND_BITXOR: case ND_SHL: case ND_SHR:
+  case ND_EQ: case ND_NE: case ND_LT: case ND_LE: case ND_NOT: case ND_BITNOT:
+  case ND_LOGAND: case ND_LOGOR: case ND_COMMA: case ND_CAST: case ND_ADDR: case ND_DEREF: case ND_ASSIGN:
+    return simple_tree(n->lhs) && simple_tree(n->rhs);
+  default:
+    return false;
+  }
+}
+
+// 積んで、next を求めてから取り出すとき：next が簡単な式なら、空いている r19〜r23 に置く（入口で保存しなくてよい）
+static void push_for(Node *next) {
+  if (cs_ok && simple_tree(next))
+    for (int r = 23; r >= 19; r--)
+      if (!(cs_busy >> r & 1) && !reg_live(r)) {
+        Slot *s = new_slot();
+        s->n = 1;
+        s->r1 = r;
+        s->cs = true;
+        cs_busy |= 1u << r;
+        move(r, 16);
+        return;
+      }
+  push();
+}
+
 // 積んだ値を取り出す。レジスタにあれば、そのレジスタの番号を返す（コードは出さない。次に積む前にすぐ使うこと）。
 // スタックにあれば reg に読んで reg を返す
 static int pop_reg(int reg) {
   Slot *s = &tstack[--tdepth];
   if (s->n) {
-    tused--;
+    if (s->cs)
+      cs_busy &= ~(1u << s->r1);
+    else
+      tused--;
     return s->r1;
   }
   pop_mem(reg);
@@ -618,7 +680,7 @@ static void gen_operands(Node *lhs, Node *rhs, Opnd *l, Opnd *r) {
     return;
   }
   gen_to(rhs, 16);
-  push();
+  push_for(lhs);
   gen_to(lhs, 16);
   l->kind = O_REG;
   l->reg = 16;
@@ -1532,7 +1594,7 @@ static void gen_assign(Node *node, int dst) {
   // 番地を一時置き場に置いてから値を求める
   gen_addr_op(lhs, &a);
   if (a.base == 16) {
-    push();
+    push_for(rhs);
     gen_to(rhs, 16);
     a.base = pop_reg(17);
   } else {
@@ -1873,15 +1935,20 @@ static void gen_expr2(Node *node) {
       store_at(node->ty, 16, &a);
     }
     return;
-  case ND_STMT_EXPR:
+  case ND_STMT_EXPR: {
     // 最後の式文の値が、全体の値
+    int saved = cur_scope;
+    if (node->val > 0)
+      cur_scope = node->val;
     for (Node *n = node->body; n; n = n->next) {
       if (!n->next && n->kind == ND_EXPR_STMT)
         gen_expr(n->lhs);
       else
         gen_stmt(n);
     }
+    cur_scope = saved;
     return;
+  }
   case ND_COMMA:
     gen_void(node->lhs);
     gen_expr(node->rhs);
@@ -2101,7 +2168,18 @@ static void gen_expr2(Node *node) {
   gen_binary(node);
 }
 
+static void gen_stmt2(Node *node);
+
+// 文のコードを作る。ブロック・for に入るときは、今のスコープ（cur_scope）を変える
 static void gen_stmt(Node *node) {
+  int saved = cur_scope;
+  if ((node->kind == ND_BLOCK || node->kind == ND_FOR) && node->val > 0)
+    cur_scope = node->val;
+  gen_stmt2(node);
+  cur_scope = saved;
+}
+
+static void gen_stmt2(Node *node) {
   switch (node->kind) {
   case ND_IF: {
     char *els = new_label();
@@ -2731,6 +2809,9 @@ static void emit_text(Obj *prog) {
 
     current_fn = fn;
     ntregs = (REG_HI - REG_LO + 1) - fn->ra_nvars;
+    cs_busy = 0;
+    cs_ok = !fn->va_area && !fn->ra_asm;
+    cur_scope = 1;
     tused = tdepth = 0;
     used_regs = 0;
     for (int i = 0; i < fn->ra_nvars; i++)
