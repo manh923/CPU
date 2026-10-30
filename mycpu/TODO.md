@@ -27,7 +27,8 @@ MyDOS の上で C コンパイラを動かし、C のプログラム（コンパ
 7. ~~浮動小数点（ソフトウェア）~~ 済み：float 32bit・double 64bit（long double も 64bit）、IEEE 754。
    四則・比較・変換は `libc/softfloat.c`、printf の %f・%e・%g と strtod は `libc/fltio.c`（正しく丸める）、
    `math.h` は `libc/math.c`。どれも PC の gcc・glibc とビット単位で比べるテストがある（`test/floattest.c`・`fltiotest.c`・`mathtest.c`・`cfloat.c`）
-   - 遅い：double の足し算 1 回で約 1500 命令（実機の 21 MIPS で 1 秒に 1.4 万回ほど）。速くするなら softfloat をアセンブリで書く・コンパイラにレジスタ割り当てを入れる
+   - 速くした：よく使うものはアセンブリ（`libc/softfloat.s`）。double の足し算 1 回が約 1000 → 150 命令、掛け算 1400 → 140、割り算 6200 → 1100、
+     int → double 2500 → 30、float の足し算 770 → 220。割り算はまだ 1 bit ずつの筆算（DIVU で何 bit かずつにすれば速くなる）
 
 ## 実機（Tang Nano 20K、届いたら）
 
@@ -42,7 +43,7 @@ MyDOS の上で C コンパイラを動かし、C のプログラム（コンパ
 ### ソフト
 1. ~~コンパイラ（cc/codegen.c）にレジスタ割り当て~~ 済み：変数を callee-saved のレジスタに、葉の関数はフレームなし
 2. ~~バイナリを小さくする~~ 済み：AS -lib が LIBC のうち使う関数だけを入れる（区切りのある .EXE）。printf の long long・小数も使うときだけ
-   - 残り：softfloat をアセンブリで（double の足し算 1 回が約 1500 命令）
+   - ~~softfloat をアセンブリで~~ 済み（`libc/softfloat.s`。C 版とビット単位で比べるテストは `test/fasmtest.c`）
 
 ### ハード（CPU・Verilog）
 3. ~~データキャッシュ~~ 済み：8KB・ライトバック。SDRAM の読み書きが 1 命令あたり 5.6 ／ 4.6 → 1 ／ 1 クロック（当たったとき）。

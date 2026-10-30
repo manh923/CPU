@@ -306,6 +306,10 @@ if (spawnSync('gcc', ['--version']).error) {
   let r = runExe('floattest', ['300000']);
   check('ソフトウェアの浮動小数点（libc/softfloat.c）：四則・比較・変換が PC の FPU とビット単位で同じ（30 万組）',
     r.status === 0, r.stdout.trim());
+  // アセンブリ版（libc/softfloat.s）は、この CPU で C 版と比べる
+  const fa = require('./cctest.js').runC([path.join(ROOT, 'test/fasmtest.c')], { max: 5_000_000_000 });
+  check('浮動小数点のアセンブリ版（libc/softfloat.s）：この CPU で C 版とビット単位で同じ（double・float 2 万組ずつ）',
+    fa.ok, fa.why + '\n' + fa.out.slice(0, 1000));
 
   gcc('fltiotest', ['-Dstrtod=my_strtod', '-Dstrtof=my_strtof', '-Dstrtold=my_strtold', '-Datof=my_atof', 'test/fltiotest.c', 'libc/fltio.c']);
   r = runExe('fltiotest', ['20000']);

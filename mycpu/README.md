@@ -71,7 +71,7 @@ node tools/cc.js disk/primes.c -S primes.asm     # アセンブリだけ（C ラ
 node test/cctest.js                              # コンパイラのテスト（chibicc のテスト）
 ```
 
-- コンパイラは `cc/`（chibicc の改造版）。`gcc` と `make` で自動でビルドされる。`int`・`long`・ポインタは 32bit、`long long` は 64bit。`float` は 32bit、`double`・`long double` は 64bit（IEEE 754。計算はソフトウェアで、`libc/softfloat.c`）。使わない関数・変数はつながない（`tools/cc.js` がリンカの代わりに捨てる）
+- コンパイラは `cc/`（chibicc の改造版）。`gcc` と `make` で自動でビルドされる。`int`・`long`・ポインタは 32bit、`long long` は 64bit。`float` は 32bit、`double`・`long double` は 64bit（IEEE 754。計算はソフトウェアで、よく使うものはアセンブリの `libc/softfloat.s`、残りは `libc/softfloat.c`）。使わない関数・変数はつながない（`tools/cc.js` がリンカの代わりに捨てる）
 - C ライブラリ（`libc/`）：
   - `stdio.h`：`FILE`（`fopen`・`fread`・`fwrite`・`fgets`・`fputs`・`fseek`・`ftell`・`fprintf` …。書くファイルは後ろに足すだけなので、`fseek` できるのは読むファイル）、`stdin`（1 行ずつ）・`stdout`・`stderr`、`printf` の仲間（`%lld` も）、`scanf`・`fscanf`・`sscanf` と v の付いたもの（`libc/scanf.c`。glibc と同じ結果になるかをテストで比べる）、`remove`・`rename`・`perror`
   - `printf` の `%f`・`%e`・`%g` と `strtod`・`atof` は正しく丸める（`libc/fltio.c`）

@@ -74,6 +74,9 @@ function split(asm) {
   return { text, data };
 }
 
+// 「; @fn」で関数ごとに分けてあるアセンブリか
+const hasFn = (asm) => /^; @fn /m.test(asm);
+
 // 使われない関数・変数を捨てる（リンカの --gc-sections と同じ）。.s のファイルと名前のないかたまりから、
 // たどれるラベルのものだけ残す
 function gc(parts, roots) {
@@ -112,9 +115,15 @@ function buildAsm(files, opts = {}) {
   const libc = fs.readdirSync(LIBC).filter((f) => f.endsWith('.c')).sort().map((f) => path.join(LIBC, f));
   ensureCompiler();
   const parts = [...files, ...libc].map((f) => ({ name: path.relative(ROOT, f), ...split(compileCached(f, includes)) }));
-  // crt0.s を先頭に、ほかの libc/*.s（setjmp など）はその後ろに
+  // crt0.s を先頭に、ほかの libc/*.s（setjmp など）はその後ろに。「; @fn」で関数ごとに分けてある .s
+  // （softfloat.s）は C と同じく、使う関数だけ残す
   const asms = fs.readdirSync(LIBC).filter((f) => f.endsWith('.s') && f !== 'crt0.s').sort();
-  const asmText = [...(opts.lib ? [] : ['crt0.s']), ...asms].map((f) => fs.readFileSync(path.join(LIBC, f), 'utf8'));
+  const asmText = [];
+  for (const f of [...(opts.lib ? [] : ['crt0.s']), ...asms]) {
+    const t = fs.readFileSync(path.join(LIBC, f), 'utf8');
+    if (hasFn(t)) parts.push({ name: 'libc/' + f, ...split(t) });
+    else asmText.push(t);
+  }
   let keep = null;
   if (opts.gc !== false && !opts.lib) {
     const roots = [];
@@ -201,7 +210,8 @@ function buildLibAsm() {
   };
   for (const f of asms) {
     const t = fs.readFileSync(path.join(LIBC, f), 'utf8');
-    add([...t.matchAll(/^([A-Za-z_]\w*):/gm)].map((m) => m[1]), t);
+    if (hasFn(t)) for (const c of split(t).text) add(c.name ? [c.name] : [], c.lines.join('\n'));
+    else add([...t.matchAll(/^([A-Za-z_]\w*):/gm)].map((m) => m[1]), t);
   }
   for (const p of parts) for (const c of p.text) add(c.name ? [c.name] : [], c.lines.join('\n'));
   out.push('', '; ---- データ ----', '        .align 64');
