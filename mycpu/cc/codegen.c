@@ -1471,7 +1471,8 @@ static void gen_assign(Node *node, int dst) {
   // (int){3} = 5 のような (式, 変数) への代入：先に式を求めて、変数へ
   if (lhs->kind == ND_COMMA) {
     gen_void(lhs->lhs);
-    Node n = *node;
+    Node n;
+    memcpy(&n, node, NODE_SMALL);   // ND_ASSIGN は cond から後ろがない
     n.lhs = lhs->rhs;
     gen_assign(&n, dst);
     return;
@@ -2310,6 +2311,8 @@ static void ra_scan(Node *node, int w) {
   }
   ra_scan(node->lhs, w);
   ra_scan(node->rhs, w);
+  if (node_is_small(node->kind))
+    return;
   ra_scan(node->cond, w);
   ra_scan(node->then, w);
   ra_scan(node->els, w);

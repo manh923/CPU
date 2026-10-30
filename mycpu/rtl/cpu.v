@@ -3,6 +3,8 @@
 //   F（命令を読む）：命令の口に番地を出す。メモリは 1 クロック後に 8 バイト（ヘッダと即値）を返す
 //   E（実行）：解読・レジスタの読み出し・演算・分岐。演算の結果はこのクロックの終わりにレジスタへ書く。
 //              分岐はここで決まる。飛ぶときは、先に読んでいた命令を捨てて飛び先から読み直す（1 クロックの損）
+// 分岐予測：命令が届いたとき（F）に中身を見て、飛びそうなら次は飛び先から読む。JMP・CALL は必ず、
+//   BR は後ろへ飛ぶもの（ループ）だけ、RET は LR の値へ。E で答え合わせをし、外れたら読み直す（当たれば損なし）
 //   M（メモリ）：E で出した読み出しの返事を受け取り、レジスタに書く。そのレジスタを使う命令は 1 クロック待つ
 // 掛け算は 1 クロック、割り算は 32 クロック。M 形式（メモリの値で演算）と SWAP は返事が来るまで E で待つ。
 // 動作の基準は lib/cpu.js（シミュレータ）。食い違いはテストで見つける（UART・レジスタ・実行した命令の順番）。
@@ -56,10 +58,13 @@ module mycpu_cpu (
   reg        e_valid, e_badpc, e_seen;
   reg [31:0] pc, ir, imm;
   reg [1:0]  e_ferr;       // 読めなかった印（[0] ヘッダ、[1] 即値）
+  reg        e_pred;       // 分岐予測で、次を e_ptgt から読んだ
+  reg [31:0] e_ptgt;
 
   // F：読み終えて E が空くのを待っている命令（1 つまで）と、返事待ちの要求
   reg        q_valid;
-  reg [31:0] q_pc;
+  reg        q_pred;             // 分岐予測で、次を q_ptgt から読んだ
+  reg [31:0] q_pc, q_ptgt;
   reg [63:0] q_data;
   reg [1:0]  q_err;
   reg        f_out, f_kill;      // 返事待ちの要求がある・その返事は捨てる
@@ -316,7 +321,21 @@ module mycpu_cpu (
     hit8 = a[31:2] == w || a[31:2] + 30'd1 == w;
   endfunction
   wire arr = i_rvalid && f_out && !f_kill;                         // 読んだ命令が届いた
-  wire [31:0] seq_next = arr ? f_aout + (i_rdata[1:0] == 2'd0 ? 32'd4 : 32'd8) : f_next;
+  // 分岐予測：届いた命令が JMP・CALL・後ろへの BR（即値 32bit）か RET なら、次は飛び先から読む
+  wire [3:0]  p_grp = i_rdata[5:2];
+  wire [7:0]  p_op  = i_rdata[13:6];
+  wire [31:0] p_imm = i_rdata[63:32];
+  wire p_jmp = p_grp == 4'd5 && i_rdata[1:0] == 2'd1 && !i_err[1] && p_imm[1:0] == 2'd0 &&
+               (p_op == 8'h00 || p_op == 8'h02 || (p_op == 8'h01 && i_rdata[25:20] != 6'd0 && p_imm < f_aout));
+  // RET：LR の値。E の命令が LR に書くならその値、LR への読み出しの返事がこのクロックに来たならその値
+  // （関数の終わりの「LOAD32 lr → ADDI32 sp → RET32」）。返事を待っているときは予測しない
+  wire m_lr = m_load && m_rd == 6'd50;
+  wire [31:0] p_lr  = x_wr && x_wi == 6'd50 ? x_wv : m_lr && d_rvalid ? ld_val : lr;
+  wire p_ret = p_grp == 4'd5 && p_op == 8'h03 && p_lr[1:0] == 2'd0 &&
+               !(m_lr && !d_rvalid) && !(x_mload && rd == 6'd50);
+  wire p_pred = !i_err[0] && (p_jmp || p_ret);
+  wire [31:0] p_tgt = p_ret ? p_lr : p_imm;
+  wire [31:0] seq_next = arr ? (p_pred ? p_tgt : f_aout + (i_rdata[1:0] == 2'd0 ? 32'd4 : 32'd8)) : f_next;
   wire st_hit = (q_valid && hit8(q_pc, st_w)) || (f_out && !f_kill && hit8(f_aout, st_w)) || hit8(seq_next, st_w);
 
   task t_fin;                    begin x_adv = 1'b1; x_es = E_RUN; end endtask
@@ -386,10 +405,12 @@ module mycpu_cpu (
             end
             4'd5: begin  // 分岐・呼び出し（5.7）
               case (op)
-                8'h00: t_jump(imm);
-                8'h01: if (pr[rs1[2:0]] && rs1 != 6'd0) t_jump(imm); else t_fin;
-                8'h02: begin t_wr(6'd50, next_pc); t_jump(imm); end
-                8'h03: t_jump(lr);
+                // 予測が当たっていれば、次の命令はもう飛び先から読んである
+                8'h00: if (e_pred) t_fin; else t_jump(imm);
+                8'h01: if (pr[rs1[2:0]] && rs1 != 6'd0) begin if (e_pred) t_fin; else t_jump(imm); end
+                       else begin if (e_pred) t_jump(next_pc); else t_fin; end
+                8'h02: begin t_wr(6'd50, next_pc); if (e_pred) t_fin; else t_jump(imm); end
+                8'h03: if (e_pred && e_ptgt == lr) t_fin; else t_jump(lr);
                 8'h04: t_jump(a);
                 default: begin t_wr(6'd50, next_pc); t_jump(a); end  // CALLR（飛び先は書き換え前の値）
               endcase
@@ -453,7 +474,8 @@ module mycpu_cpu (
       for (i = 0; i < 16; i = i + 1) gpr[i] <= 32'd0;
       halt_code <= 2'd0;
       e_valid <= 1'b0; e_badpc <= 1'b0; e_seen <= 1'b0; pc <= 32'd0; ir <= 32'd0; imm <= 32'd0; e_ferr <= 2'b00;
-      q_valid <= 1'b0; q_pc <= 32'd0; q_data <= 64'd0; q_err <= 2'b00;
+      e_pred <= 1'b0; e_ptgt <= 32'd0;
+      q_valid <= 1'b0; q_pc <= 32'd0; q_data <= 64'd0; q_err <= 2'b00; q_pred <= 1'b0; q_ptgt <= 32'd0;
       f_out <= 1'b0; f_kill <= 1'b0; f_aout <= 32'd0; f_next <= 32'd0;
       m_load <= 1'b0; m_store <= 1'b0; m_rd <= 6'd0; m_op <= 3'd0; m_lo <= 2'd0;
       mem_data <= 32'd0;
@@ -494,22 +516,24 @@ module mycpu_cpu (
       // E に入る命令：飛ぶなら（飛び先がずれていれば、整列違反を起こす印だけの命令）、でなければ q か届いたもの
       if (x_redir) begin
         e_valid <= x_rpc[1:0] != 2'd0;
-        e_badpc <= 1'b1; e_seen <= 1'b0; pc <= x_rpc; e_ferr <= 2'b00;
+        e_badpc <= 1'b1; e_seen <= 1'b0; pc <= x_rpc; e_ferr <= 2'b00; e_pred <= 1'b0;
       end else if (x_adv) begin
         e_badpc <= 1'b0; e_seen <= 1'b0;
         if (q_valid) begin
           e_valid <= 1'b1; pc <= q_pc; ir <= q_data[31:0];
           imm <= q_data[1:0] == 2'd0 ? 32'd0 : q_data[63:32]; e_ferr <= q_err;
+          e_pred <= q_pred; e_ptgt <= q_ptgt;
         end else if (arr) begin
           e_valid <= 1'b1; pc <= f_aout; ir <= i_rdata[31:0];
           imm <= i_rdata[1:0] == 2'd0 ? 32'd0 : i_rdata[63:32]; e_ferr <= i_err;
+          e_pred <= p_pred; e_ptgt <= p_tgt;
         end else e_valid <= 1'b0;
       end
 
       // q
       if (x_redir) q_valid <= 1'b0;
       else if (x_adv ? (q_valid && arr) : (!q_valid && arr)) begin
-        q_valid <= 1'b1; q_pc <= f_aout; q_data <= i_rdata; q_err <= i_err;
+        q_valid <= 1'b1; q_pc <= f_aout; q_data <= i_rdata; q_err <= i_err; q_pred <= p_pred; q_ptgt <= p_tgt;
       end else if (x_adv) q_valid <= 1'b0;
 
       // F

@@ -23,29 +23,45 @@ static int set_errno(int r) {
   return -1;
 }
 
-// MyDOS の名前にする：ディレクトリ（/ \ :）を捨て、名前は 8 文字・拡張子は 3 文字までに縮める。
-// MyDOS にはディレクトリがないので、"sys/stat.h" → "STAT.H"、"preprocess.c" → "PREPROCE.C"（大文字は MyDOS がする）
-static const char *dosname(const char *path, char *out) {
-  const char *p = path;
-  for (const char *s = path; *s; s++)
-    if (*s == '/' || *s == '\\' || *s == ':')
-      p = s + 1;
-  const char *dot = strrchr(p, '.');
+// MyDOS の名前にする：区切り（/）は \ に、名前は 1 つずつ 8 文字・拡張子 3 文字までに縮める（「.」「..」「C:」はそのまま）。
+// "sys/stat.h" → "sys\stat.h"、"preprocess.c" → "preproce.c"（大文字は MyDOS がする）。out は DOSPATH バイト
+const char *__mycpu_dosname(const char *path, char *out) {
   int n = 0;
-  for (const char *s = p; *s && s != dot && n < 8; s++)
-    out[n++] = *s;
-  if (dot) {
-    out[n++] = '.';
-    for (int i = 1; dot[i] && i <= 3; i++)
-      out[n++] = dot[i];
+  const char *p = path;
+  if (p[0] && p[1] == ':') {
+    out[n++] = p[0];
+    out[n++] = ':';
+    p += 2;
+  }
+  while (*p && n < DOSPATH - 14) {
+    if (*p == '/' || *p == '\\') {
+      out[n++] = '\\';
+      p++;
+      continue;
+    }
+    const char *e = p, *dot = 0;
+    for (; *e && *e != '/' && *e != '\\'; e++)
+      if (*e == '.')
+        dot = e;
+    if (e - p <= 2 && p[0] == '.' && (e - p == 1 || p[1] == '.'))
+      dot = 0;                           // 「.」「..」
+    int k = 0;
+    for (const char *q = p; q < e && (q != dot) && k < 8; q++, k++)
+      out[n++] = *q;
+    if (dot) {
+      out[n++] = '.';
+      for (int i = 1; dot + i < e && i <= 3; i++)
+        out[n++] = dot[i];
+    }
+    p = e;
   }
   out[n] = 0;
   return out;
 }
 
 FILE *fopen(const char *path, const char *mode) {
-  char name[13];
-  dosname(path, name);
+  char name[DOSPATH];
+  __mycpu_dosname(path, name);
   int m;                                 // MyDOS：0 = 読む、1 = 新しく書く、2 = 後ろに足す
   if (mode[0] == 'r' && !strchr(mode, '+'))
     m = 0;
@@ -399,14 +415,14 @@ void rewind(FILE *fp) {
 }
 
 int remove(const char *path) {
-  char name[13];
-  int r = __syscall(SYS_DELETE, (int)dosname(path, name), 0, 0);
+  char name[DOSPATH];
+  int r = __syscall(SYS_DELETE, (int)__mycpu_dosname(path, name), 0, 0);
   return r < 0 ? set_errno(r) : 0;
 }
 
 int rename(const char *path1, const char *path2) {
-  char from[13], to[13];
-  int r = __syscall(SYS_RENAME, (int)dosname(path1, from), (int)dosname(path2, to), 0);
+  char from[DOSPATH], to[DOSPATH];
+  int r = __syscall(SYS_RENAME, (int)__mycpu_dosname(path1, from), (int)__mycpu_dosname(path2, to), 0);
   return r < 0 ? set_errno(r) : 0;
 }
 

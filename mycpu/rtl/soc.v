@@ -2,8 +2,9 @@
 //   0x0000_0000 ROM 16KB（中身は ROM_EVEN_HEX・ROM_ODD_HEX。偶数番目と奇数番目の 4 バイトに分けたもの）
 //   0x0001_0000 入出力（UART・タイマー・LED。番地は README）
 //   0x0001_8000 テキスト VRAM 16KB（表示回路側にも読み出し口がある）
-//   0x0002_0000 内蔵 RAM 48KB
-//   0x0100_0000 SDRAM 8MB（rtl/sdram.v。1 回のアクセスに 4〜9 クロックかかる）
+//   0x0002_0000 内蔵 RAM 32KB（命令もデータも）
+//   0x0002_A000 内蔵 RAM 8KB（データだけ。BIOS の変数・スタック。0x0002_8000〜0x0002_9FFF はない）
+//   0x0100_0000 SDRAM 8MB（rtl/sdram.v。命令キャッシュとデータキャッシュ（どちらも 8KB）を通す）
 // CPU とは「命令の口」と「データの口」の 2 つでつなぐ（rtl/cpu.v の先頭に約束事）。
 // ROM と内蔵 RAM は、偶数番目の 4 バイトと奇数番目の 4 バイトで別のメモリにしてあるので、
 // 命令の口はどこから始まる 8 バイトでも 1 クロックで読める。どちらのメモリも 2 ポートで、
@@ -66,7 +67,9 @@ module mycpu_soc #(
   function in_rom(input [31:0] a);   in_rom   = a[31:14] == 18'h0;                        endfunction // 0x0000_0000〜0x0000_3FFF
   function in_io(input [31:0] a);    in_io    = a[31:15] == 17'h2;                        endfunction // 0x0001_0000〜0x0001_7FFF
   function in_vram(input [31:0] a);  in_vram  = a[31:14] == 18'h6;                        endfunction // 0x0001_8000〜0x0001_BFFF
-  function in_ram(input [31:0] a);   in_ram   = a[31:16] == 16'h2 && a[15:14] != 2'b11;   endfunction // 0x0002_0000〜0x0002_BFFF
+  function in_rama(input [31:0] a);  in_rama  = a[31:15] == 17'h4;                        endfunction // 0x0002_0000〜0x0002_7FFF
+  function in_ramb(input [31:0] a);  in_ramb  = a[31:13] == 19'h15;                       endfunction // 0x0002_A000〜0x0002_BFFF（データだけ）
+  function in_ram(input [31:0] a);   in_ram   = in_rama(a) || in_ramb(a);                 endfunction
   function in_sdram(input [31:0] a); in_sdram = a[31:23] == 9'h2;                         endfunction // 0x0100_0000〜0x017F_FFFF
 
   // データの口
@@ -79,7 +82,7 @@ module mycpu_soc #(
 
   // 命令の口（i_addr とその次の 4 バイト）
   wire [31:0] i_addr1 = i_addr + 32'd4;
-  wire i_rom = in_rom(i_addr), i_ram = in_ram(i_addr), i_sdram = in_sdram(i_addr);
+  wire i_rom = in_rom(i_addr), i_ram = in_rama(i_addr), i_sdram = in_sdram(i_addr);   // 命令は RAM の前の 32KB だけ
   wire i_go = i_req && i_gnt;
 
   // ---- ROM（偶数・奇数の 2 つ。どちらも読み出し口が 2 つ） ----
@@ -92,22 +95,27 @@ module mycpu_soc #(
   mycpu_rom2 #(.HEX(ROM_ODD_HEX), .AW(11)) rom_o (
     .clk(clk), .addra(i_rw[11:1]), .douta(rom_io), .addrb(d_addr[13:3]), .doutb(rom_do));
 
-  // ---- 内蔵 RAM（偶数・奇数 × 4 バイト。どれも 2 ポート：A は命令の口が読むだけ、B はデータの口） ----
-  wire [13:0] i_mw  = i_addr[15:2];
-  wire [13:0] i_mw1 = i_mw + 14'd1;
-  wire [31:0] ram_ie, ram_io, ram_de, ram_do, vram_q;
+  // ---- 内蔵 RAM の前の 32KB（偶数・奇数 × 4 バイト。どれも 2 ポート：A は命令の口が読むだけ、B はデータの口） ----
+  //   命令の口：奇数側は i_addr の 8 バイト、偶数側は i_addr+4 の 8 バイト（i_addr が偶数番目なら同じところ）
+  //   後ろの 8KB（データだけ）は 4 バイト × 2048 の 1 ポート
+  wire d_ramb = in_ramb(d_addr);
+  wire [31:0] ram_ie, ram_io, ram_de, ram_do, ramb_q, vram_q;
   genvar g;
   generate
     for (g = 0; g < 4; g = g + 1) begin : lane
-      mycpu_tdpram #(.AW(13), .DEPTH(6144)) ram_e (
-        .clk(clk), .addra(i_mw1[13:1]), .douta(ram_ie[8*g +: 8]),
-        .web(d_go && sel_ram && !d_odd && d_wstrb[g]), .addrb(d_addr[15:3]), .dinb(d_wdata[8*g +: 8]),
+      mycpu_tdpram #(.AW(12)) ram_e (
+        .clk(clk), .addra(i_addr1[14:3]), .douta(ram_ie[8*g +: 8]),
+        .web(d_go && sel_ram && !d_ramb && !d_odd && d_wstrb[g]), .addrb(d_addr[14:3]), .dinb(d_wdata[8*g +: 8]),
         .doutb(ram_de[8*g +: 8])
       );
-      mycpu_tdpram #(.AW(13), .DEPTH(6144)) ram_o (
-        .clk(clk), .addra(i_mw[13:1]), .douta(ram_io[8*g +: 8]),
-        .web(d_go && sel_ram && d_odd && d_wstrb[g]), .addrb(d_addr[15:3]), .dinb(d_wdata[8*g +: 8]),
+      mycpu_tdpram #(.AW(12)) ram_o (
+        .clk(clk), .addra(i_addr[14:3]), .douta(ram_io[8*g +: 8]),
+        .web(d_go && sel_ram && !d_ramb && d_odd && d_wstrb[g]), .addrb(d_addr[14:3]), .dinb(d_wdata[8*g +: 8]),
         .doutb(ram_do[8*g +: 8])
+      );
+      mycpu_spram #(.AW(11)) ram_b (
+        .clk(clk), .we(d_go && d_ramb && d_wstrb[g]), .addr(d_addr[12:2]), .din(d_wdata[8*g +: 8]),
+        .dout(ramb_q[8*g +: 8])
       );
       mycpu_dpram #(.AW(12)) vram (
         .clka(clk), .wea(d_go && sel_vram && d_wstrb[g]), .addra(d_addr[13:2]),
@@ -120,8 +128,9 @@ module mycpu_soc #(
   // ---- 命令キャッシュ（SDRAM の命令だけ。8KB、ダイレクトマップ、1 ライン 64 バイト × 128） ----
   //   番地 [22:13] がタグ、[12:6] がライン、[5:2] がライン内の語。データは偶数・奇数番目の 4 バイトに分けて
   //   8 バイトを 1 クロックで読む（ラインをまたぐ命令は、両方のラインがあれば当たり）。
-  //   外れたら SDRAM からライン 1 本（16 語）をバーストで読む。データの口で SDRAM に書いたら、
-  //   その番地のラインを無効にする（読み込んだプログラム・自分を書き換えるコードでも正しく動く）
+  //   外れたら SDRAM からライン 1 本（16 語）をバーストで読む。そのラインがデータキャッシュで書き換えられて
+  //   いれば、先に SDRAM へ書き戻させる。データの口で SDRAM の番地に書いたら、そのラインを無効にする
+  //   （読み込んだプログラム・自分を書き換えるコードでも正しく動く）
   reg  [9:0]  ic_tag [0:127];
   reg  [127:0] ic_valid;
   // あるかどうか（関数にすると、タグが変わってもシミュレーションで計算し直されないので、式で書く）
@@ -145,47 +154,92 @@ module mycpu_soc #(
   wire [31:0] ic_qe, ic_qo;
   wire        sdr_bvalid;
   wire [31:0] sdram_q;
+  reg         sdr_who;           // SDRAM を使っているのは 0 = データキャッシュ、1 = 命令キャッシュ
   wire [10:0] ic_ww = {ic_line[12:6], ic_n};
+  wire        ic_wr = sdr_bvalid && sdr_who && ic_state == IC_FILL;
   mycpu_icram ic_e (.clk(clk), .addra(ic_rw1[10:1]), .douta(ic_qe),
-                    .web(sdr_bvalid && ic_state == IC_FILL && !ic_n[0]), .addrb(ic_ww[10:1]), .dinb(sdram_q));
+                    .web(ic_wr && !ic_n[0]), .addrb(ic_ww[10:1]), .dinb(sdram_q));
   mycpu_icram ic_o (.clk(clk), .addra(ic_rw[10:1]), .douta(ic_qo),
-                    .web(sdr_bvalid && ic_state == IC_FILL && ic_n[0]), .addrb(ic_ww[10:1]), .dinb(sdram_q));
+                    .web(ic_wr && ic_n[0]), .addrb(ic_ww[10:1]), .dinb(sdram_q));
 
-  // ---- SDRAM：データの口と、命令キャッシュのライン読み込みで取り合う（データの口が先） ----
+  // ---- データキャッシュ（SDRAM のデータ。8KB、ダイレクトマップ、1 ライン 64 バイト × 128、ライトバック） ----
+  //   番地の分け方は命令キャッシュと同じ。当たれば内蔵 RAM と同じく次のクロックに返す（書き込みも）。
+  //   外れたら d_gnt を 0 にしたまま：今のラインが書き換えられていれば（汚れ）16 語を wbuf に写して SDRAM に
+  //   バーストで書き戻し、それから新しいラインを 16 語バーストで読む。読み終えると、待っていた要求が当たる。
+  //   書き込みも、ラインを読んでから書く（ライトアロケート）
+  reg  [9:0]   dc_tag [0:127];
+  reg  [127:0] dc_valid, dc_dirty;
+  wire [6:0]   d_idx = d_addr[12:6];
+  wire dc_hit = dc_valid[d_idx] && dc_tag[d_idx] == d_addr[22:13];
+  localparam [2:0] DC_IDLE = 3'd0, DC_COPY = 3'd1, DC_WBW = 3'd2, DC_WB = 3'd3, DC_FILLW = 3'd4, DC_FILL = 3'd5;
+  reg [2:0]  dc_state;
+  reg [16:0] dc_vline;           // 書き戻すライン（番地の [22:6]）
+  reg [16:0] dc_fline;           // 読み込むライン
+  reg        dc_fill_after;      // 書き戻した後に読み込む（0 = 命令キャッシュのための書き戻しだけ）
+  reg [4:0]  dc_cnt;             // wbuf に写した語の数（読み出しは 1 クロック遅れて届く）
+  reg [3:0]  dc_n;               // ライン読み込みで届いた語の数
+  reg [31:0] wbuf [0:15];        // 書き戻す 16 語
+  wire [3:0] sdr_bidx;
+  // データ（4 バイト × 2048、1 ポート）：ふだんはデータの口、外れの処理中は写す・読み込む場所
+  wire [10:0] dc_ra = dc_state == DC_COPY ? {dc_vline[6:0], dc_cnt[3:0]} :
+                      dc_state == DC_FILL ? {dc_fline[6:0], dc_n} : d_addr[12:2];
+  wire        dc_fwr = dc_state == DC_FILL && sdr_bvalid && !sdr_who;
+  wire [31:0] dc_q;
+  generate
+    for (g = 0; g < 4; g = g + 1) begin : dlane
+      mycpu_spram #(.AW(11)) dc_ram (
+        .clk(clk), .we(dc_fwr || (d_go && sel_sdram && d_wstrb[g])), .addr(dc_ra),
+        .din(dc_fwr ? sdram_q[8*g +: 8] : d_wdata[8*g +: 8]), .dout(dc_q[8*g +: 8])
+      );
+    end
+  endgenerate
+
+  // ---- SDRAM：データキャッシュ（書き戻し・ライン読み込み）と命令キャッシュのライン読み込みで取り合う（データが先） ----
   wire        sdr_ack;
-  reg         sdr_busy;          // 制御回路が動いている（データの口の 1 回か、ライン読み込み）
+  reg         sdr_busy;          // 制御回路が動いている
   wire d_sdram = d_req && sel_sdram && !d_err;
   wire i_sdram_req = i_req && i_sdram;
   wire i_hit = ic_hit0 && ic_hit1;
-  assign d_gnt = !d_sdram || !sdr_busy;
-  assign i_gnt = !i_sdram_req || i_hit || (ic_state == IC_IDLE && !sdr_busy && !d_sdram);
-  wire sdr_d_start = d_sdram && !sdr_busy;
+  // 命令キャッシュが読んでいるラインへの書き込みは、読み終えるまで待つ（読み終えてから無効にする）
+  wire ic_filling_d = sdr_busy && sdr_who && d_addr[22:6] == ic_line[22:6];
+  assign d_gnt = !d_sdram || (dc_state == DC_IDLE && dc_hit && !(wr && ic_filling_d));
+  assign i_gnt = !i_sdram_req || i_hit || ic_state == IC_IDLE;
   wire ic_miss = i_sdram_req && !i_hit && i_gnt;           // 外れを受け付けた
   // 次に読むライン：まず 1 つ目の語のライン、それがあれば 2 つ目の語のライン
   wire [31:0] ic_next_line = ic_has0 ? {ic_addr1[31:6], 6'd0} : {ic_addr[31:6], 6'd0};
   wire ic_more = ic_has0 && (!in_sdram(ic_addr1) || ic_has1);   // もう全部ある
-  reg  ic_go;                    // このクロックでライン読み込みを始める
-  always @* ic_go = ic_state == IC_FILL && !sdr_busy && !ic_more;
+  wire ic_want = ic_state == IC_FILL && !ic_more;
+  // そのラインがデータキャッシュで汚れている（先に書き戻す）
+  wire [6:0] icn_idx = ic_next_line[12:6];
+  wire ic_snoop = dc_valid[icn_idx] && dc_dirty[icn_idx] && dc_tag[icn_idx] == ic_next_line[22:13];
+  wire dc_miss  = dc_state == DC_IDLE && d_sdram && !dc_hit;              // データの外れを始める
+  wire dc_snoop = dc_state == DC_IDLE && !d_sdram && ic_want && ic_snoop;  // 命令キャッシュのための書き戻しを始める
+  wire dc_wb_go   = dc_state == DC_WBW && !sdr_busy;
+  wire dc_fill_go = dc_state == DC_FILLW && !sdr_busy;
+  reg  ic_go;                    // このクロックで命令キャッシュのライン読み込みを始める
+  always @* ic_go = ic_want && !sdr_busy && dc_state == DC_IDLE && !dc_miss && !ic_snoop;
   mycpu_sdram #(.SDRAM_HZ(SDRAM_HZ)) sdram (
     .clk(clk), .rst(rst),
-    .req(sdr_d_start || ic_go), .waddr(sdr_d_start ? d_addr[22:2] : ic_next_line[22:2]),
-    .wstrb(sdr_d_start ? d_wstrb : 4'd0), .wdata(d_wdata), .burst(!sdr_d_start),
+    .req(dc_wb_go || dc_fill_go || ic_go),
+    .waddr(dc_wb_go ? {dc_vline, 4'd0} : dc_fill_go ? {dc_fline, 4'd0} : ic_next_line[22:2]),
+    .wstrb(dc_wb_go ? 4'hF : 4'd0), .wdata(32'd0), .burst(1'b1), .bwdata(wbuf[sdr_bidx]), .bidx(sdr_bidx),
     .ack(sdr_ack), .bvalid(sdr_bvalid), .rdata(sdram_q), .ready_init(),
     .sdram_clk(sdram_clk), .sdram_cke(sdram_cke), .sdram_cs_n(sdram_cs_n), .sdram_ras_n(sdram_ras_n),
     .sdram_cas_n(sdram_cas_n), .sdram_we_n(sdram_we_n), .sdram_a(sdram_a), .sdram_ba(sdram_ba),
     .sdram_dqm(sdram_dqm), .sdram_dq(sdram_dq)
   );
-  reg sdr_who;                   // 0 = データの口、1 = ライン読み込み
   always @(posedge clk) begin
     if (rst) begin
       sdr_busy <= 1'b0; sdr_who <= 1'b0; ic_state <= IC_IDLE; ic_addr <= 32'd0; ic_line <= 32'd0; ic_n <= 4'd0;
       ic_valid <= 128'd0;
+      dc_state <= DC_IDLE; dc_valid <= 128'd0; dc_dirty <= 128'd0; dc_vline <= 17'd0; dc_fline <= 17'd0;
+      dc_fill_after <= 1'b0; dc_cnt <= 5'd0; dc_n <= 4'd0;
     end else begin
-      if (sdr_d_start) begin sdr_busy <= 1'b1; sdr_who <= 1'b0; end
+      if (dc_wb_go || dc_fill_go) begin sdr_busy <= 1'b1; sdr_who <= 1'b0; end
       else if (ic_go) begin sdr_busy <= 1'b1; sdr_who <= 1'b1; ic_line <= ic_next_line; ic_n <= 4'd0; end
       else if (sdr_ack) sdr_busy <= 1'b0;
-      // ライン読み込み：届いた語を書き、最後の語でタグを書く
-      if (ic_state == IC_FILL && sdr_who && sdr_bvalid) ic_n <= ic_n + 4'd1;
+      // 命令キャッシュのライン読み込み：届いた語を書き、最後の語でタグを書く
+      if (ic_wr) ic_n <= ic_n + 4'd1;
       if (ic_state == IC_FILL && sdr_who && sdr_ack) begin
         ic_valid[ic_line[12:6]] <= 1'b1;
         ic_tag[ic_line[12:6]] <= ic_line[22:13];
@@ -195,8 +249,46 @@ module mycpu_soc #(
         IC_FILL:  if (ic_more) ic_state <= IC_REPLY;     // 全部そろった：次のクロックで読んで返す
         default:  ic_state <= IC_IDLE;                   // IC_REPLY
       endcase
-      // データの口で SDRAM に書いたら、そのラインを無効に
-      if (sdr_d_start && d_wstrb != 4'd0 && ic_hasd) ic_valid[d_addr[12:6]] <= 1'b0;
+      // データの口で SDRAM の番地に書いたら、命令キャッシュのそのラインを無効に
+      if (d_go && sel_sdram && wr && ic_hasd) ic_valid[d_idx] <= 1'b0;
+
+      // データキャッシュ
+      if (d_go && sel_sdram && wr) dc_dirty[d_idx] <= 1'b1;
+      case (dc_state)
+        DC_IDLE:
+          if (dc_miss) begin
+            dc_fline <= d_addr[22:6]; dc_fill_after <= 1'b1;
+            dc_vline <= {dc_tag[d_idx], d_idx}; dc_cnt <= 5'd0;
+            dc_state <= dc_valid[d_idx] && dc_dirty[d_idx] ? DC_COPY : DC_FILLW;
+          end else if (dc_snoop) begin
+            dc_vline <= ic_next_line[22:6]; dc_fill_after <= 1'b0; dc_cnt <= 5'd0;
+            dc_state <= DC_COPY;
+          end
+        DC_COPY: begin                                   // 16 語を wbuf に（読んだ値は 1 クロック後に届く）
+          if (dc_cnt != 5'd0) wbuf[dc_cnt[3:0] - 4'd1] <= dc_q;
+          dc_cnt <= dc_cnt + 5'd1;
+          if (dc_cnt == 5'd16) dc_state <= DC_WBW;
+        end
+        DC_WBW: if (!sdr_busy) dc_state <= DC_WB;        // dc_wb_go
+        DC_WB: if (sdr_ack) begin
+          dc_dirty[dc_vline[6:0]] <= 1'b0;
+          dc_state <= dc_fill_after ? DC_FILLW : DC_IDLE;
+        end
+        DC_FILLW: if (!sdr_busy) begin                   // dc_fill_go
+          dc_state <= DC_FILL; dc_n <= 4'd0;
+          dc_valid[dc_fline[6:0]] <= 1'b0;
+        end
+        DC_FILL: begin
+          if (sdr_bvalid) dc_n <= dc_n + 4'd1;
+          if (sdr_ack) begin
+            dc_valid[dc_fline[6:0]] <= 1'b1;
+            dc_tag[dc_fline[6:0]] <= dc_fline[16:7];
+            dc_dirty[dc_fline[6:0]] <= 1'b0;
+            dc_state <= DC_IDLE;
+          end
+        end
+        default: dc_state <= DC_IDLE;
+      endcase
     end
   end
 
@@ -296,7 +388,7 @@ module mycpu_soc #(
   end
 
   // ---- 応答（SDRAM は返事が来たとき、ほかは次のクロック） ----
-  reg [2:0] d_which;   // 0 = ROM、1 = 入出力、2 = VRAM、3 = RAM、4 = SDRAM
+  reg [2:0] d_which;   // 0 = ROM、1 = 入出力、2 = VRAM、3 = RAM（前）、4 = SDRAM、5 = RAM（後ろ）
   reg       d_odd_q;
   reg [1:0] i_which;   // 0 = ROM、1 = RAM、2 = SDRAM、3 = なし
   reg       i_odd_q;
@@ -307,9 +399,9 @@ module mycpu_soc #(
       i_which <= 2'd0; i_odd_q <= 1'b0; i_err <= 2'b00;
     end else begin
       // データの口
-      d_rvalid <= (d_go && !sel_sdram) || (sdr_ack && sdr_busy && !sdr_who);
+      d_rvalid <= d_go;                  // どこも次のクロックに返す（SDRAM はデータキャッシュに当たったときだけ受け付ける）
       if (d_go) begin
-        d_which <= sel_io ? 3'd1 : sel_vram ? 3'd2 : sel_ram ? 3'd3 : sel_sdram ? 3'd4 : 3'd0;
+        d_which <= sel_io ? 3'd1 : sel_vram ? 3'd2 : d_ramb ? 3'd5 : sel_ram ? 3'd3 : sel_sdram ? 3'd4 : 3'd0;
         d_odd_q <= d_odd;
       end
       // 命令の口：2 つ目の 4 バイトが同じ場所になければ、そこは読めない印
@@ -317,7 +409,7 @@ module mycpu_soc #(
       if (i_go && !i_sdram) begin
         i_which <= i_rom ? 2'd0 : i_ram ? 2'd1 : 2'd3;
         i_odd_q <= i_addr[2];
-        i_err <= {!((i_rom && in_rom(i_addr1)) || (i_ram && in_ram(i_addr1))), !(i_rom || i_ram)};
+        i_err <= {!((i_rom && in_rom(i_addr1)) || (i_ram && in_rama(i_addr1))), !(i_rom || i_ram)};
       end else if (i_go && i_hit) begin
         i_which <= 2'd2;
         i_odd_q <= i_addr[2];
@@ -332,7 +424,7 @@ module mycpu_soc #(
   wire [31:0] rom_d = d_odd_q ? rom_do : rom_de;
   wire [31:0] ram_d = d_odd_q ? ram_do : ram_de;
   assign d_rdata = d_which == 3'd0 ? rom_d : d_which == 3'd1 ? io_q : d_which == 3'd2 ? vram_q :
-                   d_which == 3'd3 ? ram_d : sdram_q;
+                   d_which == 3'd3 ? ram_d : d_which == 3'd5 ? ramb_q : dc_q;
   wire [63:0] rom_i = i_odd_q ? {rom_ie, rom_io} : {rom_io, rom_ie};
   wire [63:0] ram_i = i_odd_q ? {ram_ie, ram_io} : {ram_io, ram_ie};
   wire [63:0] ic_i  = i_odd_q ? {ic_qe, ic_qo} : {ic_qo, ic_qe};
@@ -358,6 +450,25 @@ module mycpu_tdpram #(parameter integer AW = 13, parameter integer DEPTH = 1 << 
   always @(posedge clk) begin
     if (web) mem[addrb] <= dinb;
     doutb <= mem[addrb];
+  end
+endmodule
+
+// 1 ポートの RAM（8bit × 2^AW）
+module mycpu_spram #(parameter integer AW = 11) (
+  input  wire          clk,
+  input  wire          we,
+  input  wire [AW-1:0] addr,
+  input  wire [7:0]    din,
+  output reg  [7:0]    dout
+);
+  reg [7:0] mem [0:(1 << AW) - 1];
+`ifdef MYCPU_SIM
+  integer i;   // シミュレーションでは 0 にしておく（実機の BSRAM も 0 から始まる）
+  initial for (i = 0; i < (1 << AW); i = i + 1) mem[i] = 8'd0;
+`endif
+  always @(posedge clk) begin
+    if (we) mem[addr] <= din;
+    dout <= mem[addr];
   end
 endmodule
 

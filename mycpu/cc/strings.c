@@ -1,5 +1,29 @@
 #include "chibicc.h"
 
+// 捨てないもの（トークン・ノード・型・変数など）を確保する。0 で埋めてある。
+// 64KB ずつまとめて取って切り分けるので、malloc の頭（4 バイト）と切り上げの分がいらない（MyCPU はメモリが 8MB）
+#ifdef __MYCPU__
+#define ARENA_ALIGN 4
+#define ARENA_CHUNK (65536 - 16)   // libc の malloc のちょうど 64KB の箱に入る大きさ
+#else
+#define ARENA_ALIGN 16
+#define ARENA_CHUNK (1 << 20)
+#endif
+
+void *arena_alloc(size_t size) {
+  static char *p, *end;
+  size = (size + ARENA_ALIGN - 1) & ~(size_t)(ARENA_ALIGN - 1);
+  if (size > 1024)
+    return calloc(1, size);
+  if (end - p < (long)size) {
+    p = calloc(1, ARENA_CHUNK);
+    end = p + ARENA_CHUNK;
+  }
+  void *r = p;
+  p += size;
+  return r;
+}
+
 void strarray_push(StringArray *arr, char *s) {
   if (!arr->data) {
     arr->data = calloc(8, sizeof(char *));

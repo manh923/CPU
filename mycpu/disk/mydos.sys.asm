@@ -1,8 +1,11 @@
 ; mydos.sys.asm — MyDOS 本体（SD カードの MYDOS.SYS。BIOS がこれを 0x20000 に読み込んで飛ぶ）
 ;
-; ・ドライブ C: は SD カードの FAT16 / FAT32（ルートディレクトリ）。読み書きできる
-; ・組み込みのコマンド：CLS COLOR COPY DEL DIR ECHO HELP LED MEM REBOOT REN SHUTDOWN TIME TYPE VER VOL
-;   それ以外は .EXE → .COM → .BAT の順に探して実行する。起動時に AUTOEXEC.BAT を実行する
+; ・ドライブ C: は SD カードの FAT16 / FAT32。読み書きできる。サブディレクトリも使える：パスは「C:\INCLUDE\STDIO.H」
+;   「..\A.TXT」のように書く（「/」でもよい。「.」「..」も）。「\」で始まらなければ今のディレクトリから
+; ・組み込みのコマンド：CD（CHDIR）CLS COLOR COPY DEL DIR ECHO HELP LED MD（MKDIR）MEM RD（RMDIR）REBOOT REN
+;   SHUTDOWN TIME TYPE VER VOL。組み込みのコマンドは MYDOS.SYS の後ろ半分にあり、起動時に SDRAM の最後の 64KB に読み込む
+;   それ以外は .EXE → .COM → .BAT の順に、今のディレクトリ → ルートの順に探して実行する（パスを書けばそこだけ）。
+;   起動時に AUTOEXEC.BAT を実行する
 ; ・「コマンド > ファイル」「コマンド >> ファイル」で、画面に出るものをファイルへ（リダイレクト）
 ; ・.EXE・.COM は 0x26000 に読み込んで、ユーザーモードで実行する。OS を呼ぶのは SYSCALL だけ。
 ;   例外を起こしたら "Program terminated" を出して C:\> に戻る
@@ -21,6 +24,9 @@
 ;   17 close(ハンドル)   18 read(ハンドル, 置き場所, 長さ) → 読んだ長さ（0 で終わり）
 ;   19 write(ハンドル, データ, 長さ) → 書いた長さ          20 delete(名前)     21 rename(前の名前, 新しい名前)
 ;   22 seek(ハンドル, 位置, 基準) → 新しい位置（基準 0 = 先頭、1 = 今の位置、2 = 終わり。書くファイルは終わりだけ）
+;   23 mkdir(パス)       24 rmdir(パス)（空のディレクトリだけ）         25 chdir(パス)
+;   26 getcwd(置き場所, 大きさ) → 長さ（"C:\INCLUDE" のように。入らなければ -1）
+;   名前の引数はどれもパスでよい（rename の新しい名前だけは、同じディレクトリの中の名前）
 ;   エラーは負の数：-1 番号がない・ハンドルが違う、-2 ファイルがない、-3 開きすぎ、-4 空きがない、
 ;   -5 できない（ディレクトリ・読み出し専用・同じ名前がある）、-6 名前が正しくない、-7 カードが読めない
 ; 呼び出し規約は 8 章どおり：r16〜r23 は壊れてよい、r24〜r31 は保存する。
@@ -49,6 +55,10 @@ SD_TYPE      = BDA + 16
 USER_FAULT   = BDA + 24
 SDRAM_KB     = BDA + 28                 ; BIOS が調べた SDRAM の大きさ（KB）
 SDRAM        = 0x01000000               ; SDRAM の先頭（.EXE をここに読み込んでもよい）
+HIGH_BASE    = 0x017F0000               ; MyDOS の後ろ半分を置く場所（8MB の SDRAM の最後の 64KB）
+HIGH_MAX     = 0x10000
+RPATH_MAX    = 80                       ; パスの文字列（cwd_path・rpath）の大きさ
+HIGH_FILE    = 0x6000                   ; MYDOS.SYS の中で、後ろ半分が始まる位置（BIOS が読むのは ここまで）
 VEC          = 0x0002B100               ; SYSCALL の表
 SECBUF       = 0x0002B200               ; セクタの置き場（1 つだけ覚えておく。書いたら後でまとめて書き戻す）
 FATBUF       = 0x0002B400               ; FAT のセクタの置き場（同じく）
@@ -56,7 +66,7 @@ BATBUF       = 0x0002B600               ; .BAT を読み込む置き場
 BATMAX       = 0x400
 STACK_TOP    = 0x0002C000
 TPA          = 0x00026000               ; .EXE・.COM を読み込む場所
-TPA_END      = 0x0002B000
+TPA_END      = 0x00028000               ; 0x28000〜0x29FFF はない（BSRAM をデータキャッシュに回した）
 COPYBUF      = TPA                      ; COPY・TYPE の作業用（プログラムが動いていないときは空いている）
 NFILES       = 4                        ; 同時に開けるファイルの数
 FAT_DATE     = (2026 - 1980) << 9 | 1 << 5 | 1   ; 時計がないので、書いたファイルの日付は 2026-01-01 にする
@@ -94,11 +104,18 @@ dos_start:
         JMP32 .v
 .vdone: ADDI32 r16, r0, dos_fault       ; プログラムの例外を受け取る
         STORE32_32 r16, r0, USER_FAULT
+        LOAD32_32 r16, r0, SDRAM_KB     ; SDRAM のプログラムが使える終わり（後ろ半分を読み込んだら HIGH_BASE）
+        SHLI32 r16, r16, 10
+        ADDI32 r16, r16, SDRAM
+        STORE32_32 r16, r0, user_top
+        ADDI32 r16, r0, '\\'              ; 今のディレクトリはルート
+        STORE16_32 r16, r0, cwd_path
         ADDI32 r16, r0, s_banner
         CALL32 puts
-        CALL32 fs_mount                 ; カードが読めて AUTOEXEC.BAT があれば実行する
+        CALL32 fs_mount                 ; カードが読めたら、後ろ半分を読み込み、AUTOEXEC.BAT があれば実行する
         CMPEQI32 p1, r16, 0
         BR32 p1, shell
+        CALL32 load_high
         ADDI32 r16, r0, s_autoexec
         CALL32 to83
         CALL32 fs_find
@@ -114,8 +131,7 @@ shell:
         ADDI32 r16, r0, 10
         CALL32 putc
 .prompt:
-        ADDI32 r16, r0, s_prompt
-        CALL32 puts
+        CALL32 put_prompt
         ADDI32 r16, r0, linebuf
         ADDI32 r17, r0, 72
         CALL32 BIOS_GETLINE
@@ -137,7 +153,48 @@ dos_vectors:                            ; SYSCALL の表に入れる MyDOS の�
         .word 20, f_delete
         .word 21, f_rename
         .word 22, f_seek
+        .word 23, f_mkdir
+        .word 24, f_rmdir
+        .word 25, f_chdir
+        .word 26, f_getcwd
         .word -1
+
+; load_high()：MYDOS.SYS の HIGH_FILE から後ろ（後ろ半分）を HIGH_BASE に読み込む。SDRAM が 8MB なければ読まない。
+; 読めたら high_ok ← 1、SDRAM のプログラムが使えるのは user_top（HIGH_BASE）まで
+load_high:
+        ADDI32 sp, sp, -8
+        STORE32_32 lr, sp, 0
+        STORE32_32 r24, sp, 4
+        LOAD32_32 r16, r0, SDRAM_KB
+        CMPLTI32 p1, r16, 8192
+        BR32 p1, .ret
+        ADDI32 r16, r0, s_mydos
+        ADDI32 r17, r0, 0
+        CALL32 f_open
+        CMPLTI32 p1, r16, 0
+        BR32 p1, .ret
+        ADDR32 r24, r16, r0
+        ADDI32 r17, r0, HIGH_FILE
+        ADDI32 r18, r0, 0
+        CALL32 f_seek
+        ADDR32 r16, r24, r0
+        ADDI32 r17, r0, HIGH_BASE
+        ADDI32 r18, r0, HIGH_MAX
+        CALL32 f_read
+        ADDR32 r16, r24, r0
+        CALL32 f_close
+        LOAD32_32 r16, r0, HIGH_BASE    ; 印 "HIGH"
+        ADDI32 r17, r0, 0x48474948
+        CMPNER32 p1, r16, r17
+        BR32 p1, .ret
+        ADDI32 r16, r0, 1
+        STORE32_32 r16, r0, high_ok
+        ADDI32 r16, r0, HIGH_BASE
+        STORE32_32 r16, r0, user_top
+.ret:   LOAD32_32 lr, sp, 0
+        LOAD32_32 r24, sp, 4
+        ADDI32 sp, sp, 8
+        RET32
 
 ; ==================================================================
 ; 1 行の実行
@@ -206,8 +263,14 @@ run_line:
         ADDI32 r24, r24, 8
         JMP32 .find
 .call:  LOAD32_32 r17, r24, 4
+        LOAD32_32 r16, r0, high_ok      ; 組み込みのコマンドは後ろ半分にある
+        CMPEQI32 p1, r16, 0
+        BR32 p1, .nohigh
         LOAD32_32 r16, r0, args
         CALLR32 r17
+        JMP32 .ret
+.nohigh: ADDI32 r16, r0, s_nohigh
+        CALL32 puts
         JMP32 .ret
 .file:  CALL32 run_file                 ; .EXE・.COM・.BAT
         CMPNEI32 p1, r16, 0
@@ -302,6 +365,10 @@ to83:
         BR32 p1, .end
         CMPEQI32 p1, r17, ' '
         BR32 p1, .end
+        CMPEQI32 p1, r17, '\\'          ; パスの区切りでも終わり
+        BR32 p1, .end
+        CMPEQI32 p1, r17, '/'
+        BR32 p1, .end
         CMPNEI32 p1, r17, '.'
         BR32 p1, .ch
         CMPEQI32 p1, r20, 11            ; 2 つ目の '.'
@@ -340,6 +407,527 @@ to83:
         RET32
 
 ; ==================================================================
+; パス（サブディレクトリ）
+; ==================================================================
+; ディレクトリはクラスタの番号で表す（0 = ルート）。今のディレクトリは cwd_clus、その名前は cwd_path（"\" か "\INCLUDE\SYS"）。
+; fs_find・dir_slot・dir_next は dir_clus のディレクトリを見る
+
+; path83(r16 = パス) → r16 = 1：最後の名前を name83 に、それがあるディレクトリを dir_clus に
+;                            2：パスがディレクトリそのもの（「\」「..」、最後が「\」など）。そのディレクトリを dir_clus に
+;                            0：名前が正しくない、3：途中のディレクトリがない
+;   「C:」で始まってもよい。「\」「/」で区切る。「\」で始まればルートから、ほかは今のディレクトリから。「.」「..」も使える。
+;   空白か 0 で終わる。たどったディレクトリの名前を rpath に作る（CD・DIR が使う）
+path83:
+        ADDI32 sp, sp, -16
+        STORE32_32 lr, sp, 0
+        STORE32_32 r24, sp, 4
+        STORE32_32 r25, sp, 8
+        STORE32_32 r26, sp, 12
+        ADDR32 r24, r16, r0             ; r24 = 読む位置
+        LOAD8U_32 r17, r24, 1           ; 「C:」は飛ばす
+        CMPNEI32 p1, r17, ':'
+        BR32 p1, .nodrv
+        ADDI32 r24, r24, 2
+.nodrv: LOAD32_32 r25, r0, cwd_clus     ; r25 = たどっているディレクトリ
+        ADDI32 r16, r0, rpath
+        ADDI32 r17, r0, cwd_path
+        CALL32 strcpy0
+        LOAD8U_32 r17, r24, 0
+        CMPEQI32 p1, r17, '\\'
+        BR32 p1, .root
+        CMPNEI32 p1, r17, '/'
+        BR32 p1, .comp
+.root:  ADDI32 r25, r0, 0
+        ADDI32 r17, r0, '\\'
+        STORE16_32 r17, r0, rpath       ; rpath ← "\"
+        ADDI32 r24, r24, 1
+.comp:  ADDR32 r26, r24, r0             ; 1 つの部分 [r24, r26)
+.e:     LOAD8U_32 r17, r26, 0
+        CMPEQI32 p1, r17, 0
+        BR32 p1, .eend
+        CMPEQI32 p1, r17, ' '
+        BR32 p1, .eend
+        CMPEQI32 p1, r17, '\\'
+        BR32 p1, .eend
+        CMPEQI32 p1, r17, '/'
+        BR32 p1, .eend
+        ADDI32 r26, r26, 1
+        JMP32 .e
+.eend:  SUBR32 r18, r26, r24            ; 長さ
+        CMPEQI32 p1, r18, 0
+        BR32 p1, .last
+        LOAD8U_32 r19, r24, 0           ; 「.」「..」
+        CMPNEI32 p1, r19, '.'
+        BR32 p1, .name
+        CMPEQI32 p1, r18, 1
+        BR32 p1, .last
+        CMPNEI32 p1, r18, 2
+        BR32 p1, .name                  ; 「.X」などは to83 が間違いにする
+        LOAD8U_32 r19, r24, 1
+        CMPNEI32 p1, r19, '.'
+        BR32 p1, .name
+        CMPEQI32 p1, r25, 0             ; ルートの親はルート
+        BR32 p1, .last
+        ADDR32 r16, r25, r0
+        CALL32 parent_of
+        CMPLTI32 p1, r16, 0
+        BR32 p1, .nf
+        ADDR32 r25, r16, r0
+        CALL32 rp_pop
+.last:  LOAD8U_32 r17, r26, 0           ; 空・「.」・「..」：後ろに続くか、ここで終わりか
+        CMPEQI32 p1, r17, '\\'
+        BR32 p1, .more
+        CMPEQI32 p1, r17, '/'
+        BR32 p1, .more
+        STORE32_32 r25, r0, dir_clus    ; ディレクトリそのもの
+        ADDI32 r16, r0, 2
+        JMP32 .ret
+.more:  ADDI32 r24, r26, 1
+        JMP32 .comp
+.name:  ADDR32 r16, r24, r0
+        CALL32 to83                     ; 区切りの手前まで
+        CMPEQI32 p1, r16, 0
+        BR32 p1, .ret
+        STORE32_32 r25, r0, dir_clus
+        LOAD8U_32 r17, r26, 0
+        CMPEQI32 p1, r17, '\\'
+        BR32 p1, .sub
+        CMPEQI32 p1, r17, '/'
+        BR32 p1, .sub
+        ADDI32 r16, r0, 1               ; 最後の名前
+        JMP32 .ret
+.sub:   CALL32 fs_find                  ; 途中のディレクトリへ
+        CMPEQI32 p1, r16, 0
+        BR32 p1, .nf
+        LOAD8U_32 r17, r0, ent + 11
+        ANDI32 r17, r17, 0x10
+        CMPEQI32 p1, r17, 0
+        BR32 p1, .nf
+        CALL32 ent_first
+        ADDR32 r25, r16, r0
+        CALL32 rp_push
+        CMPEQI32 p1, r16, 0
+        BR32 p1, .nf
+        JMP32 .more
+.nf:    ADDI32 r16, r0, 3
+.ret:   LOAD32_32 lr, sp, 0
+        LOAD32_32 r24, sp, 4
+        LOAD32_32 r25, sp, 8
+        LOAD32_32 r26, sp, 12
+        ADDI32 sp, sp, 16
+        RET32
+
+; path_err(r16 = path83 の結果で 1 でないもの) → r16 = エラーの番号（0 → -6、2 → -5、3 → -2）
+path_err:
+        CMPEQI32 p2, r16, 2
+        ADDI32 r17, r0, -6
+        ADDI32 r18, r0, -5
+        SEL32 r17, r18, r17, p2
+        CMPEQI32 p3, r16, 3
+        ADDI32 r18, r0, -2
+        SEL32 r16, r18, r17, p3
+        RET32
+
+; ent_first() → r16 = ent（fs_find が写した項目）の最初のクラスタ
+ent_first:
+        LOAD16U_32 r16, r0, ent + 26
+        LOAD16U_32 r17, r0, ent + 20
+        LOAD32_32 r18, r0, fs_type
+        CMPEQI32 p1, r18, 32
+        SHLI32 r17, r17, 16
+        SEL32 r17, r17, r0, p1
+        ORR32 r16, r16, r17
+        RET32
+
+; parent_of(r16 = ディレクトリ) → r16 = 親（「..」の項目。0 ならルート）。読めなければ負。name83 を壊す
+parent_of:
+        ADDI32 sp, sp, -8
+        STORE32_32 lr, sp, 0
+        STORE32_32 r16, r0, dir_clus
+        ADDI32 r16, r0, 0x20202E2E      ; 「..」と空白
+        STORE32_32 r16, r0, name83
+        ADDI32 r16, r0, 0x20202020
+        STORE32_32 r16, r0, name83 + 4
+        STORE32_32 r16, r0, name83 + 8
+        CALL32 fs_find
+        CMPEQI32 p1, r16, 0
+        ADDI32 r16, r0, -1
+        BR32 p1, .ret
+        CALL32 ent_first
+        LOAD32_32 r17, r0, root_clus    ; FAT32 でルートの番号が書いてあっても 0（ルート）に
+        CMPEQR32 p1, r16, r17
+        SEL32 r16, r0, r16, p1
+.ret:   LOAD32_32 lr, sp, 0
+        ADDI32 sp, sp, 8
+        RET32
+
+; rp_push() → r16 = 1：rpath の後ろに「\」と name83 の名前（NAME.EXT）を足す。長すぎれば 0
+rp_push:
+        ADDI32 r16, r0, rpath
+.e:     LOAD8U_32 r17, r16, 0
+        CMPEQI32 p1, r17, 0
+        BR32 p1, .end
+        ADDI32 r16, r16, 1
+        JMP32 .e
+.end:   ADDI32 r17, r16, -rpath
+        CMPGEI32 p1, r17, RPATH_MAX - 14
+        BR32 p1, .long
+        CMPEQI32 p1, r17, 1             ; 「\」だけなら区切りは足さない
+        BR32 p1, .nm
+        ADDI32 r17, r0, '\\'
+        STORE8_32 r17, r16, 0
+        ADDI32 r16, r16, 1
+.nm:    ADDI32 r18, r0, 0               ; 名前（空白の手前まで）
+.n:     LOAD8U_32 r17, r18, name83
+        CMPEQI32 p1, r17, ' '
+        BR32 p1, .x
+        STORE8_32 r17, r16, 0
+        ADDI32 r16, r16, 1
+        ADDI32 r18, r18, 1
+        CMPLTI32 p1, r18, 8
+        BR32 p1, .n
+.x:     LOAD8U_32 r17, r0, name83 + 8   ; 拡張子
+        CMPEQI32 p1, r17, ' '
+        BR32 p1, .z
+        ADDI32 r17, r0, '.'
+        STORE8_32 r17, r16, 0
+        ADDI32 r16, r16, 1
+        ADDI32 r18, r0, 8
+.xx:    LOAD8U_32 r17, r18, name83
+        CMPEQI32 p1, r17, ' '
+        BR32 p1, .z
+        STORE8_32 r17, r16, 0
+        ADDI32 r16, r16, 1
+        ADDI32 r18, r18, 1
+        CMPLTI32 p1, r18, 11
+        BR32 p1, .xx
+.z:     STORE8_32 r0, r16, 0
+        ADDI32 r16, r0, 1
+        RET32
+.long:  ADDI32 r16, r0, 0
+        RET32
+
+; rp_pop()：rpath の最後の「\名前」を除く（ルートの「\」は残す）
+rp_pop:
+        ADDI32 r16, r0, rpath
+        ADDI32 r18, r0, rpath           ; 最後の「\」
+.l:     LOAD8U_32 r17, r16, 0
+        CMPEQI32 p1, r17, 0
+        BR32 p1, .cut
+        CMPNEI32 p1, r17, '\\'
+        BR32 p1, .n
+        ADDR32 r18, r16, r0
+.n:     ADDI32 r16, r16, 1
+        JMP32 .l
+.cut:   ADDI32 r17, r0, rpath
+        CMPEQR32 p1, r18, r17
+        ADDI32 r19, r18, 1
+        SEL32 r18, r19, r18, p1
+        STORE8_32 r0, r18, 0
+        RET32
+
+; strcpy0(r16 = 先, r17 = 元)：0 までを写す
+strcpy0:
+        LOAD8U_32 r18, r17, 0
+        STORE8_32 r18, r16, 0
+        ADDI32 r16, r16, 1
+        ADDI32 r17, r17, 1
+        CMPNEI32 p1, r18, 0
+        BR32 p1, strcpy0
+        RET32
+
+; has_sep(r16 = 文字列) → r16 = 1 なら「\」「/」「:」がある（パスを書いた）
+has_sep:
+        LOAD8U_32 r17, r16, 0
+        CMPEQI32 p1, r17, 0
+        BR32 p1, .no
+        CMPEQI32 p1, r17, '\\'
+        BR32 p1, .yes
+        CMPEQI32 p1, r17, '/'
+        BR32 p1, .yes
+        CMPEQI32 p1, r17, ':'
+        BR32 p1, .yes
+        ADDI32 r16, r16, 1
+        JMP32 has_sep
+.yes:   ADDI32 r16, r0, 1
+        RET32
+.no:    ADDI32 r16, r0, 0
+        RET32
+
+; copy12(r16 = 先, r17 = 元)：12 バイト（8.3 の名前）を写す
+copy12:
+        LOAD32_32 r18, r17, 0
+        STORE32_32 r18, r16, 0
+        LOAD32_32 r18, r17, 4
+        STORE32_32 r18, r16, 4
+        LOAD32_32 r18, r17, 8
+        STORE32_32 r18, r16, 8
+        RET32
+
+; put_prompt()：「C:\今のディレクトリ>」
+put_prompt:
+        ADDI32 sp, sp, -8
+        STORE32_32 lr, sp, 0
+        ADDI32 r16, r0, s_prompt
+        CALL32 puts
+        ADDI32 r16, r0, cwd_path
+        CALL32 puts
+        ADDI32 r16, r0, '>'
+        CALL32 putc
+        LOAD32_32 lr, sp, 0
+        ADDI32 sp, sp, 8
+        RET32
+
+; make_dirent(r16 = 項目, r17 = 名前 11 バイト, r18 = 最初のクラスタ, r19 = 属性)：大きさ 0 の項目を作る
+make_dirent:
+        ADDI32 r20, r0, 0
+.cp:    ADDR32 r21, r17, r20
+        LOAD8U_32 r21, r21, 0
+        ADDR32 r22, r16, r20
+        STORE8_32 r21, r22, 0
+        ADDI32 r20, r20, 1
+        CMPLTI32 p1, r20, 11
+        BR32 p1, .cp
+        STORE8_32 r19, r16, 11
+        STORE8_32 r0, r16, 12
+        STORE8_32 r0, r16, 13
+        STORE16_32 r0, r16, 14
+        STORE32_32 r0, r16, 20
+        STORE32_32 r0, r16, 24
+        STORE32_32 r0, r16, 28
+        ADDI32 r21, r0, FAT_DATE        ; 作った日・使った日・書いた日（時刻は 0:00）
+        STORE16_32 r21, r16, 16
+        STORE16_32 r21, r16, 18
+        STORE16_32 r21, r16, 24
+        STORE16_32 r18, r16, 26         ; クラスタの下と上
+        SHRI32 r21, r18, 16
+        STORE16_32 r21, r16, 20
+        RET32
+
+; f_mkdir(r16 = パス) → r16 = 0 なら成功。SYSCALL 23
+f_mkdir:
+        ADDI32 sp, sp, -24
+        STORE32_32 lr, sp, 0
+        STORE32_32 r24, sp, 4
+        STORE32_32 r25, sp, 8
+        STORE32_32 r26, sp, 12
+        STORE32_32 r27, sp, 16
+        ADDR32 r24, r16, r0
+        CALL32 mounted
+        CMPEQI32 p1, r16, 0
+        ADDI32 r16, r0, -7
+        BR32 p1, .ret
+        ADDR32 r16, r24, r0
+        CALL32 path83
+        CMPEQI32 p1, r16, 1
+        BR32 p1, .ok
+        CALL32 path_err
+        JMP32 .ret
+.ok:    CALL32 fs_find                  ; 同じ名前がもうある
+        CMPNEI32 p1, r16, 0
+        ADDI32 r16, r0, -5
+        BR32 p1, .ret
+        LOAD32_32 r25, r0, dir_clus     ; r25 = 親
+        CALL32 alloc                    ; r24 = 新しいディレクトリのクラスタ
+        ADDR32 r24, r16, r0
+        CMPEQI32 p1, r24, 0
+        ADDI32 r16, r0, -4
+        BR32 p1, .ret
+        CALL32 clus_lba                 ; 0 で埋める
+        ADDR32 r26, r16, r0
+        LOAD32_32 r27, r0, spc
+.z:     ADDR32 r16, r26, r0
+        CALL32 sb_new
+        ADDI32 r26, r26, 1
+        ADDI32 r27, r27, -1
+        CMPNEI32 p1, r27, 0
+        BR32 p1, .z
+        ADDR32 r16, r24, r0             ; 「.」（自分）と「..」（親。ルートなら 0）
+        CALL32 clus_lba
+        ADDR32 r26, r16, r0
+        ADDI32 r17, r0, 0
+        CALL32 ent_ptr
+        CMPEQI32 p1, r16, 0
+        BR32 p1, .nr
+        ADDI32 r17, r0, s_dot
+        ADDR32 r18, r24, r0
+        ADDI32 r19, r0, 0x10
+        CALL32 make_dirent
+        ADDR32 r16, r26, r0
+        ADDI32 r17, r0, 32
+        CALL32 ent_ptr
+        ADDI32 r17, r0, s_dotdot
+        ADDR32 r18, r25, r0
+        ADDI32 r19, r0, 0x10
+        CALL32 make_dirent
+        STORE32_32 r25, r0, dir_clus    ; 親に項目を作る
+        CALL32 dir_slot
+        CMPEQI32 p1, r16, 0
+        BR32 p1, .full
+        LOAD32_32 r16, r0, e_lba
+        LOAD32_32 r17, r0, e_off
+        CALL32 ent_ptr
+        CMPEQI32 p1, r16, 0
+        BR32 p1, .nr
+        ADDI32 r17, r0, name83
+        ADDR32 r18, r24, r0
+        ADDI32 r19, r0, 0x10
+        CALL32 make_dirent
+        CALL32 fs_sync
+        ADDI32 r16, r0, 0
+        JMP32 .ret
+.full:  ADDR32 r16, r24, r0
+        CALL32 free_chain
+        CALL32 fs_sync
+        ADDI32 r16, r0, -4
+        JMP32 .ret
+.nr:    ADDI32 r16, r0, -7
+.ret:   LOAD32_32 lr, sp, 0
+        LOAD32_32 r24, sp, 4
+        LOAD32_32 r25, sp, 8
+        LOAD32_32 r26, sp, 12
+        LOAD32_32 r27, sp, 16
+        ADDI32 sp, sp, 24
+        RET32
+
+; f_rmdir(r16 = パス) → r16 = 0 なら成功。空のディレクトリだけ。今のディレクトリは消せない。SYSCALL 24
+f_rmdir:
+        ADDI32 sp, sp, -16
+        STORE32_32 lr, sp, 0
+        STORE32_32 r24, sp, 4
+        STORE32_32 r25, sp, 8
+        ADDR32 r24, r16, r0
+        CALL32 mounted
+        CMPEQI32 p1, r16, 0
+        ADDI32 r16, r0, -7
+        BR32 p1, .ret
+        ADDR32 r16, r24, r0
+        CALL32 path83
+        CMPEQI32 p1, r16, 1
+        BR32 p1, .ok
+        CALL32 path_err
+        JMP32 .ret
+.ok:    CALL32 fs_find
+        CMPEQI32 p1, r16, 0
+        ADDI32 r16, r0, -2
+        BR32 p1, .ret
+        LOAD8U_32 r17, r0, ent + 11     ; ディレクトリで、読み出し専用でない
+        ANDI32 r17, r17, 0x11
+        CMPNEI32 p1, r17, 0x10
+        ADDI32 r16, r0, -5
+        BR32 p1, .ret
+        CALL32 ent_first
+        ADDR32 r24, r16, r0             ; r24 = 消すディレクトリ
+        LOAD32_32 r17, r0, cwd_clus
+        CMPEQR32 p1, r24, r17
+        ADDI32 r16, r0, -5
+        BR32 p1, .ret
+        LOAD32_32 r25, r0, dir_clus     ; r25 = 親
+        STORE32_32 r24, r0, dir_clus    ; 中が空か（「.」「..」のほかに項目がない）
+        CALL32 dir_open
+.l:     CALL32 dir_next
+        CMPEQI32 p1, r16, 0
+        BR32 p1, .empty
+        LOAD8U_32 r17, r0, dent
+        CMPEQI32 p1, r17, '.'
+        BR32 p1, .l
+        ADDI32 r16, r0, -5
+        JMP32 .ret
+.empty: STORE32_32 r25, r0, dir_clus    ; 親の中の項目をもう一度探して消す（長い名前の項目も）
+        CALL32 fs_find
+        CMPEQI32 p1, r16, 0
+        ADDI32 r16, r0, -2
+        BR32 p1, .ret
+        CALL32 kill_lfn
+        LOAD32_32 r16, r0, f_lba
+        LOAD32_32 r17, r0, f_off
+        CALL32 ent_ptr
+        CMPEQI32 p1, r16, 0
+        ADDI32 r17, r0, -7
+        SEL32 r16, r17, r16, p1
+        BR32 p1, .ret
+        ADDI32 r17, r0, 0xE5
+        STORE8_32 r17, r16, 0
+        ADDR32 r16, r24, r0
+        CALL32 free_chain
+        CALL32 fs_sync
+        ADDI32 r16, r0, 0
+.ret:   LOAD32_32 lr, sp, 0
+        LOAD32_32 r24, sp, 4
+        LOAD32_32 r25, sp, 8
+        ADDI32 sp, sp, 16
+        RET32
+
+; f_chdir(r16 = パス) → r16 = 0 なら成功。今のディレクトリを変える。SYSCALL 25
+f_chdir:
+        ADDI32 sp, sp, -8
+        STORE32_32 lr, sp, 0
+        STORE32_32 r24, sp, 4
+        ADDR32 r24, r16, r0
+        CALL32 mounted
+        CMPEQI32 p1, r16, 0
+        ADDI32 r16, r0, -7
+        BR32 p1, .ret
+        ADDR32 r16, r24, r0
+        CALL32 path83
+        CMPEQI32 p1, r16, 2
+        BR32 p1, .dir
+        CMPEQI32 p1, r16, 1
+        BR32 p1, .name
+        CALL32 path_err
+        JMP32 .ret
+.name:  CALL32 fs_find                  ; 最後の名前がディレクトリであること
+        CMPEQI32 p1, r16, 0
+        ADDI32 r16, r0, -2
+        BR32 p1, .ret
+        LOAD8U_32 r17, r0, ent + 11
+        ANDI32 r17, r17, 0x10
+        CMPEQI32 p1, r17, 0
+        ADDI32 r16, r0, -5
+        BR32 p1, .ret
+        CALL32 ent_first
+        STORE32_32 r16, r0, dir_clus
+        CALL32 rp_push
+        CMPEQI32 p1, r16, 0
+        ADDI32 r16, r0, -6
+        BR32 p1, .ret
+.dir:   LOAD32_32 r16, r0, dir_clus
+        STORE32_32 r16, r0, cwd_clus
+        ADDI32 r16, r0, cwd_path
+        ADDI32 r17, r0, rpath
+        CALL32 strcpy0
+        ADDI32 r16, r0, 0
+.ret:   LOAD32_32 lr, sp, 0
+        LOAD32_32 r24, sp, 4
+        ADDI32 sp, sp, 8
+        RET32
+
+; f_getcwd(r16 = 置き場所, r17 = 大きさ) → r16 = 長さ（「C:\…」。入らなければ -1）。SYSCALL 26
+f_getcwd:
+        ADDI32 r18, r0, cwd_path        ; 長さ
+.l:     LOAD8U_32 r19, r18, 0
+        ADDI32 r18, r18, 1
+        CMPNEI32 p1, r19, 0
+        BR32 p1, .l
+        ADDI32 r18, r18, -cwd_path - 1
+        ADDI32 r19, r18, 3              ; 「C:」と最後の 0
+        CMPLTUR32 p1, r17, r19
+        BR32 p1, .bad
+        ADDI32 r19, r0, 'C'
+        STORE8_32 r19, r16, 0
+        ADDI32 r19, r0, ':'
+        STORE8_32 r19, r16, 1
+        ADDI32 r20, r18, 2
+        ADDI32 r16, r16, 2
+        ADDI32 r17, r0, cwd_path
+        ADDR32 r21, lr, r0
+        CALL32 strcpy0
+        ADDR32 r16, r20, r0
+        JMPR32 r21
+.bad:   ADDI32 r16, r0, -1
+        RET32
+
+; ==================================================================
 ; ファイルの実行
 ; ==================================================================
 
@@ -348,34 +936,32 @@ run_file:
         ADDI32 sp, sp, -8
         STORE32_32 lr, sp, 0
         STORE32_32 r24, sp, 4
-        ADDI32 r16, r0, cmdbuf
-        CALL32 to83
-        CMPEQI32 p1, r16, 0
-        BR32 p1, .no
         CALL32 need_fs
         CMPEQI32 p1, r16, 0
         BR32 p1, .yes                   ; カードが読めない（メッセージは出した）
-        LOAD8U_32 r16, r0, name83 + 8   ; 拡張子があればその名前で
-        CMPEQI32 p1, r16, ' '
-        BR32 p1, .noext
-        CALL32 fs_find
-        CMPEQI32 p1, r16, 0
+        ADDI32 r16, r0, cmdbuf
+        CALL32 path83
+        CMPNEI32 p1, r16, 1
         BR32 p1, .no
-        JMP32 .kind
-.noext: ADDI32 r24, r0, exts            ; .EXE → .COM → .BAT
-.try:   LOAD8U_32 r16, r24, 0
-        CMPEQI32 p1, r16, 0
-        BR32 p1, .no
-        STORE8_32 r16, r0, name83 + 8
-        LOAD8U_32 r16, r24, 1
-        STORE8_32 r16, r0, name83 + 9
-        LOAD8U_32 r16, r24, 2
-        STORE8_32 r16, r0, name83 + 10
-        CALL32 fs_find
+        LOAD8U_32 r24, r0, name83 + 8   ; r24 = 拡張子がない（.EXE → .COM → .BAT の順に探す）
+        CMPEQI32 p1, r24, ' '
+        BTOI32 r24, p1
+        ADDR32 r16, r24, r0
+        CALL32 find_prog
         CMPNEI32 p1, r16, 0
         BR32 p1, .kind
-        ADDI32 r24, r24, 4
-        JMP32 .try
+        LOAD32_32 r16, r0, dir_clus     ; なければ、パスを書いていないときはルートでも探す
+        CMPEQI32 p1, r16, 0
+        BR32 p1, .no
+        ADDI32 r16, r0, cmdbuf
+        CALL32 has_sep
+        CMPNEI32 p1, r16, 0
+        BR32 p1, .no
+        STORE32_32 r0, r0, dir_clus
+        ADDR32 r16, r24, r0
+        CALL32 find_prog
+        CMPEQI32 p1, r16, 0
+        BR32 p1, .no
 .kind:  ADDI32 r16, r0, ent + 8         ; 拡張子で分ける
         ADDI32 r17, r0, x_bat
         CALL32 ext_is
@@ -397,6 +983,34 @@ run_file:
         JMP32 .yes
 .prog:  CALL32 run_prog
 .yes:   ADDI32 r16, r0, 1
+.ret:   LOAD32_32 lr, sp, 0
+        LOAD32_32 r24, sp, 4
+        ADDI32 sp, sp, 8
+        RET32
+
+; find_prog(r16 = 1 なら拡張子を EXE・COM・BAT の順に試す) → r16 = 1 なら dir_clus に name83 があった（ent に）
+find_prog:
+        ADDI32 sp, sp, -8
+        STORE32_32 lr, sp, 0
+        STORE32_32 r24, sp, 4
+        CMPNEI32 p1, r16, 0
+        BR32 p1, .noext
+        CALL32 fs_find
+        JMP32 .ret
+.noext: ADDI32 r24, r0, exts
+.try:   LOAD8U_32 r16, r24, 0
+        CMPEQI32 p1, r16, 0
+        BR32 p1, .ret
+        STORE8_32 r16, r0, name83 + 8
+        LOAD8U_32 r16, r24, 1
+        STORE8_32 r16, r0, name83 + 9
+        LOAD8U_32 r16, r24, 2
+        STORE8_32 r16, r0, name83 + 10
+        CALL32 fs_find
+        CMPNEI32 p1, r16, 0
+        BR32 p1, .ret
+        ADDI32 r24, r24, 4
+        JMP32 .try
 .ret:   LOAD32_32 lr, sp, 0
         LOAD32_32 r24, sp, 4
         ADDI32 sp, sp, 8
@@ -481,12 +1095,12 @@ run_prog:
         CMPLTUR32 p1, r20, r21          ; TPA ≦ 読み込む番地 < TPA_END
         SUBR32 r21, r21, r20            ; 残りの大きさ
         BR32 p1, .fit
-        LOAD32_32 r21, r0, SDRAM_KB
-        CMPEQI32 p1, r21, 0
+        LOAD32_32 r21, r0, user_top     ; SDRAM で使えるのは user_top まで（後ろ半分の手前）
+        ADDI32 r21, r21, -SDRAM
+        CMPLTI32 p1, r21, 1
         BR32 p1, .big1
         ADDI32 r20, r18, -SDRAM
-        SHLI32 r21, r21, 10
-        CMPGEUR32 p1, r20, r21          ; SDRAM ≦ 読み込む番地 < SDRAM の終わり
+        CMPGEUR32 p1, r20, r21          ; SDRAM ≦ 読み込む番地 < user_top
         BR32 p1, .big1
         SUBR32 r21, r21, r20
 .fit:   CMPLTUR32 p1, r21, r19          ; 本体が入りきるか
@@ -514,12 +1128,10 @@ run_prog:
         BR32 p1, .sdram
         CMPLTUR32 p1, r18, r28
         BR32 p1, .sgo
-.sdram: LOAD32_32 r21, r0, SDRAM_KB
-        CMPEQI32 p1, r21, 0
-        BR32 p1, .big1
+.sdram: LOAD32_32 r28, r0, user_top
         ADDI32 r27, r0, SDRAM
-        SHLI32 r21, r21, 10
-        ADDI32 r28, r21, SDRAM
+        CMPGEUR32 p1, r27, r28
+        BR32 p1, .big1
         CMPLTUR32 p1, r18, r27
         BR32 p1, .big1
         CMPGEUR32 p1, r18, r28
@@ -567,12 +1179,10 @@ run_prog:
         STORE32_32 r16, r0, running
         STORE32_32 sp, r0, saved_sp     ; 終了（SYSCALL 0）・例外のときは .back へ
         ADDI32 lr, r0, exit_stub        ; RET32 で戻ってきたら SYSCALL 0
-        LOAD32_32 r16, r0, prog_base    ; SDRAM のプログラムは、スタックも SDRAM の末尾に
+        LOAD32_32 r16, r0, prog_base    ; SDRAM のプログラムは、スタックも SDRAM の終わり（user_top）から
         CMPLTUI32 p1, r16, SDRAM
         BR32 p1, .stk
-        LOAD32_32 r16, r0, SDRAM_KB
-        SHLI32 r16, r16, 10
-        ADDI32 sp, r16, SDRAM
+        LOAD32_32 sp, r0, user_top
 .stk:   ADDR32 epc, r26, r0
         ADDI32 status, r0, 4            ; ERET で「例外の直前の特権 = ユーザー」に戻る → ユーザーモード
         LOAD32_32 r16, r0, args
@@ -693,7 +1303,7 @@ run_batch:
         CMPGEUR32 p1, r16, r17
         BR32 p1, .ret
         ADDI32 r18, r0, linebuf
-        ADDI32 r20, r0, linebuf + 127
+        ADDI32 r20, r0, linebuf + 191
 .c:     CMPGEUR32 p1, r16, r17
         BR32 p1, .eol
         LOAD8U_32 r19, r16, 0
@@ -731,8 +1341,7 @@ run_batch:
         JMP32 .exec
 .echo:  ADDI32 r16, r0, 10
         CALL32 putc
-        ADDI32 r16, r0, s_prompt
-        CALL32 puts
+        CALL32 put_prompt
         ADDI32 r16, r0, linebuf
         CALL32 puts
         ADDI32 r16, r0, 10
@@ -874,7 +1483,7 @@ putdec_w:
 
 ; fmtdec(r16 = 数, r17 = 幅) → r16 = numbuf の中の 10 進の文字列（右寄せ）。r17〜r19 を壊す
 fmtdec:
-        ADDI32 r18, r0, numbuf + 11     ; 後ろから数字を置く
+        ADDI32 r18, r0, numbuf + 39     ; 後ろから数字を置く
         STORE8_32 r0, r18, 0
 .d:     ADDI32 r18, r18, -1
         REMUI32 r19, r16, 10
@@ -979,6 +1588,10 @@ fs_mount:
         STORE32_32 r25, sp, 8
         STORE32_32 r26, sp, 12
         STORE32_32 r0, r0, fs_ok
+        STORE32_32 r0, r0, dir_clus     ; ルートから（今のディレクトリもルートに）
+        STORE32_32 r0, r0, cwd_clus
+        ADDI32 r16, r0, '\\'
+        STORE16_32 r16, r0, cwd_path
         ADDI32 r16, r0, -1              ; 置き場所はどれも空
         STORE32_32 r16, r0, sb_lba
         STORE32_32 r16, r0, fc_sec
@@ -1488,6 +2101,9 @@ dir_open:
         STORE32_32 r0, r0, d_end
         ADDI32 r16, r0, 16
         STORE32_32 r16, r0, d_idx       ; 次は新しいセクタへ進む
+        LOAD32_32 r16, r0, dir_clus     ; サブディレクトリ：クラスタのつながり
+        CMPNEI32 p1, r16, 0
+        BR32 p1, .chain
         LOAD32_32 r16, r0, fs_type
         CMPEQI32 p1, r16, 32
         BR32 p1, .f32
@@ -1497,8 +2113,8 @@ dir_open:
         STORE32_32 r16, r0, d_left
         STORE32_32 r0, r0, d_clus
         RET32
-.f32:   ADDR32 r20, lr, r0              ; FAT32：クラスタのつながり
-        LOAD32_32 r16, r0, root_clus
+.f32:   LOAD32_32 r16, r0, root_clus    ; FAT32 のルート：クラスタのつながり
+.chain: ADDR32 r20, lr, r0
         STORE32_32 r16, r0, d_clus
         CALL32 clus_lba
         STORE32_32 r16, r0, d_lba
@@ -1757,19 +2373,28 @@ h_check:
 
 ; f_open(r16 = 名前, r17 = モード) → r16 = ハンドル（負ならエラー）。SYSCALL 16
 f_open:
-        ADDI32 sp, sp, -8
+        ADDI32 sp, sp, -16
         STORE32_32 lr, sp, 0
         STORE32_32 r24, sp, 4
+        STORE32_32 r25, sp, 8
         ADDR32 r24, r17, r0
-        CALL32 to83
+        ADDR32 r25, r16, r0
+        CALL32 mounted
         CMPEQI32 p1, r16, 0
-        ADDI32 r16, r0, -6
+        ADDI32 r16, r0, -7
         BR32 p1, .ret
-        ADDR32 r16, r24, r0
+        ADDR32 r16, r25, r0
+        CALL32 path83
+        CMPEQI32 p1, r16, 1
+        BR32 p1, .ok
+        CALL32 path_err
+        JMP32 .ret
+.ok:    ADDR32 r16, r24, r0
         CALL32 f_open83
 .ret:   LOAD32_32 lr, sp, 0
         LOAD32_32 r24, sp, 4
-        ADDI32 sp, sp, 8
+        LOAD32_32 r25, sp, 8
+        ADDI32 sp, sp, 16
         RET32
 
 ; f_open83(r16 = モード) → r16 = ハンドル。名前は name83 に入っている
@@ -2252,15 +2877,18 @@ f_delete:
         ADDI32 sp, sp, -8
         STORE32_32 lr, sp, 0
         STORE32_32 r24, sp, 4
-        CALL32 to83
-        CMPEQI32 p1, r16, 0
-        ADDI32 r16, r0, -6
-        BR32 p1, .ret
+        ADDR32 r24, r16, r0
         CALL32 mounted
         CMPEQI32 p1, r16, 0
         ADDI32 r16, r0, -7
         BR32 p1, .ret
-        CALL32 fs_find
+        ADDR32 r16, r24, r0
+        CALL32 path83
+        CMPEQI32 p1, r16, 1
+        BR32 p1, .ok
+        CALL32 path_err
+        JMP32 .ret
+.ok:    CALL32 fs_find
         CMPEQI32 p1, r16, 0
         ADDI32 r16, r0, -2
         BR32 p1, .ret
@@ -2296,34 +2924,48 @@ f_delete:
 
 ; f_rename(r16 = 前の名前, r17 = 新しい名前) → r16 = 0 なら成功。SYSCALL 21
 f_rename:
-        ADDI32 sp, sp, -8
+        ADDI32 sp, sp, -16
         STORE32_32 lr, sp, 0
         STORE32_32 r24, sp, 4
+        STORE32_32 r25, sp, 8
         ADDR32 r24, r16, r0
-        ADDR32 r16, r17, r0             ; 新しい名前を newname へ
-        CALL32 to83
-        CMPEQI32 p1, r16, 0
-        ADDI32 r16, r0, -6
-        BR32 p1, .ret
-        LOAD32_32 r16, r0, name83
-        STORE32_32 r16, r0, newname
-        LOAD32_32 r16, r0, name83 + 4
-        STORE32_32 r16, r0, newname + 4
-        LOAD32_32 r16, r0, name83 + 8
-        STORE32_32 r16, r0, newname + 8
+        ADDR32 r25, r17, r0
         CALL32 mounted
         CMPEQI32 p1, r16, 0
         ADDI32 r16, r0, -7
         BR32 p1, .ret
-        CALL32 fs_find                  ; 同じ名前がもうある
+        ADDR32 r16, r25, r0             ; 新しい名前（パスは書けない。同じディレクトリの中で）を newname へ
+        CALL32 has_sep
         CMPNEI32 p1, r16, 0
-        ADDI32 r16, r0, -5
+        ADDI32 r16, r0, -6
         BR32 p1, .ret
-        ADDR32 r16, r24, r0
+        ADDR32 r16, r25, r0
         CALL32 to83
         CMPEQI32 p1, r16, 0
         ADDI32 r16, r0, -6
         BR32 p1, .ret
+        ADDI32 r16, r0, newname
+        ADDI32 r17, r0, name83
+        CALL32 copy12
+        ADDR32 r16, r24, r0             ; 前の名前（パスでよい）
+        CALL32 path83
+        CMPEQI32 p1, r16, 1
+        BR32 p1, .old
+        CALL32 path_err
+        JMP32 .ret
+.old:   ADDI32 r16, r0, oldname         ; 同じディレクトリに新しい名前がもうある
+        ADDI32 r17, r0, name83
+        CALL32 copy12
+        ADDI32 r16, r0, name83
+        ADDI32 r17, r0, newname
+        CALL32 copy12
+        CALL32 fs_find
+        CMPNEI32 p1, r16, 0
+        ADDI32 r16, r0, -5
+        BR32 p1, .ret
+        ADDI32 r16, r0, name83
+        ADDI32 r17, r0, oldname
+        CALL32 copy12
         CALL32 fs_find
         CMPEQI32 p1, r16, 0
         ADDI32 r16, r0, -2
@@ -2352,7 +2994,8 @@ f_rename:
 .nr:    ADDI32 r16, r0, -7              ; カードが読めない
 .ret:   LOAD32_32 lr, sp, 0
         LOAD32_32 r24, sp, 4
-        ADDI32 sp, sp, 8
+        LOAD32_32 r25, sp, 8
+        ADDI32 sp, sp, 16
         RET32
 
 ; mounted() → r16 = 1 ならカードが読める（メッセージは出さない）
@@ -2367,6 +3010,8 @@ mounted:
 ; 組み込みのコマンド（r16 = 引数）
 ; ==================================================================
 commands:
+        .word c_cd, cmd_cd
+        .word c_chdir, cmd_cd
         .word c_cls, cmd_cls
         .word c_color, cmd_color
         .word c_copy, cmd_copy
@@ -2376,16 +3021,221 @@ commands:
         .word c_echo, cmd_echo
         .word c_help, cmd_help
         .word c_led, cmd_led
+        .word c_md, cmd_md
+        .word c_mkdir, cmd_md
         .word c_mem, cmd_mem
         .word c_reboot, cmd_reboot
+        .word c_rd, cmd_rd
         .word c_ren, cmd_ren
         .word c_rename, cmd_ren
+        .word c_rmdir, cmd_rd
         .word c_shutdown, cmd_shutdown
         .word c_time, cmd_time
         .word c_type, cmd_type
         .word c_ver, cmd_ver
         .word c_vol, cmd_vol
         .word 0, 0
+
+s_banner:   .asciz "MyDOS Version 3.0\n(C)Copyright MyCPU Project 2026.\n"
+s_prompt:   .asciz "C:"
+s_dot:      .ascii ".          "            ; ディレクトリの「.」「..」の項目の名前（11 文字）
+s_dotdot:   .ascii "..         "
+s_bad:      .asciz "Bad command or file name\n"
+s_notready: .asciz "Not ready reading drive C\n"
+s_createerr: .asciz "File creation error\n"
+s_readerr:  .asciz "Read error reading drive C\n"
+s_toobig:   .asciz "Program too big to fit in memory\n"
+s_badexe:   .asciz "Invalid EXE file\n"
+s_term:     .asciz "\nProgram terminated: "
+s_fault_align: .asciz "alignment error"
+s_fault_priv:  .asciz "privileged instruction"
+s_fault_div:   .asciz "divide by zero"
+s_fault_other: .asciz "exception"
+s_at:       .asciz " at "
+s_autoexec: .asciz "AUTOEXEC.BAT"
+s_mydos:    .asciz "\\MYDOS.SYS"
+s_nohigh:   .asciz "Built-in commands need 8MB SDRAM\n"
+badchars:   .asciz "*?/\\:\"<>|+=,;[]"
+x_exe:      .ascii "EXE"
+x_com:      .ascii "COM"
+x_bat:      .ascii "BAT"
+exts:       .ascii "EXE\0COM\0BAT\0\0"
+c_cd:       .asciz "CD"
+c_chdir:    .asciz "CHDIR"
+c_md:       .asciz "MD"
+c_mkdir:    .asciz "MKDIR"
+c_rd:       .asciz "RD"
+c_rmdir:    .asciz "RMDIR"
+c_cls:      .asciz "CLS"
+c_color:    .asciz "COLOR"
+c_copy:     .asciz "COPY"
+c_del:      .asciz "DEL"
+c_erase:    .asciz "ERASE"
+c_dir:      .asciz "DIR"
+c_echo:     .asciz "ECHO"
+c_help:     .asciz "HELP"
+c_led:      .asciz "LED"
+c_mem:      .asciz "MEM"
+c_reboot:   .asciz "REBOOT"
+c_ren:      .asciz "REN"
+c_rename:   .asciz "RENAME"
+c_shutdown: .asciz "SHUTDOWN"
+c_time:     .asciz "TIME"
+c_type:     .asciz "TYPE"
+c_ver:      .asciz "VER"
+c_vol:      .asciz "VOL"
+
+; ---- 変数（起動時に 0 にする。MYDOS.SYS には入らない） ----
+        .align 4
+bss_start:
+fs_ok:      .reserve 4
+exehdr:     .reserve 16                 ; .EXE のヘッダ
+prog_base:  .reserve 4                  ; 実行中のプログラムを読み込んだ番地
+fs_type:    .reserve 4
+fat_lba:    .reserve 4
+fat_sz:     .reserve 4
+nfats:      .reserve 4
+root_lba:   .reserve 4
+root_secs:  .reserve 4
+root_clus:  .reserve 4
+data_lba:   .reserve 4
+spc:        .reserve 4
+clus_bytes: .reserve 4
+nclus:      .reserve 4
+fs_serial:  .reserve 4
+fs_free:    .reserve 4
+free_hint:  .reserve 4
+fsinfo_lba: .reserve 4
+sb_lba:     .reserve 4
+sb_dirty:   .reserve 4
+fc_sec:     .reserve 4
+fc_dirty:   .reserve 4
+d_lba:      .reserve 4
+d_left:     .reserve 4
+d_clus:     .reserve 4
+d_idx:      .reserve 4
+d_cur:      .reserve 4
+d_end:      .reserve 4
+e_lba:      .reserve 4
+e_off:      .reserve 4
+f_lba:      .reserve 4
+f_off:      .reserve 4
+lfn_n:      .reserve 4
+lfn:        .reserve 160
+bat_ptr:    .reserve 4
+bat_end:    .reserve 4
+redir_h:    .reserve 4
+quiet:      .reserve 4
+running:    .reserve 4
+saved_sp:   .reserve 4
+saved_attr: .reserve 4
+tmp:        .reserve 4
+high_ok:    .reserve 4                  ; 後ろ半分を読み込めた
+user_top:   .reserve 4                  ; SDRAM のプログラムが使える終わり（スタックはここから）
+args:       .reserve 4
+handles:    .reserve 32 * NFILES
+ent:        .reserve 32
+dent:       .reserve 32
+name83:     .reserve 12
+newname:    .reserve 12
+oldname:    .reserve 12
+dir_clus:   .reserve 4                  ; fs_find・dir_slot・dir_next が見るディレクトリ（0 = ルート）
+cwd_clus:   .reserve 4                  ; 今のディレクトリ
+cwd_path:   .reserve RPATH_MAX          ; その名前（"\INCLUDE" など）
+rpath:      .reserve RPATH_MAX          ; path83 がたどったディレクトリの名前
+vol_label:  .reserve 12
+numbuf:     .reserve 40                 ; fmtdec の置き場（幅 28 まで右寄せ）
+cbuf:       .reserve 4
+linebuf:    .reserve 192                ; 1 行（.BAT の行は 191 文字まで）
+batargs:    .reserve 128
+cmdbuf:     .reserve 128
+conbuf:     .reserve 128
+bss_end:
+
+; ==================================================================
+; 後ろ半分：SDRAM の上（HIGH_BASE〜、64KB まで）で動く。MYDOS.SYS の 24KB から後ろにあり、
+; 起動時に load_high が読み込む（BIOS が読むのは前の 24KB だけ）。組み込みのコマンドはここ
+; ==================================================================
+        .org 0x26000
+        .phase HIGH_BASE
+high_start:
+        .ascii "HIGH"                   ; 読み込めたかの印
+
+; CD [パス]：今のディレクトリを変える。パスがなければ今のディレクトリを出す
+cmd_cd:
+        ADDI32 sp, sp, -8
+        STORE32_32 lr, sp, 0
+        LOAD8U_32 r17, r16, 0
+        CMPNEI32 p1, r17, 0
+        BR32 p1, .go
+        ADDI32 r16, r0, s_prompt
+        CALL32 puts
+        ADDI32 r16, r0, cwd_path
+        CALL32 puts
+        ADDI32 r16, r0, 10
+        CALL32 putc
+        JMP32 .ret
+.go:    CALL32 f_chdir
+        CMPGEI32 p1, r16, 0
+        BR32 p1, .ret
+        CALL32 dir_err
+.ret:   LOAD32_32 lr, sp, 0
+        ADDI32 sp, sp, 8
+        RET32
+
+; MD パス：ディレクトリを作る
+cmd_md:
+        ADDI32 sp, sp, -8
+        STORE32_32 lr, sp, 0
+        CALL32 need_arg
+        CMPEQI32 p1, r16, 0
+        BR32 p1, .ret
+        CALL32 f_mkdir
+        CMPGEI32 p1, r16, 0
+        BR32 p1, .ret
+        CALL32 dir_err
+.ret:   LOAD32_32 lr, sp, 0
+        ADDI32 sp, sp, 8
+        RET32
+
+; RD パス：空のディレクトリを消す
+cmd_rd:
+        ADDI32 sp, sp, -8
+        STORE32_32 lr, sp, 0
+        CALL32 need_arg
+        CMPEQI32 p1, r16, 0
+        BR32 p1, .ret
+        CALL32 f_rmdir
+        CMPGEI32 p1, r16, 0
+        BR32 p1, .ret
+        CALL32 dir_err
+.ret:   LOAD32_32 lr, sp, 0
+        ADDI32 sp, sp, 8
+        RET32
+
+; need_arg(r16 = 引数) → r16 = 引数（なければ "Required parameter missing" を出して 0）
+need_arg:
+        LOAD8U_32 r17, r16, 0
+        CMPNEI32 p1, r17, 0
+        BR32 p1, .ok
+        ADDR32 r20, lr, r0
+        ADDI32 r16, r0, s_missing
+        CALL32 puts
+        ADDI32 r16, r0, 0
+        JMPR32 r20
+.ok:    RET32
+
+; dir_err(r16 = エラーの番号)：CD・MD・RD のエラーを出す（-2 → "Path not found"、-6 → "Invalid directory"、ほかは ferr）
+dir_err:
+        CMPEQI32 p1, r16, -2
+        ADDI32 r17, r0, s_nopath
+        BR32 p1, .say
+        CMPEQI32 p1, r16, -6
+        ADDI32 r17, r0, s_badpath
+        BR32 p1, .say
+        JMP32 ferr
+.say:   ADDR32 r16, r17, r0
+        JMP32 puts
 
 cmd_help:
         ADDI32 r16, r0, s_help
@@ -2472,18 +3322,44 @@ show_vol:
         ADDI32 sp, sp, 8
         RET32
 
-; DIR：ルートディレクトリの一覧
+; DIR [パス]：ディレクトリの一覧（なければ今のディレクトリ）
 cmd_dir:
         ADDI32 sp, sp, -16
         STORE32_32 lr, sp, 0
         STORE32_32 r24, sp, 4
         STORE32_32 r25, sp, 8
         STORE32_32 r26, sp, 12
+        ADDR32 r24, r16, r0             ; 引数（ディレクトリ。なければ今のディレクトリ）
         CALL32 need_fs
         CMPEQI32 p1, r16, 0
         BR32 p1, .ret
-        CALL32 show_vol
-        ADDI32 r16, r0, s_dirof
+        ADDR32 r16, r24, r0
+        CALL32 path83
+        CMPEQI32 p1, r16, 2
+        BR32 p1, .show
+        CMPEQI32 p1, r16, 1
+        BR32 p1, .name
+        CALL32 path_err
+        CALL32 dir_err
+        JMP32 .ret
+.name:  CALL32 fs_find                  ; 最後の名前がディレクトリなら、その中を
+        CMPEQI32 p1, r16, 0
+        ADDI32 r16, r0, -2
+        BR32 p1, .bad
+        LOAD8U_32 r17, r0, ent + 11
+        ANDI32 r17, r17, 0x10
+        CMPEQI32 p1, r17, 0
+        ADDI32 r16, r0, -6
+        BR32 p1, .bad
+        CALL32 ent_first
+        STORE32_32 r16, r0, dir_clus
+        CALL32 rp_push
+.show:  CALL32 show_vol
+        ADDI32 r16, r0, s_dirof         ; " Directory of C:\…"
+        CALL32 puts
+        ADDI32 r16, r0, rpath
+        CALL32 puts
+        ADDI32 r16, r0, s_nl2
         CALL32 puts
         ADDI32 r25, r0, 0               ; ファイルの数
         ADDI32 r26, r0, 0               ; 合計の大きさ
@@ -2589,6 +3465,8 @@ cmd_dir:
         CALL32 putdec_w
         ADDI32 r16, r0, s_freekb
         CALL32 puts
+        JMP32 .ret
+.bad:   CALL32 dir_err
 .ret:   LOAD32_32 lr, sp, 0
         LOAD32_32 r24, sp, 4
         LOAD32_32 r25, sp, 8
@@ -3049,15 +3927,15 @@ cmd_led:
         ADDI32 sp, sp, 8
         RET32
 
-s_banner:   .asciz "MyDOS Version 3.0\n(C)Copyright MyCPU Project 2026.\n"
-s_prompt:   .asciz "C:\\>"
-s_bad:      .asciz "Bad command or file name\n"
 s_ver:      .asciz "\nMyDOS Version 3.0 (MyCPU-32, FAT16/FAT32)\n"
 s_help:     .ascii "CLS       Clears the screen.\n"
             .ascii "COLOR xy  Sets colors (x = background, y = text, hex). COLOR alone resets.\n"
             .ascii "COPY      Copies a file. COPY CON name creates a file from the keyboard (end with Ctrl-Z).\n"
             .ascii "DEL       Deletes a file.\n"
-            .ascii "DIR       Displays the files on drive C: (SD card).\n"
+            .ascii "CD        Changes the current directory. CD alone shows it. (also CHDIR)\n"
+            .ascii "DIR       Displays the files in a directory (default: the current one).\n"
+            .ascii "MD        Makes a directory. (also MKDIR)\n"
+            .ascii "RD        Removes an empty directory. (also RMDIR)\n"
             .ascii "ECHO      Displays a message.\n"
             .ascii "LED xx    Turns the board LEDs on/off (hex).\n"
             .ascii "MEM       Displays the memory map.\n"
@@ -3072,126 +3950,39 @@ s_help:     .ascii "CLS       Clears the screen.\n"
             .asciz "Add > file or >> file to a command to send its output to a file.\n"
 s_vol1:     .asciz " Volume in drive C is "
 s_vol2:     .asciz "\n Volume Serial Number is "
-s_dirof:    .asciz " Directory of C:\\\n\n"
+s_dirof:    .asciz " Directory of C:"
+s_nl2:      .asciz "\n\n"
 s_dirtag:   .asciz "    <DIR>  "
 s_sp2:      .asciz "  "
 s_files:    .asciz " file(s)"
 s_bytes:    .asciz " bytes\n"
 s_free:     .asciz " bytes free\n"
 s_freekb:   .asciz " KB free\n"
-s_notready: .asciz "Not ready reading drive C\n"
 s_notfound: .asciz "File not found\n"
 s_missing:  .asciz "Required parameter missing\n"
 s_denied:   .asciz "Access denied\n"
+s_nopath:   .asciz "Path not found\n"
+s_badpath:  .asciz "Invalid directory\n"
 s_toomany:  .asciz "Too many open files\n"
 s_diskfull: .asciz "Insufficient disk space\n"
-s_createerr: .asciz "File creation error\n"
-s_readerr:  .asciz "Read error reading drive C\n"
-s_toobig:   .asciz "Program too big to fit in memory\n"
-s_badexe:   .asciz "Invalid EXE file\n"
 s_dupname:  .asciz "Duplicate file name or file not found\n"
 s_onto:     .asciz "File cannot be copied onto itself\n"
 s_copied0:  .asciz "        0 file(s) copied\n"
 s_copied1:  .asciz "        1 file(s) copied\n"
 s_ctrlz:    .asciz "^Z\n"
-s_term:     .asciz "\nProgram terminated: "
-s_fault_align: .asciz "alignment error"
-s_fault_priv:  .asciz "privileged instruction"
-s_fault_div:   .asciz "divide by zero"
-s_fault_other: .asciz "exception"
-s_at:       .asciz " at "
-s_mem:      .ascii "\n   49152 bytes total memory\n"
+s_mem:      .ascii "\n   40960 bytes total memory\n"
             .ascii "   24576 bytes for MyDOS    (0x20000-0x25FFF)\n"
-            .ascii "   20480 bytes for programs (0x26000-0x2AFFF)\n"
+            .ascii "    8192 bytes for programs (0x26000-0x27FFF)\n"
+            .ascii "    4096 bytes free, data   (0x2A000-0x2AFFF)\n"
             .asciz "    4096 bytes for BIOS     (0x2B000-0x2BFFF)\n"
-s_mem_sdram: .asciz " bytes SDRAM        (0x1000000-0x17FFFFF, free for programs)\n"
+s_mem_sdram: .ascii " bytes SDRAM        (0x1000000-)\n"
+            .ascii " 8323072 bytes for programs (0x1000000-0x17EFFFF)\n"
+            .asciz "   65536 bytes for MyDOS    (0x17F0000-0x17FFFFF, built-in commands)\n"
 s_uptime:   .asciz "Uptime: "
 s_sec:      .asciz " seconds\n"
 s_color_usage: .asciz "Usage: COLOR xy  (x = background, y = text, 0-F)\n"
 s_led_usage:   .asciz "Usage: LED xx  (hex, lower 6 bits)\n"
 s_safe:     .asciz "\n\n          It's now safe to turn off your computer.\n"
-s_autoexec: .asciz "AUTOEXEC.BAT"
-badchars:   .asciz "*?/\\:\"<>|+=,;[]"
-x_exe:      .ascii "EXE"
-x_com:      .ascii "COM"
-x_bat:      .ascii "BAT"
 x_con:      .ascii "CON        "
-exts:       .ascii "EXE\0COM\0BAT\0\0"
-c_cls:      .asciz "CLS"
-c_color:    .asciz "COLOR"
-c_copy:     .asciz "COPY"
-c_del:      .asciz "DEL"
-c_erase:    .asciz "ERASE"
-c_dir:      .asciz "DIR"
-c_echo:     .asciz "ECHO"
-c_help:     .asciz "HELP"
-c_led:      .asciz "LED"
-c_mem:      .asciz "MEM"
-c_reboot:   .asciz "REBOOT"
-c_ren:      .asciz "REN"
-c_rename:   .asciz "RENAME"
-c_shutdown: .asciz "SHUTDOWN"
-c_time:     .asciz "TIME"
-c_type:     .asciz "TYPE"
-c_ver:      .asciz "VER"
-c_vol:      .asciz "VOL"
-
-; ---- 変数（起動時に 0 にする。MYDOS.SYS には入らない） ----
-        .align 4
-bss_start:
-fs_ok:      .reserve 4
-exehdr:     .reserve 16                 ; .EXE のヘッダ
-prog_base:  .reserve 4                  ; 実行中のプログラムを読み込んだ番地
-fs_type:    .reserve 4
-fat_lba:    .reserve 4
-fat_sz:     .reserve 4
-nfats:      .reserve 4
-root_lba:   .reserve 4
-root_secs:  .reserve 4
-root_clus:  .reserve 4
-data_lba:   .reserve 4
-spc:        .reserve 4
-clus_bytes: .reserve 4
-nclus:      .reserve 4
-fs_serial:  .reserve 4
-fs_free:    .reserve 4
-free_hint:  .reserve 4
-fsinfo_lba: .reserve 4
-sb_lba:     .reserve 4
-sb_dirty:   .reserve 4
-fc_sec:     .reserve 4
-fc_dirty:   .reserve 4
-d_lba:      .reserve 4
-d_left:     .reserve 4
-d_clus:     .reserve 4
-d_idx:      .reserve 4
-d_cur:      .reserve 4
-d_end:      .reserve 4
-e_lba:      .reserve 4
-e_off:      .reserve 4
-f_lba:      .reserve 4
-f_off:      .reserve 4
-lfn_n:      .reserve 4
-lfn:        .reserve 160
-bat_ptr:    .reserve 4
-bat_end:    .reserve 4
-redir_h:    .reserve 4
-quiet:      .reserve 4
-running:    .reserve 4
-saved_sp:   .reserve 4
-saved_attr: .reserve 4
-tmp:        .reserve 4
-args:       .reserve 4
-handles:    .reserve 32 * NFILES
-ent:        .reserve 32
-dent:       .reserve 32
-name83:     .reserve 12
-newname:    .reserve 12
-vol_label:  .reserve 12
-numbuf:     .reserve 12
-cbuf:       .reserve 4
-linebuf:    .reserve 128
-batargs:    .reserve 128
-cmdbuf:     .reserve 128
-conbuf:     .reserve 128
-bss_end:
+high_end:
+        .dephase

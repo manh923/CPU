@@ -1,7 +1,9 @@
 // SDRAM の制御回路（Tang Nano 20K の GW2AR-18 に入っている 64Mbit、2M × 32bit：4 バンク × 2048 行 × 256 列）
 //   CPU 側：req を 1 クロック立てると、終わったときに ack を 1 クロック立てる（読み出しなら rdata に値）
-//   burst を 1 にした読み出しは、waddr（16 語の境目）から 16 語を続けて読む（命令キャッシュ用）。
+//   burst を 1 にした読み出しは、waddr（16 語の境目）から 16 語を続けて読む（キャッシュのライン読み込み）。
 //   1 語届くたびに bvalid が 1 クロック立ち（rdata に値）、最後の語で ack も立つ
+//   burst を 1 にした書き込み（wstrb は 1111）は、16 語を続けて書く（データキャッシュの書き戻し）。
+//   bidx が「このクロックで書く語の番号」で、同じクロックの bwdata をその語として取り込む。書き終えたら ack
 //   1 回ごとに行を開き（ACTIVE）、自動プリチャージ付きの READ / WRITE をする。バースト長 1、CAS レイテンシ 2
 //   SDRAM のクロックは clk を反転したもの。SDRAM はこちらの出力が変わってから半周期後に読み取る
 //   リフレッシュは 7.8µs ごと（64ms に 4096 回の倍の頻度）
@@ -18,6 +20,8 @@ module mycpu_sdram #(
   input  wire [3:0]  wstrb,        // 0 なら読み出し
   input  wire [31:0] wdata,
   input  wire        burst,
+  input  wire [31:0] bwdata,       // バースト書き込みの語（bidx 番目）
+  output wire [3:0]  bidx,
   output reg         ack,
   output reg         bvalid,
   output reg  [31:0] rdata,
@@ -65,7 +69,7 @@ module mycpu_sdram #(
   assign sdram_dq = dq_oe ? dq_out : 32'bz;
 
   localparam [3:0] S_INIT = 4'd0, S_PREALL = 4'd1, S_INITREF = 4'd2, S_MRS = 4'd3, S_IDLE = 4'd4,
-                   S_RW = 4'd5, S_RDATA = 4'd6, S_WAIT = 4'd7, S_REF = 4'd8, S_BURST = 4'd9;
+                   S_RW = 4'd5, S_RDATA = 4'd6, S_WAIT = 4'd7, S_REF = 4'd8, S_BURST = 4'd9, S_BURSTW = 4'd10;
   reg [3:0]  state;
   reg [15:0] wait_n;           // 次の状態に進むまでのクロック数
   reg [3:0]  nref;             // 初期化のリフレッシュの回数
@@ -78,6 +82,7 @@ module mycpu_sdram #(
   reg        r_burst;
   reg [3:0]  bcnt;             // バースト：次に READ する列（下位 4bit）
   reg        iss, iss_last, cap, cap_last;   // READ を出した → CL（2）クロック後に取り込む
+  assign bidx = state == S_BURSTW ? bcnt : 4'd0;
 
   task cmd(input [3:0] c);
     {sdram_cs_n, sdram_ras_n, sdram_cas_n, sdram_we_n} <= c;
@@ -132,7 +137,13 @@ module mycpu_sdram #(
         S_RW: begin                            // A10 = 1 で自動プリチャージ
           pend <= 1'b0;
           sdram_a <= {3'b100, r_addr[7:0]};
-          if (r_wstrb != 4'd0) begin
+          if (r_wstrb != 4'd0 && r_burst) begin   // バースト書き込み：自動プリチャージなしで WRITE を 16 回
+            cmd(C_WRITE);
+            sdram_a <= {3'b000, r_addr[7:0]};
+            dq_oe <= 1'b1; dq_out <= bwdata; sdram_dqm <= 4'h0;
+            bcnt <= 4'd1;
+            state <= S_BURSTW;
+          end else if (r_wstrb != 4'd0) begin
             cmd(C_WRITE);
             dq_oe <= 1'b1; dq_out <= r_wdata; sdram_dqm <= ~r_wstrb;
             ack <= 1'b1;
@@ -159,6 +170,17 @@ module mycpu_sdram #(
           end else begin                       // 出し終えた：最後の READ から 1 クロック後にプリチャージが始まる
             state <= S_WAIT;
             wait_n <= (T_RP > CL ? T_RP : CL) - 1;
+          end
+        end
+        S_BURSTW: begin                        // 最後（16 回目）だけ A10 = 1（自動プリチャージ）
+          cmd(C_WRITE);
+          sdram_a <= {bcnt == 4'd15 ? 3'b100 : 3'b000, r_addr[7:4], bcnt};
+          dq_oe <= 1'b1; dq_out <= bwdata;
+          bcnt <= bcnt + 4'd1;
+          if (bcnt == 4'd15) begin             // 書き込みの回復 ＋ プリチャージ
+            ack <= 1'b1;
+            state <= S_WAIT;
+            wait_n <= T_WR + T_RP - 1;
           end
         end
         S_RDATA: begin                         // READ から CL クロック後に取り込む

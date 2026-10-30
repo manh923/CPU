@@ -161,7 +161,7 @@ static int align_down(int n, int align) {
 }
 
 static void enter_scope(void) {
-  Scope *sc = calloc(1, sizeof(Scope));
+  Scope *sc = arena_alloc(sizeof(Scope));
   sc->next = scope;
   scope = sc;
 }
@@ -190,7 +190,7 @@ static Type *find_tag(Token *tok) {
 }
 
 static Node *new_node(NodeKind kind, Token *tok) {
-  Node *node = calloc(1, sizeof(Node));
+  Node *node = arena_alloc(node_is_small(kind) ? NODE_SMALL : sizeof(Node));
   node->kind = kind;
   node->tok = tok;
   return node;
@@ -244,22 +244,22 @@ static Node *new_vla_ptr(Obj *var, Token *tok) {
 Node *new_cast(Node *expr, Type *ty) {
   add_type(expr);
 
-  Node *node = calloc(1, sizeof(Node));
+  Node *node = arena_alloc(NODE_SMALL);
   node->kind = ND_CAST;
   node->tok = expr->tok;
   node->lhs = expr;
-  node->ty = copy_type(ty);
+  node->ty = ty;   // MyCPU：型は写さない（キャストの型を後で書き換えるところはない。メモリを減らすため）
   return node;
 }
 
 static VarScope *push_scope(char *name) {
-  VarScope *sc = calloc(1, sizeof(VarScope));
+  VarScope *sc = arena_alloc(sizeof(VarScope));
   hashmap_put(&scope->vars, name, sc);
   return sc;
 }
 
 static Initializer *new_initializer(Type *ty, bool is_flexible) {
-  Initializer *init = calloc(1, sizeof(Initializer));
+  Initializer *init = arena_alloc(sizeof(Initializer));
   init->ty = ty;
 
   if (ty->kind == TY_ARRAY) {
@@ -299,7 +299,7 @@ static Initializer *new_initializer(Type *ty, bool is_flexible) {
 }
 
 static Obj *new_var(char *name, Type *ty) {
-  Obj *var = calloc(1, sizeof(Obj));
+  Obj *var = arena_alloc(sizeof(Obj));
   var->name = name;
   var->ty = ty;
   var->align = ty->align;
@@ -1287,7 +1287,7 @@ static Type *copy_struct_type(Type *ty) {
   Member head = {};
   Member *cur = &head;
   for (Member *mem = ty->members; mem; mem = mem->next) {
-    Member *m = calloc(1, sizeof(Member));
+    Member *m = arena_alloc(sizeof(Member));
     *m = *mem;
     cur = cur->next = m;
   }
@@ -1484,7 +1484,7 @@ write_gvar_data(Relocation *cur, Initializer *init, Type *ty, char *buf, int off
     return cur;
   }
 
-  Relocation *rel = calloc(1, sizeof(Relocation));
+  Relocation *rel = arena_alloc(sizeof(Relocation));
   rel->offset = offset;
   rel->label = label;
   rel->addend = val;

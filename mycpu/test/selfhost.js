@@ -4,7 +4,7 @@
 //     コマンドは ; で区切る。後ろに並べたファイルもカードに入れる（名前は 8.3 に縮める）
 //   PROF=1 node test/selfhost.js "cc hello.c" hello.c   … 最初のコマンドで、997 命令ごとに PC を見て関数ごとに数える
 //   （PROF=as なら AS.EXE の関数の名前で）
-// カードは disk/ から作るもの（MYDOS.SYS・CC.EXE・AS.EXE・ヘッダ・CRT0.S・LIBC.S・BUILD.BAT など。tools/cc.js の diskSources）。
+// カードは disk/ から作るもの（MYDOS.SYS・CC.EXE・AS.EXE・BUILD.BAT、INCLUDE\ のヘッダ、LIB\ の CRT0.S・LIBC.S、SRC\CC\ など。tools/cc.js の diskSources）。
 // 終わった後のカード（パーティションの中身）は一時フォルダの selfhost.img（mtools で読める）
 'use strict';
 const fs = require('fs'), os = require('os'), path = require('path');
@@ -27,7 +27,7 @@ const cpu = new CPU({ xlen: 32, onTx: (b) => { out += String.fromCharCode(b); },
 cpu.load(assemble(fs.readFileSync(path.join(ROOT, 'examples/bios.asm'), 'utf8')).image);
 cpu.pushRx(Buffer.from(' ' + cmds.join('\r') + '\r', 'latin1'));
 
-const prompts = () => out.split('C:\\>').length - 1;
+const prompts = () => (out.match(/C:\\[^>\n]*>/g) || []).length;   // C:\> や C:\SUB> の数
 const t = Date.now();
 const max = Number(process.env.MAX || 5e9);
 const log = [];

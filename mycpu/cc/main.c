@@ -51,12 +51,17 @@ static bool take_arg(char *arg) {
 }
 
 static void add_default_include_paths(char *argv0) {
+#ifdef __MYCPU__
+  // MyCPU（MyDOS の上）：ヘッダはカードの \INCLUDE（CC.EXE の場所は分からない。argv[0] は PROG）
+  strarray_push(&include_paths, "\\INCLUDE");
+#else
   // We expect that chibicc-specific include files are installed
   // to ./include relative to argv[0].
   strarray_push(&include_paths, format("%s/include", dirname(strdup(argv0))));
 
   // Add standard include paths.（MyCPU：../libc/include だけ）
   strarray_push(&include_paths, format("%s/../libc/include", dirname(strdup(argv0))));
+#endif
 
   // Keep a copy of the standard include paths for -MMD option.
   for (int i = 0; i < include_paths.len; i++)
@@ -710,7 +715,7 @@ int main(int argc, char **argv) {
 
 #ifdef __MYCPU__
   // MyCPU（MyDOS の上）：fork も as・ld もないので、いつも cc1 として動く。
-  //   CC FOO.C → FOO.S（-o で名前を変えられる）。ヘッダはカードのルートから探す（libc の fopen がディレクトリを捨てる）
+  //   CC FOO.C → FOO.S（-o で名前を変えられる）。ヘッダはカードの \INCLUDE から探す
   if (!opt_cc1) {
     if (input_paths.len != 1)
       error("MyCPU：入力のファイルは 1 つだけ（CC [-Iディレクトリ] [-D名前] [-o 出力] ファイル.C）");

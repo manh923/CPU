@@ -5,6 +5,9 @@
 //          これで +・−・×・÷ とも正しく丸めた結果と同じになる）
 // 値はビット列（float は unsigned、double は unsigned long long）で受け渡す。
 // PC の gcc でもそのままコンパイルでき、test/floattest.c で PC の計算とビット単位で比べている。
+// MyCPU では、よく使うもの（double の足す・引く・掛ける・割る・比べる・int との変換、float ↔ double、
+// float の比べる・int との変換）は libc/softfloat.s のアセンブリを使い、ここの C 版は入れない
+// （SOFTFLOAT_REF を定義すると入れる。test/fasmtest.c が両方を比べる）
 typedef unsigned u32;
 typedef unsigned long long u64;
 typedef long long i64;
@@ -14,6 +17,23 @@ typedef long long i64;
 #define DFRAC(x) ((x) & 0x000FFFFFFFFFFFFFULL)
 #define DNAN 0x7FF8000000000000ULL
 #define DINF 0x7FF0000000000000ULL
+// アセンブリ版のある関数の C 版を入れるか
+#if !defined(__MYCPU__) || defined(SOFTFLOAT_REF)
+#define C_VERSION 1
+#else
+#define C_VERSION 0
+#endif
+u64 __adddf3(u64 a, u64 b);
+u64 __subdf3(u64 a, u64 b);
+u64 __muldf3(u64 a, u64 b);
+u64 __divdf3(u64 a, u64 b);
+int __mycpu_dcmp(u64 a, u64 b);
+u64 __floatsidf(int v);
+u64 __floatunsidf(u32 v);
+int __fixdfsi(u64 a);
+u32 __fixunsdfsi(u64 a);
+u64 __extendsfdf2(u32 f);
+u32 __truncdfsf2(u64 a);
 
 static int d_isnan(u64 x) { return DEXP(x) == 0x7ff && DFRAC(x) != 0; }
 static int d_isinf(u64 x) { return DEXP(x) == 0x7ff && DFRAC(x) == 0; }
@@ -75,6 +95,7 @@ static u64 unpack_d(u64 x, int *s, int *e) {
   return m;
 }
 
+#if C_VERSION
 u64 __adddf3(u64 a, u64 b) {
   if (d_isnan(a) || d_isnan(b))
     return DNAN;
@@ -192,6 +213,8 @@ int __mycpu_dcmp(u64 a, u64 b) {
   return less ? -1 : 1;
 }
 
+#endif
+
 // ---- 整数 ↔ double ----
 u64 __floatdidf(i64 v) {
   if (v == 0)
@@ -207,8 +230,11 @@ u64 __floatundidf(u64 v) {
   return pack_d(0, 1023 + 62, v);
 }
 
+#if C_VERSION
 u64 __floatsidf(int v) { return __floatdidf(v); }
 u64 __floatunsidf(u32 v) { return __floatundidf(v); }
+
+#endif
 
 // 0 の方へ切り捨てて整数に（入りきらなければ、いちばん大きい・小さい値）
 i64 __fixdfdi(u64 a) {
@@ -238,6 +264,7 @@ u64 __fixunsdfdi(u64 a) {
   return sh >= 0 ? m << sh : m >> -sh;
 }
 
+#if C_VERSION
 int __fixdfsi(u64 a) {
   i64 v = __fixdfdi(a);
   if (v > 0x7fffffffLL)
@@ -252,7 +279,10 @@ u32 __fixunsdfsi(u64 a) {
   return v > 0xffffffffULL ? 0xffffffffu : (u32)v;
 }
 
+#endif
+
 // ---- float ↔ double ----
+#if C_VERSION
 u64 __extendsfdf2(u32 f) {
   u64 sign = (u64)(f >> 31) << 63;
   int e = (f >> 23) & 0xff;
@@ -298,18 +328,20 @@ u32 __truncdfsf2(u64 a) {
     return sign | f;
   return sign | (((u32)(fe - 1) << 23) + f);
 }
+#endif
 
 // ---- float（double に広げて計算し、丸めて戻す） ----
 u32 __addsf3(u32 a, u32 b) { return __truncdfsf2(__adddf3(__extendsfdf2(a), __extendsfdf2(b))); }
 u32 __subsf3(u32 a, u32 b) { return __truncdfsf2(__subdf3(__extendsfdf2(a), __extendsfdf2(b))); }
 u32 __mulsf3(u32 a, u32 b) { return __truncdfsf2(__muldf3(__extendsfdf2(a), __extendsfdf2(b))); }
 u32 __divsf3(u32 a, u32 b) { return __truncdfsf2(__divdf3(__extendsfdf2(a), __extendsfdf2(b))); }
+#if C_VERSION
 int __mycpu_fcmp(u32 a, u32 b) { return __mycpu_dcmp(__extendsfdf2(a), __extendsfdf2(b)); }
-
 u32 __floatsisf(int v) { return __truncdfsf2(__floatsidf(v)); }
 u32 __floatunsisf(u32 v) { return __truncdfsf2(__floatunsidf(v)); }
 int __fixsfsi(u32 f) { return __fixdfsi(__extendsfdf2(f)); }
 u32 __fixunssfsi(u32 f) { return __fixunsdfsi(__extendsfdf2(f)); }
+#endif
 i64 __fixsfdi(u32 f) { return __fixdfdi(__extendsfdf2(f)); }
 u64 __fixunssfdi(u32 f) { return __fixunsdfdi(__extendsfdf2(f)); }
 

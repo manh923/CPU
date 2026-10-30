@@ -113,18 +113,19 @@ l4:
         CALL32 puts
         ADDI32 r25, r0, 20
         LOAD32_32 r24, r0, TIMER_COUNT
-l5:
-        BR32 p3, 0
-        BR32 p3, 0
-        BR32 p3, 0
-        BR32 p3, 0
-        BR32 p3, 0
-        BR32 p3, 0
-        BR32 p3, 0
-        BR32 p3, 0
+l5:                                     ; 前へ飛ぶ BR は「飛ばない」と予測する
+        BR32 p3, l5e
+        BR32 p3, l5e
+        BR32 p3, l5e
+        BR32 p3, l5e
+        BR32 p3, l5e
+        BR32 p3, l5e
+        BR32 p3, l5e
+        BR32 p3, l5e
         ADDI32 r25, r25, -1
         CMPNEI32 p1, r25, 0
         BR32 p1, l5
+l5e:
         LOAD32_32 r16, r0, TIMER_COUNT
         SUBR32 r16, r16, r24
         CALL32 putdec
@@ -277,6 +278,49 @@ l12:
         CALL32 putdec
         ADDI32 r16, r0, s12
         CALL32 puts
+        ; 分岐予測：JMP（飛び先は即値）と CALL ＋ RET（RET は LR へ）
+        ADDI32 r16, r0, n14
+        CALL32 puts
+        ADDI32 r25, r0, 20
+        LOAD32_32 r24, r0, TIMER_COUNT
+l14:
+l14_0:  JMP32 l14_1
+l14_1:  JMP32 l14_2
+l14_2:  JMP32 l14_3
+l14_3:  JMP32 l14_4
+l14_4:  JMP32 l14_5
+l14_5:  JMP32 l14_6
+l14_6:  JMP32 l14_7
+l14_7:  JMP32 l14_8
+l14_8:  ADDI32 r25, r25, -1
+        CMPNEI32 p1, r25, 0
+        BR32 p1, l14
+        LOAD32_32 r16, r0, TIMER_COUNT
+        SUBR32 r16, r16, r24
+        CALL32 putdec
+        ADDI32 r16, r0, s14
+        CALL32 puts
+        ADDI32 r16, r0, n15
+        CALL32 puts
+        ADDI32 r25, r0, 20
+        LOAD32_32 r24, r0, TIMER_COUNT
+l15:
+        CALL32 ret1
+        CALL32 ret1
+        CALL32 ret1
+        CALL32 ret1
+        CALL32 ret1
+        CALL32 ret1
+        CALL32 ret1
+        CALL32 ret1
+        ADDI32 r25, r25, -1
+        CMPNEI32 p1, r25, 0
+        BR32 p1, l15
+        LOAD32_32 r16, r0, TIMER_COUNT
+        SUBR32 r16, r16, r24
+        CALL32 putdec
+        ADDI32 r16, r0, s15
+        CALL32 puts
         ; SDRAM に置いたコード（命令キャッシュ）：ADDR32 × 8 のループを SDRAM に写して呼ぶ。最初のライン読み込みも込み
         ADDI32 r16, r0, n13
         CALL32 puts
@@ -293,6 +337,7 @@ l12:
         ADDI32 r16, r0, s13
         CALL32 puts
         HLT
+ret1:   RET32
 
         .align 16
 sdcode_rom:
@@ -386,10 +431,14 @@ s8: .asciz " [1.0]\n"
 n9: .asciz "ADD32 M-form: "
 s9: .asciz " [3.0]\n"
 n10: .asciz "LOAD32 SDRAM: "
-s10: .asciz " [7.0]\n"
+s10: .asciz " [2.2]\n"
 n11: .asciz "STORE32 SDRAM: "
-s11: .asciz " [6.0]\n"
+s11: .asciz " [1.2]\n"
 n12: .asciz "DIVUR32: "
 s12: .asciz " [34.0]\n"
 n13: .asciz "ADDR32 in SDRAM (I-cache): "
 s13: .asciz " [1.4]\n"
+n14: .asciz "JMP32: "
+s14: .asciz " [1.0]\n"
+n15: .asciz "CALL32 + RET32 (pair): "
+s15: .asciz " [2.0]\n"

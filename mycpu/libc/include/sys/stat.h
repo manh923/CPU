@@ -17,5 +17,6 @@ struct stat {
 #define S_ISDIR(m) (((m) & S_IFMT) == S_IFDIR)
 
 int stat(const char *name, struct stat *st);
+int mkdir(const char *path, mode_t mode);      // MyDOS の SYSCALL 23（mode は使わない）
 
 #endif

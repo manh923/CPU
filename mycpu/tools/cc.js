@@ -74,6 +74,9 @@ function split(asm) {
   return { text, data };
 }
 
+// 「; @fn」で関数ごとに分けてあるアセンブリか
+const hasFn = (asm) => /^; @fn /m.test(asm);
+
 // 使われない関数・変数を捨てる（リンカの --gc-sections と同じ）。.s のファイルと名前のないかたまりから、
 // たどれるラベルのものだけ残す
 function gc(parts, roots) {
@@ -112,9 +115,21 @@ function buildAsm(files, opts = {}) {
   const libc = fs.readdirSync(LIBC).filter((f) => f.endsWith('.c')).sort().map((f) => path.join(LIBC, f));
   ensureCompiler();
   const parts = [...files, ...libc].map((f) => ({ name: path.relative(ROOT, f), ...split(compileCached(f, includes)) }));
-  // crt0.s を先頭に、ほかの libc/*.s（setjmp など）はその後ろに
+  // crt0.s を先頭に、ほかの libc/*.s（setjmp など）はその後ろに、この順で（AS でつなぐのと同じ並び）。
+  // 「; @fn」で関数ごとに分けてある .s（softfloat.s）は C と同じく、使う関数だけ残す
   const asms = fs.readdirSync(LIBC).filter((f) => f.endsWith('.s') && f !== 'crt0.s').sort();
-  const asmText = [...(opts.lib ? [] : ['crt0.s']), ...asms].map((f) => fs.readFileSync(path.join(LIBC, f), 'utf8'));
+  const asmText = [], asmItems = [];
+  for (const f of [...(opts.lib ? [] : ['crt0.s']), ...asms]) {
+    const t = fs.readFileSync(path.join(LIBC, f), 'utf8');
+    if (hasFn(t)) {
+      const p = { name: 'libc/' + f, asm: true, ...split(t) };
+      parts.push(p);
+      asmItems.push(p);
+    } else {
+      asmText.push(t);
+      asmItems.push(t);
+    }
+  }
   let keep = null;
   if (opts.gc !== false && !opts.lib) {
     const roots = [];
@@ -129,9 +144,9 @@ function buildAsm(files, opts = {}) {
   const out = [
     `; ${files.map((f) => path.basename(f)).join(' ')} — tools/cc.js が作ったアセンブリ（C ライブラリ込み）`,
     `        .org 0x${BASE.toString(16)}`,
-    ...asmText,
+    ...asmItems.map((x) => (typeof x === 'string' ? x : x.text)),
   ];
-  for (const p of parts) out.push(`; ---- ${p.name} ----`, p.text);
+  for (const p of parts) if (!p.asm) out.push(`; ---- ${p.name} ----`, p.text);
   out.push('', '; ---- データ ----', '        .align 64');
   for (const p of parts) out.push(`; ---- ${p.name} ----`, p.data);
   // 初期値なしの大域変数：どこにも定義がなければ、ここに 1 つだけ置く（大きさ・揃えはいちばん大きいもの）
@@ -201,7 +216,8 @@ function buildLibAsm() {
   };
   for (const f of asms) {
     const t = fs.readFileSync(path.join(LIBC, f), 'utf8');
-    add([...t.matchAll(/^([A-Za-z_]\w*):/gm)].map((m) => m[1]), t);
+    if (hasFn(t)) for (const c of split(t).text) add(c.name ? [c.name] : [], c.lines.join('\n'));
+    else add([...t.matchAll(/^([A-Za-z_]\w*):/gm)].map((m) => m[1]), t);
   }
   for (const p of parts) for (const c of p.text) add(c.name ? [c.name] : [], c.lines.join('\n'));
   out.push('', '; ---- データ ----', '        .align 64');
@@ -235,9 +251,11 @@ function dosName(name) {
 }
 
 // MyDOS の上の C コンパイラ一式（disk/ のカードに入れる）：
-//   CC.EXE（cc/ を この CPU 向けにコンパイルしたもの。アセンブル済みのバイト列）、CRT0.S と LIBC.S（リンク用。
-//   libc をコンパイルしてつないだもの）、LIBC.BIN・LIBC.SYM（LIBC.S を先にアセンブルしたもの。AS -lib LIBC で速くつなぐ）、ヘッダ（cc/include・libc/include・libc/include/sys を 8.3 の名前で）、
-//   chibicc のソース（セルフホスト用。preprocess.c → PREPROCE.C）
+//   CC.EXE（cc/ を この CPU 向けにコンパイルしたもの。アセンブル済みのバイト列。ルートに）、
+//   LIB\：CRT0.S と LIBC.S（リンク用。libc をコンパイルしてつないだもの）、LIBC.BIN・LIBC.SYM（LIBC.S を先にアセンブル
+//     したもの。AS -lib \LIB\LIBC で速くつなぐ）、
+//   INCLUDE\：ヘッダ（cc/include と libc/include を 8.3 の名前で。libc/include/sys は INCLUDE\SYS\）、
+//   SRC\CC\：chibicc のソース（セルフホスト用。preprocess.c → PREPROCE.C）
 let compilerCache = null;
 function compilerFiles() {
   const srcs = fs.readdirSync(CC_DIR).filter((f) => /\.[ch]$/.test(f)).sort();
@@ -259,21 +277,18 @@ function compilerFiles() {
   out.push({ name: 'LIBC.S', contents: Buffer.from(libc.join('\n')) });
   const lib = buildLib();
   out.push({ name: 'LIBC.BIN', contents: lib.bin }, { name: 'LIBC.SYM', contents: Buffer.from(lib.sym) });
+  for (const f of out) if (f.name !== 'CC.EXE') f.name = 'LIB/' + f.name;   // CRT0.S・LIBC.*
   const seen = new Set(out.map((f) => f.name));
+  const add = (name, file) => {
+    if (seen.has(name)) throw new Error(`カードの名前がぶつかる：${name}`);
+    seen.add(name);
+    out.push({ name, contents: fs.readFileSync(file) });
+  };
   for (const d of incs) {
-    for (const f of fs.readdirSync(d).filter((f) => f.endsWith('.h')).sort()) {
-      const n = dosName(f);
-      if (seen.has(n)) throw new Error(`カードの名前がぶつかる：${n}`);
-      seen.add(n);
-      out.push({ name: n, contents: fs.readFileSync(path.join(d, f)) });
-    }
+    const dir = d.endsWith('sys') ? 'INCLUDE/SYS/' : 'INCLUDE/';
+    for (const f of fs.readdirSync(d).filter((f) => f.endsWith('.h')).sort()) add(dir + dosName(f), path.join(d, f));
   }
-  for (const f of srcs) {
-    const n = dosName(f);
-    if (seen.has(n)) throw new Error(`カードの名前がぶつかる：${n}`);
-    seen.add(n);
-    out.push({ name: n, contents: fs.readFileSync(path.join(CC_DIR, f)) });
-  }
+  for (const f of srcs) add('SRC/CC/' + dosName(f), path.join(CC_DIR, f));
   compilerCache = { stamp, files: out };
   return out;
 }

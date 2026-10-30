@@ -111,7 +111,8 @@
     if (a >= MAP.ROM_BASE && a + size <= MAP.ROM_BASE + MAP.ROM_SIZE) return { mem: this.rom, off: a - MAP.ROM_BASE, ro: true };
     if (a >= MAP.IO_BASE && a + size <= MAP.IO_BASE + MAP.IO_SIZE) return { io: true, off: a - MAP.IO_BASE };
     if (a >= MAP.VRAM_BASE && a + size <= MAP.VRAM_BASE + MAP.VRAM_SIZE) return { mem: this.vram, off: a - MAP.VRAM_BASE, vram: true };
-    if (a >= MAP.RAM_BASE && a + size <= MAP.RAM_BASE + MAP.RAM_SIZE) return { mem: this.ram, off: a - MAP.RAM_BASE };
+    if (a >= MAP.RAM_BASE && a + size <= MAP.RAM_BASE + MAP.RAM_SIZE &&
+        !(a + size > MAP.RAM_HOLE_BASE && a < MAP.RAM_HOLE_BASE + MAP.RAM_HOLE_SIZE)) return { mem: this.ram, off: a - MAP.RAM_BASE };
     if (a >= MAP.SDRAM_BASE && a + size <= MAP.SDRAM_BASE + MAP.SDRAM_SIZE) {
       if (!this.sdram) this.sdram = new Uint8Array(MAP.SDRAM_SIZE);
       return { mem: this.sdram, off: a - MAP.SDRAM_BASE };
@@ -307,6 +308,8 @@
   };
 
   CPU.prototype.exec = function (pc) {
+    // 内蔵 RAM の後ろ 8KB（データだけ）からは命令を読めない（Verilog と同じくバスエラー）
+    if (pc >= BigInt(MAP.RAM_DATA_BASE) && pc < BigInt(MAP.RAM_BASE + MAP.RAM_SIZE)) throw new Halt('fault', hex(pc) + ' から命令は読めない');
     var h = Number(this.read(pc, 4));
     var d = this.decode(h);
     if (d.err) throw new Halt('illegal', d.err);

@@ -160,7 +160,7 @@ const cases = [];
 
   // カードなし：BIOS が MYDOS.SYS を探せず "Non-System disk"
   r = runSim(bios, { input: ' ', max: 5_000_000 });
-  check('BIOS（カードなし）：メモリテスト 48KB、Non-System disk でキーを待つ', r.out.includes('Memory Test : 48 KB OK') &&
+  check('BIOS（カードなし）：メモリテスト 40KB、Non-System disk でキーを待つ', r.out.includes('Memory Test : 40 KB OK') &&
     r.out.includes('SD card     : not found') && r.out.includes('Non-System disk or disk error'), r.out.slice(-300));
 
   // カードの中身はあるが MYDOS.SYS がない
@@ -193,7 +193,7 @@ const cases = [];
     check(`MyDOS（${type}）：ユーザーモードのプログラム（SYSCALL）`, o.includes(nl('Hello, World!\n')) && o.includes(nl('Hello, claude!\n')) &&
       o.includes(nl('fib(12) = 144\n')) && o.includes('LED chaser'), '');
     check(`MyDOS（${type}）：SDRAM に読み込む .EXE（スタックも SDRAM）`,
-      o.includes(nl('Hello from SDRAM! PC = 01000024, SP = 017FFFF8\nRecursion depth: 10000\n')), '');
+      o.includes(nl('Hello from SDRAM! PC = 01000024, SP = 017EFFF8\nRecursion depth: 10000\n')), '');
     check(`MyDOS（${type}）：C で書いたプログラム（PRIMES.EXE、cc/ と libc/ で作る）`,
       o.includes(nl('=== MyCPU Prime Search ===\nSearching primes from 2 to 1000...\nFound: 10 primes\n')) &&
       o.includes(nl('Found: 160 primes\nSearch complete!\nTotal primes: 168\n')), '');
@@ -306,6 +306,10 @@ if (spawnSync('gcc', ['--version']).error) {
   let r = runExe('floattest', ['300000']);
   check('ソフトウェアの浮動小数点（libc/softfloat.c）：四則・比較・変換が PC の FPU とビット単位で同じ（30 万組）',
     r.status === 0, r.stdout.trim());
+  // アセンブリ版（libc/softfloat.s）は、この CPU で C 版と比べる
+  const fa = require('./cctest.js').runC([path.join(ROOT, 'test/fasmtest.c')], { max: 5_000_000_000 });
+  check('浮動小数点のアセンブリ版（libc/softfloat.s）：この CPU で C 版とビット単位で同じ（double・float 2 万組ずつ）',
+    fa.ok, fa.why + '\n' + fa.out.slice(0, 1000));
 
   gcc('fltiotest', ['-Dstrtod=my_strtod', '-Dstrtof=my_strtof', '-Dstrtold=my_strtold', '-Datof=my_atof', 'test/fltiotest.c', 'libc/fltio.c']);
   r = runExe('fltiotest', ['20000']);
