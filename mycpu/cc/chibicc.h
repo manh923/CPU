@@ -73,7 +73,8 @@ typedef struct {
 
 // Token type
 typedef struct Token Token;
-// トークンはたくさん作るので小さく（MyCPU で 56 バイト）：kind は 1 バイト、val・fval・str は共用
+// トークンはたくさん作るので小さく（MyCPU で 48 バイト）：kind は 1 バイト、val・fval・str は共用。
+// ファイル名（#line で変わる）は file->display_name で見る（元の chibicc のトークンごとの filename は使っていなかった）
 struct Token {
   unsigned char kind; // Token kind（TokenKind）
   bool at_bol;      // True if this token is at beginning of line
@@ -89,7 +90,6 @@ struct Token {
   Type *ty;         // Used if TK_NUM or TK_STR
 
   File *file;       // Source location
-  char *filename;   // Filename
   int line_no;      // Line number
   int line_delta;   // Line number
   Hideset *hideset; // For macro expansion
@@ -336,12 +336,16 @@ typedef enum {
   TY_UNION,
 } TypeKind;
 
+// MyCPU：型も数千個作るので、kind（1 バイト）と bool をまとめて詰める（60 バイト）
 struct Type {
-  TypeKind kind;
-  int size;           // sizeof() value
-  int align;          // alignment
+  unsigned char kind; // TypeKind
   bool is_unsigned;   // unsigned or signed
   bool is_atomic;     // true if _Atomic
+  bool is_flexible;
+  bool is_packed;
+  bool is_variadic;
+  int size;           // sizeof() value
+  int align;          // alignment
   Type *origin;       // for type compatibility check
 
   // Pointer-to or array-of type. We intentionally use the same member
@@ -367,13 +371,10 @@ struct Type {
 
   // Struct
   Member *members;
-  bool is_flexible;
-  bool is_packed;
 
   // Function type
   Type *return_ty;
   Type *params;
-  bool is_variadic;
   Type *next;
 };
 

@@ -848,7 +848,6 @@ static Token *preprocess2(Token *tok) {
     // Pass through if it is not a "#".
     if (!is_hash(tok)) {
       tok->line_delta = tok->file->line_delta;
-      tok->filename = tok->file->display_name;
       cur = cur->next = tok;
       tok = tok->next;
       continue;

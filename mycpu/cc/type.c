@@ -1,23 +1,23 @@
 #include "chibicc.h"
 
-Type *ty_void = &(Type){TY_VOID, 1, 1};
-Type *ty_bool = &(Type){TY_BOOL, 1, 1};
+Type *ty_void = &(Type){.kind = TY_VOID, .size = 1, .align = 1};
+Type *ty_bool = &(Type){.kind = TY_BOOL, .size = 1, .align = 1};
 
-Type *ty_char = &(Type){TY_CHAR, 1, 1};
-Type *ty_short = &(Type){TY_SHORT, 2, 2};
-Type *ty_int = &(Type){TY_INT, 4, 4};
-Type *ty_long = &(Type){TY_LONG, 4, 4};            // MyCPU：long は 4 バイト（ILP32）
+Type *ty_char = &(Type){.kind = TY_CHAR, .size = 1, .align = 1};
+Type *ty_short = &(Type){.kind = TY_SHORT, .size = 2, .align = 2};
+Type *ty_int = &(Type){.kind = TY_INT, .size = 4, .align = 4};
+Type *ty_long = &(Type){.kind = TY_LONG, .size = 4, .align = 4};            // MyCPU：long は 4 バイト（ILP32）
 
-Type *ty_uchar = &(Type){TY_CHAR, 1, 1, true};
-Type *ty_ushort = &(Type){TY_SHORT, 2, 2, true};
-Type *ty_uint = &(Type){TY_INT, 4, 4, true};
-Type *ty_ulong = &(Type){TY_LONG, 4, 4, true};
-Type *ty_llong = &(Type){TY_LONG, 8, 8};           // MyCPU：long long は 8 バイト（レジスタ 2 つで扱う）
-Type *ty_ullong = &(Type){TY_LONG, 8, 8, true};
+Type *ty_uchar = &(Type){.kind = TY_CHAR, .size = 1, .align = 1, .is_unsigned = true};
+Type *ty_ushort = &(Type){.kind = TY_SHORT, .size = 2, .align = 2, .is_unsigned = true};
+Type *ty_uint = &(Type){.kind = TY_INT, .size = 4, .align = 4, .is_unsigned = true};
+Type *ty_ulong = &(Type){.kind = TY_LONG, .size = 4, .align = 4, .is_unsigned = true};
+Type *ty_llong = &(Type){.kind = TY_LONG, .size = 8, .align = 8};           // MyCPU：long long は 8 バイト（レジスタ 2 つで扱う）
+Type *ty_ullong = &(Type){.kind = TY_LONG, .size = 8, .align = 8, .is_unsigned = true};
 
-Type *ty_float = &(Type){TY_FLOAT, 4, 4};
-Type *ty_double = &(Type){TY_DOUBLE, 8, 8};
-Type *ty_ldouble = &(Type){TY_LDOUBLE, 8, 8};   // MyCPU：long double は double と同じ
+Type *ty_float = &(Type){.kind = TY_FLOAT, .size = 4, .align = 4};
+Type *ty_double = &(Type){.kind = TY_DOUBLE, .size = 8, .align = 8};
+Type *ty_ldouble = &(Type){.kind = TY_LDOUBLE, .size = 8, .align = 8};   // MyCPU：long double は double と同じ
 
 static Type *new_type(TypeKind kind, int size, int align) {
   Type *ty = arena_alloc(sizeof(Type));
