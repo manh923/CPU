@@ -185,18 +185,64 @@ int rand(void) {
 }
 
 // 並べ替え（挿入ソート。小さい配列向け。大きいものは後で）
+// 2 つの要素を入れ替える（大きさと番地が 4 の倍数なら 4 バイトずつ）
+static void swap_elem(char *a, char *b, size_t size) {
+  if (((size | (size_t)a | (size_t)b) & 3) == 0) {
+    unsigned *p = (unsigned *)a, *q = (unsigned *)b;
+    for (size_t i = 0; i < size / 4; i++) {
+      unsigned t = p[i];
+      p[i] = q[i];
+      q[i] = t;
+    }
+  } else {
+    for (size_t i = 0; i < size; i++) {
+      char t = a[i];
+      a[i] = b[i];
+      b[i] = t;
+    }
+  }
+}
+
+// クイックソート：軸は先頭・真ん中・最後の 3 つの真ん中。短い方を先に再帰し、長い方はループで（スタックは log n まで）。
+// 12 個以下は挿入ソート
 void qsort(void *base, size_t n, size_t size, int (*cmp)(const void *, const void *)) {
   char *a = base;
-  char tmp[256];
-  if (size > sizeof(tmp))
-    return;
-  for (size_t i = 1; i < n; i++) {
-    memcpy(tmp, a + i * size, size);
-    size_t j = i;
-    while (j > 0 && cmp(a + (j - 1) * size, tmp) > 0) {
-      memcpy(a + j * size, a + (j - 1) * size, size);
-      j--;
+  while (n > 12) {
+    char *mid = a + n / 2 * size, *hi = a + (n - 1) * size;
+    if (cmp(mid, a) < 0)
+      swap_elem(mid, a, size);
+    if (cmp(hi, mid) < 0) {
+      swap_elem(hi, mid, size);
+      if (cmp(mid, a) < 0)
+        swap_elem(mid, a, size);
     }
-    memcpy(a + j * size, tmp, size);
+    // 軸を a[1] に。a[0] ≦ 軸 ≦ a[n-1] が番兵になる
+    char *pv = a + size;
+    swap_elem(mid, pv, size);
+    char *i = pv, *j = hi;
+    for (;;) {
+      do
+        i += size;
+      while (cmp(i, pv) < 0);
+      do
+        j -= size;
+      while (cmp(j, pv) > 0);
+      if (i >= j)
+        break;
+      swap_elem(i, j, size);
+    }
+    swap_elem(pv, j, size);            // 軸を最後の場所 j へ
+    size_t left = (size_t)(j - a) / size, right = n - left - 1;
+    if (left < right) {
+      qsort(a, left, size, cmp);
+      a = j + size;
+      n = right;
+    } else {
+      qsort(j + size, right, size, cmp);
+      n = left;
+    }
   }
+  for (size_t k = 1; k < n; k++)
+    for (char *p = a + k * size; p > a && cmp(p - size, p) > 0; p -= size)
+      swap_elem(p - size, p, size);
 }

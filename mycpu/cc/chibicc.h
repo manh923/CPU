@@ -141,6 +141,8 @@ struct Obj {
   int offset;
   int reg;       // MyCPU：レジスタに置くなら その番号（r24〜r30）、置かないなら 0（codegen.c が決める）
   int ra_weight; // MyCPU：使う回数（ループの中は多めに数える）
+  bool ra_param;    // MyCPU：引数
+  int sc_lo, sc_hi; // MyCPU：宣言されたスコープ（ブロック）の範囲。重ならない変数どうしはレジスタを共有できる
   bool ra_noreg; // MyCPU：番地を取るのでレジスタに置けない
 
   // Global variable or function
@@ -163,6 +165,7 @@ struct Obj {
   Obj *alloca_bottom;
   int stack_size;
   int ra_nvars;     // MyCPU：レジスタに置いた変数の数（r24 から）。残りの r30 までが式の一時置き場
+  int ra_nscopes;   // MyCPU：スコープの番号の最大（関数の中で 1 から）
   bool ra_alloca;   // MyCPU：alloca（可変長配列も）を使う
   bool ra_asm;      // MyCPU：asm 文がある（レジスタに変数を置かない、出したコードをそのまま）
 

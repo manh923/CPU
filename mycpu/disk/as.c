@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <time.h>
 
 #include "asops.h"
 
@@ -878,6 +879,7 @@ static void add_common(char *rest) {
 }
 
 static char line[4096];
+static int nlines;                      // 1 回目に読んだ行の数（途中経過の表示用）
 
 // ファイルを読み、want（0 = コード、1 = データ）の部分の行を処理する
 static void do_file(char *name, int want) {
@@ -892,6 +894,8 @@ static void do_file(char *name, int want) {
   int section = 0;
   while (fgets(line, sizeof(line), fp)) {
     cur_line++;
+    if (pass == 1 && want == 0)
+      nlines++;
     if (!strncmp(line, "; @data", 7)) {
       section = 1;
       link_mode = 1;
@@ -1169,8 +1173,21 @@ static void put_le32(FILE *fp, unsigned v) {
   }
 }
 
+// 途中経過：読んだファイル・行・ラベルの数と、かかった時間
+static clock_t t_start;
+static void report_read(void) {
+  int nlabels = 0;
+  for (int i = 0; i < cap_syms; i++)
+    if (syms[i].name && !syms[i].lib)
+      nlabels++;
+  long ds = (long)((clock() - t_start) / (CLOCKS_PER_SEC / 10));   // 0.1 秒単位
+  printf("  read     %d file%s, %d lines, %d labels  (%ld.%ld s)\n", nfiles, nfiles == 1 ? "" : "s", nlines, nlabels,
+         ds / 10, ds % 10);
+}
+
 int main(int argc, char **argv) {
   char *out_exe = 0, *out_bin = 0;
+  t_start = clock();
   int base_set = 0;
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "-o") && i + 1 < argc)
@@ -1218,6 +1235,7 @@ int main(int argc, char **argv) {
   run_pass(2);
   if (nerrors)
     return 1;
+  report_read();
 
   if (out_bin) {
     FILE *fp = fopen(out_bin, "wb");
@@ -1242,6 +1260,14 @@ int main(int argc, char **argv) {
         if (syms[i].name && syms[i].lib && syms[i].used)
           use_chunk_at(syms[i].value);
       i64 lowest, size = write_segments(0, &lowest);
+      int nused = 0;
+      long lib_bytes = 0;
+      for (int i = 0; i < nchunks; i++)
+        if (ck_used[i]) {
+          nused++;
+          lib_bytes += (long)(ck_end[i] - ck_start[i]);
+        }
+      printf("  library %d of %d parts of %s, %ld bytes\n", nused, nchunks, lib_name, lib_bytes);
       fputc(0x10, fp);
       fputc(0x80, fp);
       put_le32(fp, (unsigned)lowest);

@@ -39,6 +39,7 @@ static char fid[16];                   // ファイルの番号（ファイル�
 typedef struct {
   int n;
   int r1, r2;
+  bool cs;       // r19〜r23（呼んだ側が保存するレジスタ）に置いた
 } Slot;
 static Slot tstack[TSTACK_MAX];
 static int tdepth;
@@ -133,6 +134,7 @@ static Slot *new_slot(void) {
 
 static void push(void) {
   Slot *s = new_slot();
+  s->cs = false;
   if (tused < ntregs) {
     s->n = 1;
     s->r1 = REG_HI - tused++;
@@ -146,6 +148,7 @@ static void push(void) {
 
 static void push64(void) {
   Slot *s = new_slot();
+  s->cs = false;
   if (tused + 2 <= ntregs) {
     s->n = 2;
     s->r1 = REG_HI - tused++;
@@ -159,12 +162,71 @@ static void push64(void) {
   push64_mem();
 }
 
+// r19〜r23 を式の途中の値に使えるか（可変長引数・asm の関数は使わない）と、今使っているもの。
+// cur_scope は、今コードを作っている場所のスコープ（parse.c の番号）
+static bool cs_ok;
+static unsigned cs_busy;
+static int cur_scope = 1;
+
+// レジスタ r に、今の場所で生きている変数がいるか（その変数のスコープの中にいる）
+static bool reg_live(int r) {
+  for (Obj *v = current_fn->locals; v; v = v->next)
+    if (v->reg == r && v->sc_lo <= cur_scope && cur_scope <= v->sc_hi)
+      return true;
+  return false;
+}
+
+static bool is64(Type *ty);
+
+// 関数を呼ばず、r19〜r22 も作業に使わない式か（浮動小数点・long long・構造体・ビットフィールド・文を含まない）
+static bool simple_tree(Node *n) {
+  if (!n)
+    return true;
+  if (n->ty && (is_flonum(n->ty) || is64(n->ty) || n->ty->kind == TY_STRUCT || n->ty->kind == TY_UNION))
+    return false;
+  switch (n->kind) {
+  case ND_NUM:
+  case ND_VAR:
+    return true;
+  case ND_MEMBER:
+    return !n->member->is_bitfield && simple_tree(n->lhs);
+  case ND_COND:
+    return simple_tree(n->cond) && simple_tree(n->then) && simple_tree(n->els);
+  case ND_ADD: case ND_SUB: case ND_MUL: case ND_DIV: case ND_MOD: case ND_NEG:
+  case ND_BITAND: case ND_BITOR: case ND_BITXOR: case ND_SHL: case ND_SHR:
+  case ND_EQ: case ND_NE: case ND_LT: case ND_LE: case ND_NOT: case ND_BITNOT:
+  case ND_LOGAND: case ND_LOGOR: case ND_COMMA: case ND_CAST: case ND_ADDR: case ND_DEREF: case ND_ASSIGN:
+    return simple_tree(n->lhs) && simple_tree(n->rhs);
+  default:
+    return false;
+  }
+}
+
+// 積んで、next を求めてから取り出すとき：next が簡単な式なら、空いている r19〜r23 に置く（入口で保存しなくてよい）
+static void push_for(Node *next) {
+  if (cs_ok && simple_tree(next))
+    for (int r = 23; r >= 19; r--)
+      if (!(cs_busy >> r & 1) && !reg_live(r)) {
+        Slot *s = new_slot();
+        s->n = 1;
+        s->r1 = r;
+        s->cs = true;
+        cs_busy |= 1u << r;
+        move(r, 16);
+        return;
+      }
+  push();
+}
+
 // 積んだ値を取り出す。レジスタにあれば、そのレジスタの番号を返す（コードは出さない。次に積む前にすぐ使うこと）。
 // スタックにあれば reg に読んで reg を返す
 static int pop_reg(int reg) {
   Slot *s = &tstack[--tdepth];
   if (s->n) {
-    tused--;
+    if (s->cs)
+      cs_busy &= ~(1u << s->r1);
+    else
+      tused--;
     return s->r1;
   }
   pop_mem(reg);
@@ -475,6 +537,20 @@ static void gen_addr_op(Node *node, Addr *a) {
       a->off = v + d;
       return;
     }
+    // 大域の配列 + 添字：添字（大きさを掛けたもの）をレジスタに、配列の名前を即値に（配列にはポインタへのキャストが付いている）
+    while (p->kind == ND_CAST && p->ty->kind == TY_PTR && p->lhs->ty->base)   // ポインタどうしのキャストは何もしない
+      p = p->lhs;
+    if (p->kind == ND_ADD && is_word(p->rhs->ty)) {
+      Node *arr = p->lhs;
+      while (arr->kind == ND_CAST && arr->ty->kind == TY_PTR)
+        arr = arr->lhs;
+      if (arr->kind == ND_VAR && !arr->var->is_local && arr->ty->kind == TY_ARRAY) {
+        a->base = gen_val(p->rhs);
+        a->sym = sym_name(arr->var->name);
+        a->off = d;
+        return;
+      }
+    }
     a->base = gen_val(p);
     a->off = d;
     return;
@@ -604,7 +680,7 @@ static void gen_operands(Node *lhs, Node *rhs, Opnd *l, Opnd *r) {
     return;
   }
   gen_to(rhs, 16);
-  push();
+  push_for(lhs);
   gen_to(lhs, 16);
   l->kind = O_REG;
   l->reg = 16;
@@ -1518,7 +1594,7 @@ static void gen_assign(Node *node, int dst) {
   // 番地を一時置き場に置いてから値を求める
   gen_addr_op(lhs, &a);
   if (a.base == 16) {
-    push();
+    push_for(rhs);
     gen_to(rhs, 16);
     a.base = pop_reg(17);
   } else {
@@ -1859,15 +1935,20 @@ static void gen_expr2(Node *node) {
       store_at(node->ty, 16, &a);
     }
     return;
-  case ND_STMT_EXPR:
+  case ND_STMT_EXPR: {
     // 最後の式文の値が、全体の値
+    int saved = cur_scope;
+    if (node->val > 0)
+      cur_scope = node->val;
     for (Node *n = node->body; n; n = n->next) {
       if (!n->next && n->kind == ND_EXPR_STMT)
         gen_expr(n->lhs);
       else
         gen_stmt(n);
     }
+    cur_scope = saved;
     return;
+  }
   case ND_COMMA:
     gen_void(node->lhs);
     gen_expr(node->rhs);
@@ -2087,7 +2168,18 @@ static void gen_expr2(Node *node) {
   gen_binary(node);
 }
 
+static void gen_stmt2(Node *node);
+
+// 文のコードを作る。ブロック・for に入るときは、今のスコープ（cur_scope）を変える
 static void gen_stmt(Node *node) {
+  int saved = cur_scope;
+  if ((node->kind == ND_BLOCK || node->kind == ND_FOR) && node->val > 0)
+    cur_scope = node->val;
+  gen_stmt2(node);
+  cur_scope = saved;
+}
+
+static void gen_stmt2(Node *node) {
   switch (node->kind) {
   case ND_IF: {
     char *els = new_label();
@@ -2232,6 +2324,23 @@ static bool ra_hiscratch;              // r19〜r22 を作業に使う（構造�
 static bool uses_float, uses_ll;       // このファイルが float・double、long long を使う（emit_data が印を付ける）
 static bool uses_scanf;                // このファイルが scanf の仲間を呼ぶ
 
+// スコープごとの印（番号は parse.c の scope_seq。ND_BLOCK・ND_FOR・ND_STMT_EXPR の val）：
+//   中で関数を呼ぶ・r19〜r22 を作業に使う・中を見た。今いるスコープを積んでおき、印は積んであるもの全部に付ける
+static bool *sc_call, *sc_hi, *sc_seen;
+static int sc_stack[256], sc_n;
+
+static void ra_mark_call(void) {
+  ra_call = true;
+  for (int i = 0; i < sc_n; i++)
+    sc_call[sc_stack[i]] = true;
+}
+
+static void ra_mark_hi(void) {
+  ra_hiscratch = true;
+  for (int i = 0; i < sc_n; i++)
+    sc_hi[sc_stack[i]] = true;
+}
+
 // 番地を取られる変数に印を付ける（&x、&x.member）
 static void ra_mark_addr(Node *node) {
   while (node) {
@@ -2248,30 +2357,47 @@ static void ra_mark_addr(Node *node) {
   }
 }
 
-// 関数の中を見て、ローカル変数を使う回数を数える（ループの中は 8 倍ずつ）
+static void ra_scan2(Node *node, int w);
+
+// 関数の中を見て、ローカル変数を使う回数を数える（ループの中は 8 倍ずつ）。スコープに入るときは積む
 static void ra_scan(Node *node, int w) {
   if (!node)
     return;
-  if (node->ty && is_flonum(node->ty))
-    ra_call = uses_float = true;
+  bool scope = (node->kind == ND_BLOCK || node->kind == ND_FOR || node->kind == ND_STMT_EXPR) && node->val > 0 &&
+               node->val <= current_fn->ra_nscopes && sc_n < 256;
+  if (scope) {
+    sc_stack[sc_n++] = node->val;
+    sc_seen[node->val] = true;
+  }
+  ra_scan2(node, w);
+  if (scope)
+    sc_n--;
+}
+
+static void ra_scan2(Node *node, int w) {
+  if (node->ty && is_flonum(node->ty)) {
+    ra_mark_call();
+    uses_float = true;
+  }
   if (node->ty && is64(node->ty)) {
-    ra_hiscratch = uses_ll = true;
+    ra_mark_hi();
+    uses_ll = true;
     if (node->kind == ND_DIV || node->kind == ND_MOD)
-      ra_call = true;
+      ra_mark_call();
   }
   switch (node->kind) {
   case ND_ASSIGN:
     if (node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION ||
         (node->lhs->kind == ND_MEMBER && node->lhs->member->is_bitfield))
-      ra_hiscratch = true;
+      ra_mark_hi();
     break;
   case ND_RETURN:
     if (node->lhs && (node->lhs->ty->kind == TY_STRUCT || node->lhs->ty->kind == TY_UNION))
-      ra_hiscratch = true;
+      ra_mark_hi();
     break;
   case ND_CAS:
   case ND_EXCH:
-    ra_hiscratch = true;
+    ra_mark_hi();
     break;
   case ND_VAR:
     if (node->var->is_local && node->var->ra_weight < (1 << 28))
@@ -2285,7 +2411,7 @@ static void ra_scan(Node *node, int w) {
     ra_mark_addr(node->lhs);
     break;
   case ND_FUNCALL:
-    ra_call = true;
+    ra_mark_call();
     if (node->lhs->kind == ND_VAR) {
       char *name = node->lhs->var->name;
       if (!strcmp(name, "alloca"))
@@ -2332,67 +2458,102 @@ static bool ra_ok(Obj *fn, Obj *var) {
   return is_word(var->ty) && !var->ra_noreg && var != fn->va_area && var != fn->alloca_bottom;
 }
 
-// よく使う変数（3 回以上）から順にレジスタを割り当てる。
-//   関数を呼ばない関数：まず r23〜r19（呼んだ側が保存するので、保存しなくてよい。r19〜r22 は作業に使わないときだけ）。
-//     r19〜r21 で来る引数（4〜6 個目）をレジスタに置くなら、来たレジスタのまま
-//   ほか（足りない分も）：r24 から最大 VAR_MAX 個（入口で保存する）
+// var をレジスタ r に置けるか：r に置いた変数とスコープが重ならない（重ならなければ、同時には生きていない）
+static bool ra_fits(Obj *fn, Obj *var, int r) {
+  for (Obj *v = fn->locals; v; v = v->next)
+    if (v->reg == r && !(v->sc_hi < var->sc_lo || var->sc_hi < v->sc_lo))
+      return false;
+  return true;
+}
+
+// よく使う変数から順にレジスタを割り当てる。スコープが重ならない変数どうしは、同じレジスタを使える。
+//   r23〜r19（呼んだ側が保存するので、入口で保存しなくてよい）：その変数のスコープの中で関数を呼ばないとき。
+//     r19〜r22 は、そのスコープの中で作業（構造体を写す・long long など）に使わないときだけ。
+//     関数を呼ばない関数で、r19〜r21 で来る引数（4〜6 個目）は、来たレジスタのまま
+//   ほか：r24 から最大 VAR_MAX 個（入口で保存する）。新しく使うのは 3 回以上使う変数だけ
 static void assign_regs(Obj *fn) {
   for (Obj *var = fn->locals; var; var = var->next) {
     var->reg = 0;
     var->ra_weight = 0;
     var->ra_noreg = false;
+    if (!var->sc_hi) {                 // スコープが分からなければ、関数全体
+      var->sc_lo = 1;
+      var->sc_hi = fn->ra_nscopes + 1;
+    }
   }
   current_fn = fn;
   fn->ra_alloca = fn->ra_asm = false;
   ra_setjmp = ra_call = ra_hiscratch = false;
+  int nsc = fn->ra_nscopes + 2;
+  sc_call = calloc(nsc, 1);
+  sc_hi = calloc(nsc, 1);
+  sc_seen = calloc(nsc, 1);
+  sc_n = 0;
+  sc_stack[sc_n++] = 1;                // 関数のスコープ（引数など）
+  sc_seen[1] = true;
   ra_scan(fn->body, 1);
+  sc_n = 0;
 
   fn->ra_nvars = 0;
   if (fn->ra_asm || ra_setjmp)
-    return;
+    goto done;
 
-  // 呼ばない関数で使えるレジスタ（used = 使った・取っておいた）
-  bool leaf_ok[32] = {}, used[32] = {};
-  if (!ra_call && !fn->va_area) {
-    leaf_ok[23] = true;
-    if (!ra_hiscratch)
-      leaf_ok[19] = leaf_ok[20] = leaf_ok[21] = leaf_ok[22] = true;
-  }
+  // 番地を取られた変数（&x）の、同じスコープで宣言の並びがすぐ隣の変数はメモリのまま
+  // （&x + 1 で隣の変数をのぞくコードがある。chibicc のテストの pointer.c）
+  for (Obj *prev = NULL, *var = fn->locals; var; prev = var, var = var->next)
+    if (var->ra_noreg && var->is_local) {
+      if (prev && prev->sc_lo == var->sc_lo)
+        prev->ra_noreg = true;
+      if (var->next && var->next->sc_lo == var->sc_lo && !var->next->ra_noreg)
+        var->next->ra_noreg = true, var = var->next;   // 印を付けたものからはたどらない
+    }
 
-  // レジスタで来る引数とそのレジスタ。r19〜r21 で来て、レジスタに置けそうなものには、そのレジスタを取っておく
+  // レジスタで来る引数。関数を呼ばない関数なら、r19〜r21 で来るものは来たレジスタのまま
   Obj *in_var[GP_MAX];
   int nin = 0;
   for (Obj *var = fn->params; var && nin < GP_MAX; var = var->next)
     if (var->ty->kind != TY_STRUCT && var->ty->kind != TY_UNION && !is_pair(var->ty))
       in_var[nin++] = var;
-  for (int i = 0; i < nin; i++)
-    if (leaf_ok[16 + i] && ra_ok(fn, in_var[i]) && in_var[i]->ra_weight >= 3)
-      used[16 + i] = true;
+  if (!ra_call && !ra_hiscratch && !fn->va_area)
+    for (int i = 3; i < nin; i++)
+      if (ra_ok(fn, in_var[i]) && in_var[i]->ra_weight >= 1)
+        in_var[i]->reg = 16 + i;
 
+  // 引数は 1 回でも、ローカル変数は 3 回以上使うものを（少ないものはメモリのまま。&x + 1 で隣をのぞくコードもあるので）
+  for (Obj *var = fn->params; var; var = var->next)
+    var->ra_param = true;
   for (;;) {
     Obj *best = NULL;
     for (Obj *var = fn->locals; var; var = var->next)
-      if (!var->reg && ra_ok(fn, var) && var->ra_weight >= 3 && (!best || var->ra_weight > best->ra_weight))
+      if (!var->reg && ra_ok(fn, var) && var->ra_weight >= (var->ra_param ? 1 : 3) &&
+          (!best || var->ra_weight > best->ra_weight))
         best = var;
     if (!best)
       break;
 
+    // そのスコープの中で関数を呼ばない・作業に使わない（中を見ていないスコープは呼ぶことにする）
+    int sc = best->sc_lo >= 1 && best->sc_lo < nsc ? best->sc_lo : 1;
+    bool no_call = sc_seen[sc] && !sc_call[sc] && !fn->va_area;
+    bool no_hi = no_call && !sc_hi[sc];
     int r = 0;
-    for (int i = 0; i < nin; i++)
-      if (in_var[i] == best && leaf_ok[16 + i])
-        r = 16 + i;                    // 来たレジスタのまま
     for (int i = 23; !r && i >= 19; i--)
-      if (leaf_ok[i] && !used[i])
+      if ((i == 23 ? no_call : no_hi) && ra_fits(fn, best, i))
         r = i;
-    if (!r && fn->ra_nvars < VAR_MAX)
+    for (int i = 0; !r && i < fn->ra_nvars; i++)
+      if (ra_fits(fn, best, REG_LO + i))
+        r = REG_LO + i;
+    if (!r && best->ra_weight >= 3 && fn->ra_nvars < VAR_MAX)
       r = REG_LO + fn->ra_nvars++;
     if (!r) {
       best->ra_noreg = true;           // 置けない（ほかの変数を探す）
       continue;
     }
-    used[r] = true;
     best->reg = r;
   }
+done:
+  free(sc_call);
+  free(sc_hi);
+  free(sc_seen);
 }
 
 // Assign offsets to local variables.
@@ -2648,6 +2809,9 @@ static void emit_text(Obj *prog) {
 
     current_fn = fn;
     ntregs = (REG_HI - REG_LO + 1) - fn->ra_nvars;
+    cs_busy = 0;
+    cs_ok = !fn->va_area && !fn->ra_asm;
+    cur_scope = 1;
     tused = tdepth = 0;
     used_regs = 0;
     for (int i = 0; i < fn->ra_nvars; i++)
