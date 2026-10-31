@@ -311,6 +311,10 @@ if (spawnSync('gcc', ['--version']).error) {
   const fa = require('./cctest.js').runC([path.join(ROOT, 'test/fasmtest.c')], { max: 5_000_000_000 });
   check('浮動小数点のアセンブリ版（libc/softfloat.s）：この CPU で C 版とビット単位で同じ（double・float 2 万組ずつ）',
     fa.ok, fa.why + '\n' + fa.out.slice(0, 1000));
+  // 定数で割る式（コンパイラが掛け算の上位とシフトに変える）
+  const dv = require('./cctest.js').runC([path.join(ROOT, 'test/divtest.c')], { max: 3_000_000_000 });
+  check('定数で割る式（MULH・MULHU とシフトに変えたもの）：割り算の命令と同じ答え（定数 70 種・符号付き／なし・/ と %）',
+    dv.ok, dv.why + '\n' + dv.out.slice(0, 1000));
 
   gcc('fltiotest', ['-Dstrtod=my_strtod', '-Dstrtof=my_strtof', '-Dstrtold=my_strtold', '-Datof=my_atof', 'test/fltiotest.c', 'libc/fltio.c']);
   r = runExe('fltiotest', ['20000']);

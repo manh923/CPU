@@ -989,12 +989,184 @@ static bool imm_ok(Node *node, int32_t v) {
   return true;
 }
 
-// dst ← lr op r。r が即値なら imm_ok であること、レジスタ・メモリならそのまま
-static void emit_arith(Node *node, int dst, int lr, Opnd *r) {
+// ---- 定数で割る：割り算の命令（34 クロック）の代わりに、掛け算の上位（MULH・MULHU）とシフトで ----
+// （Hacker's Delight 10 章。GCC なども同じことをする）
+
+// 符号なしの d（2 以上、2 の累乗でない）：x / d = MULHU(x, m) >> s となる m（32bit に収まるもの）を探す。なければ false
+static bool udiv_magic(uint32_t d, uint32_t *m, int *s) {
+  for (int k = 0; k < 32; k++) {
+    uint64_t p = (uint64_t)1 << (32 + k);
+    uint64_t mm = (p + d - 1) / d;               // 切り上げ
+    if (mm >> 32)
+      return false;
+    if (mm * d - p <= ((uint64_t)1 << k)) {      // 誤差が小さければ、どの x でも合う
+      *m = (uint32_t)mm;
+      *s = k;
+      return true;
+    }
+  }
+  return false;
+}
+
+// 符号付きの d（|d| が 2 以上で 2 の累乗でない）：x / d = MULH(x, M)（± x）>> s に、負なら 1 を足したもの
+static void sdiv_magic(int32_t d, int32_t *mag, int *sh) {
+  uint32_t two31 = 0x80000000u;
+  uint32_t ad = d < 0 ? 0u - (uint32_t)d : (uint32_t)d;
+  uint32_t t = two31 + ((uint32_t)d >> 31);
+  uint32_t anc = t - 1 - t % ad;
+  int p = 31;
+  uint32_t q1 = two31 / anc, r1 = two31 - q1 * anc;
+  uint32_t q2 = two31 / ad, r2 = two31 - q2 * ad, delta;
+  do {
+    p++;
+    q1 *= 2; r1 *= 2;
+    if (r1 >= anc) { q1++; r1 -= anc; }
+    q2 *= 2; r2 *= 2;
+    if (r2 >= ad) { q2++; r2 -= ad; }
+    delta = ad - r2;
+  } while (q1 < delta || (q1 == delta && r1 == 0));
+  *mag = (int32_t)(q2 + 1);
+  if (d < 0)
+    *mag = (int32_t)(0u - (uint32_t)*mag);
+  *sh = p - 32;
+}
+
+static int log2_exact(uint32_t v) {
+  if (v == 0 || (v & (v - 1)))
+    return -1;
+  int k = 0;
+  while (v > 1) { v >>= 1; k++; }
+  return k;
+}
+
+// node（定数 v で割る ND_DIV・ND_MOD）を掛け算でやるのに要る、lr 以外の作業用レジスタの数（dst が lr でなければ dst も数に入る）。
+// やらない（割り算の命令を使う）なら -1
+static int divc_regs(Node *node, int32_t v) {
+  if (node->kind != ND_DIV && node->kind != ND_MOD)
+    return -1;
+  bool mod = node->kind == ND_MOD;
+  uint32_t m;
+  int s;
+  if (node->ty->is_unsigned) {
+    uint32_t d = v;
+    if (d < 2)
+      return -1;
+    if (log2_exact(d) >= 0)
+      return 0;
+    if (udiv_magic(d, &m, &s))
+      return mod ? 1 : 0;
+    return 2;
+  }
+  if (v == 0 || v == 1 || v == -1 || v == INT32_MIN)
+    return -1;
+  uint32_t ad = v < 0 ? 0u - (uint32_t)v : (uint32_t)v;
+  if (log2_exact(ad) >= 0)
+    return 1;
+  return 2;
+}
+
+// dst ← lr / v か lr % v。w・u は lr と違う作業用レジスタ（divc_regs の数だけ。dst でもよい）
+static void emit_divc(Node *node, int dst, int lr, int32_t v, int w, int u) {
+  bool mod = node->kind == ND_MOD;
+  uint32_t m;
+  int s;
+  if (node->ty->is_unsigned) {
+    uint32_t d = v;
+    int k = log2_exact(d);
+    if (k >= 0) {
+      if (mod)
+        println("  ANDI32 r%d, r%d, %d", dst, lr, (int32_t)(d - 1));
+      else
+        println("  SHRI32 r%d, r%d, %d", dst, lr, k);
+      return;
+    }
+    int q = mod ? w : dst;                       // 商を置くところ
+    if (udiv_magic(d, &m, &s)) {
+      println("  MULHUI32 r%d, r%d, %d", q, lr, (int32_t)m);
+      if (s)
+        println("  SHRI32 r%d, r%d, %d", q, q, s);
+    } else {
+      // 33bit 要る m：t = MULHU(x, m')、商 = (t + ((x - t) >> 1)) >> (l - 1)
+      int l = 0;
+      while (l < 32 && ((uint64_t)1 << l) < d)
+        l++;
+      uint32_t mm = (uint32_t)((((uint64_t)1 << 32) * (((uint64_t)1 << l) - d)) / d + 1);
+      println("  MULHUI32 r%d, r%d, %d", w, lr, (int32_t)mm);
+      println("  SUBR32 r%d, r%d, r%d", u, lr, w);
+      println("  SHRI32 r%d, r%d, 1", u, u);
+      println("  ADDR32 r%d, r%d, r%d", u, u, w);
+      println("  SHRI32 r%d, r%d, %d", q, u, l - 1);
+    }
+    if (mod) {
+      println("  MULI32 r%d, r%d, %d", w, w, (int32_t)d);
+      println("  SUBR32 r%d, r%d, r%d", dst, lr, w);
+    }
+    return;
+  }
+
+  uint32_t ad = v < 0 ? 0u - (uint32_t)v : (uint32_t)v;
+  int k = log2_exact(ad);
+  if (k >= 0) {
+    // 負の数は 0 の方へ切り捨てるので、先に 2^k - 1 を足す
+    if (k == 1) {
+      println("  SHRI32 r%d, r%d, 31", w, lr);
+    } else {
+      println("  SARI32 r%d, r%d, 31", w, lr);
+      println("  SHRI32 r%d, r%d, %d", w, w, 32 - k);
+    }
+    println("  ADDR32 r%d, r%d, r%d", w, w, lr);
+    if (mod) {                                   // 余りの符号は割られる数と同じ（割る数の符号は関係ない）
+      println("  ANDI32 r%d, r%d, %d", w, w, (int32_t)(0u - ad));
+      println("  SUBR32 r%d, r%d, r%d", dst, lr, w);
+    } else {
+      println("  SARI32 r%d, r%d, %d", dst, w, k);
+      if (v < 0)
+        println("  SUBR32 r%d, r0, r%d", dst, dst);
+    }
+    return;
+  }
+  int32_t mag;
+  sdiv_magic(v, &mag, &s);
+  println("  MULHI32 r%d, r%d, %d", w, lr, mag);
+  if (v > 0 && mag < 0)
+    println("  ADDR32 r%d, r%d, r%d", w, w, lr);
+  else if (v < 0 && mag > 0)
+    println("  SUBR32 r%d, r%d, r%d", w, w, lr);
+  if (s)
+    println("  SARI32 r%d, r%d, %d", w, w, s);
+  println("  SHRI32 r%d, r%d, 31", u, w);        // 負なら 1 足す（0 の方へ切り捨て）
+  if (mod) {
+    println("  ADDR32 r%d, r%d, r%d", w, w, u);
+    println("  MULI32 r%d, r%d, %d", w, w, v);
+    println("  SUBR32 r%d, r%d, r%d", dst, lr, w);
+  } else {
+    println("  ADDR32 r%d, r%d, r%d", dst, w, u);
+  }
+}
+
+// dst ← lr op r。r が即値なら imm_ok であること、レジスタ・メモリならそのまま。
+// scratch なら r17・r18 のうち lr・dst でないものを作業用に使ってよい（定数で割るとき）
+static void emit_arith(Node *node, int dst, int lr, Opnd *r, bool scratch) {
   char *op = arith_name(node);
   if (r->kind == O_IMM) {
     int32_t v = r->imm;
     NodeKind k = node->kind;
+    int need = divc_regs(node, v);
+    if (need >= 0) {
+      int pool[3], n = 0;
+      if (dst != lr)
+        pool[n++] = dst;
+      if (scratch) {
+        if (lr != 17 && dst != 17)
+          pool[n++] = 17;
+        if (lr != 18 && dst != 18)
+          pool[n++] = 18;
+      }
+      if (n >= need) {
+        emit_divc(node, dst, lr, v, n > 0 ? pool[0] : 0, n > 1 ? pool[1] : 0);
+        return;
+      }
+    }
     if ((v == 0 && (k == ND_ADD || k == ND_SUB || k == ND_BITOR || k == ND_BITXOR || k == ND_SHL || k == ND_SHR)) ||
         (v == 1 && (k == ND_MUL || k == ND_DIV)))
       move(dst, lr);
@@ -1027,7 +1199,7 @@ static void gen_arith(Node *node, int dst) {
     r.reg = opnd_reg(&r, lr == 17 ? 18 : 17);
     r.kind = O_REG;
   }
-  emit_arith(node, dst, lr, &r);
+  emit_arith(node, dst, lr, &r, true);
 }
 
 // 整数を読む式（メモリの変数・*p・p->x。ビットフィールドでないもの）か
@@ -1085,7 +1257,7 @@ static bool is_cheap(Node *node) {
     return is_int32(node->ty) && is_cheap(node->lhs);
   }
   if (arith_name(node) && is_int32(node->lhs->ty) && is_int32(node->rhs->ty))
-    return is_cheap(node->lhs) && leaf(node->rhs, &r) && (r.kind != O_IMM || imm_ok(node, r.imm));
+    return is_cheap(node->lhs) && leaf(node->rhs, &r) && (r.kind != O_IMM || (imm_ok(node, r.imm) && divc_regs(node, r.imm) <= 0));
   return false;
 }
 
@@ -1150,7 +1322,7 @@ static void gen_cheap(Node *node, int dst) {
   }
   int lr = gen_cheap_val(node->lhs, dst);
   leaf(node->rhs, &r);
-  emit_arith(node, dst, lr, &r);
+  emit_arith(node, dst, lr, &r, false);
 }
 
 // 比べ方
