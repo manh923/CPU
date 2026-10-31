@@ -203,7 +203,7 @@ const cases = [];
     check(`MyDOS（${type}）：EDIT（C で書いたエディタ。矢印キー・保存）`,
       o.includes(nl('C:\\>type memo.txt\n>> Hello EDIT!\nsecond line\n')), o.slice(o.indexOf('C:\\>type memo.txt'), o.indexOf('C:\\>type memo.txt') + 80));
     check(`MyDOS（${type}）：AS（C で書いたアセンブラ）でアセンブルして実行`,
-      o.includes(nl('C:\\>as -o hi2.exe hi.s\nhi2.exe: 218 bytes\n')) && o.includes(nl('C:\\>hi2 MyCPU\nHello, MyCPU!\n')),
+      /C:\\>as -o hi2\.exe hi\.s\r?\n  read +1 file, \d+ lines, \d+ labels .*\r?\nhi2\.exe: 218 bytes\r?\n/.test(o) && o.includes(nl('C:\\>hi2 MyCPU\nHello, MyCPU!\n')),
       o.slice(o.indexOf('C:\\>as -o'), o.indexOf('C:\\>as -o') + 120));
     check(`MyDOS（${type}）：0 で割るプログラムは止めて C:\\> に戻る`,
       o.includes(nl('Dividing by zero...\n\nProgram terminated: divide by zero at ')) && !o.includes('never printed'), '');

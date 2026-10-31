@@ -515,6 +515,18 @@ static Token *append_tokens(Token *tok1, Token *tok2) {
   return tok1;
 }
 
+#ifdef __MYCPU__
+// 時間（clock の差）を「1.2 s」に
+static char *secs(clock_t t) {
+  static char buf[2][16];
+  static int k;
+  long ds = (long)(t / (CLOCKS_PER_SEC / 10));   // 0.1 秒単位（µs に 1000 を掛けるとあふれる）
+  k ^= 1;
+  snprintf(buf[k], sizeof(buf[k]), "%ld.%ld s", ds / 10, ds % 10);
+  return buf[k];
+}
+#endif
+
 static void cc1(void) {
   Token *tok = NULL;
 
@@ -536,9 +548,23 @@ static void cc1(void) {
   }
 
   // Tokenize and parse.
+#ifdef __MYCPU__
+  // MyCPU：途中経過（BUILD.BAT で、今どこまで進んだかがわかるように）
+  clock_t t0 = clock();
+  printf("  %s -> %s\n", base_file, output_file);
+#endif
   Token *tok2 = must_tokenize_file(base_file);
   tok = append_tokens(tok, tok2);
   tok = preprocess(tok);
+#ifdef __MYCPU__
+  int ntok = 0, nfile = 0;
+  for (Token *t = tok; t && t->kind != TK_EOF; t = t->next)
+    ntok++;
+  for (File **f = get_input_files(); *f; f++)
+    nfile++;
+  clock_t t1 = clock();
+  printf("  preprocess  %d tokens from %d files  (%s)\n", ntok, nfile, secs(t1 - t0));
+#endif
 
   // If -M or -MD are given, print file dependencies.
   if (opt_M || opt_MD) {
@@ -556,11 +582,20 @@ static void cc1(void) {
   Obj *prog = parse(tok);
 
 #ifdef __MYCPU__
+  int nfn = 0, nvar = 0;
+  for (Obj *o = prog; o; o = o->next)
+    if (o->is_definition && !(o->is_function && !o->is_live))
+      o->is_function ? nfn++ : nvar++;
+  clock_t t2 = clock();
+  printf("  parse       %d functions, %d variables  (%s)\n", nfn, nvar, secs(t2 - t1));
+
   // MyCPU：メモリ（SDRAM 8MB）が足りなくなるので、アセンブリはためずにファイルへ直接書く
   FILE *out = open_file(output_file);
   codegen(prog, out);
+  long size = ftell(out);
   if (fclose(out) != 0)
     error("cannot write output file: %s", output_file);
+  printf("  codegen     %ld bytes of assembly  (%s)\n", size, secs(clock() - t2));
 #else
   // Open a temporary output buffer.
   char *buf;
