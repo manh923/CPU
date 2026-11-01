@@ -1,5 +1,6 @@
 // 時間：MyCPU には時計がないので、2026-01-01 00:00:00 から起動後の秒数だけ進んだことにする。
-// clock() はタイマー（1µs ごとに増える。入出力の 0x10010）
+// clock() はタイマー（1µs ごとに増える。入出力の 0x10010）。32bit で約 71 分ごとに一周する（負の値にもなる）ので、
+// 時間を測るときは clock() どうしの差（unsigned long で引く）で比べる
 #include <time.h>
 #include <string.h>
 #include <stdio.h>
@@ -8,7 +9,7 @@
 #define BOOT_TIME 1767225600L            // 2026-01-01 00:00:00（UTC）
 
 clock_t clock(void) {
-  return *TIMER_COUNT & 0x7fffffff;
+  return (clock_t)*TIMER_COUNT;
 }
 
 time_t time(time_t *t) {
