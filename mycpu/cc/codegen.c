@@ -2882,6 +2882,188 @@ static void jump_target(HashMap *labels, char **t, int *tlen) {
   }
 }
 
+
+// ---- 命令の並べ替え：読み出した値をすぐ次の命令で使うと 1 クロック待つので、間にほかの命令を挟む ----
+// ラベル・分岐・呼び出し・知らない命令で区切った並び（基本ブロック）の中だけで、依存関係を守って並べ直す。
+// レジスタの読み書きの順（書く→読む・読む→書く・書く→書く）と、メモリを読み書きする命令どうしの順（I/O もあるので読み出しどうしも）は変えない。
+// 並べ方：まだ置いていない命令のうち、前に置くべきものが全部置いてあるものを、元の順に見て、
+// 直前に置いた読み出しの値を使わない最初のもの（なければ最初のもの）を置く
+
+enum { SC_MAX = 64 };                  // 一度に並べ直す命令の数（長いブロックは区切る）
+
+typedef struct {
+  char *p;                             // 行（改行まで）
+  int len;
+  int def;                             // 書くレジスタ（なければ -1）
+  int use[4], nuse;                    // 読むレジスタ
+  bool mem, load;                      // メモリを読み書きする・LOAD（値は次の命令で待つ）
+} SchedInsn;
+
+// レジスタの名前の番号：r0〜r63 は 0〜63、sp 64、lr 65、p1〜p7 は 71〜77。レジスタでなければ -1。r0 も -1（いつも 0）
+static int sched_reg(char *s, int len) {
+  if (len == 2 && !strncmp(s, "sp", 2))
+    return 64;
+  if (len == 2 && !strncmp(s, "lr", 2))
+    return 65;
+  if (len == 2 && s[0] == 'p' && s[1] >= '1' && s[1] <= '7')
+    return 70 + s[1] - '0';
+  if (len < 2 || len > 3 || s[0] != 'r')
+    return -1;
+  int n = 0;
+  for (int i = 1; i < len; i++) {
+    if (!isdigit((unsigned char)s[i]))
+      return -1;
+    n = n * 10 + s[i] - '0';
+  }
+  return n == 0 || n > 63 ? -1 : n;
+}
+
+static bool ends_with(char *s, int len, char *suf) {
+  int n = strlen(suf);
+  return len >= n && !strncmp(s + len - n, suf, n);
+}
+
+// 行を調べる。並べ替えてよい命令なら true
+static bool sched_parse(char *p, int len, SchedInsn *in) {
+  in->p = p;
+  in->len = len;
+  in->def = -1;
+  in->nuse = 0;
+  in->mem = in->load = false;
+  if (len < 3 || p[0] != ' ' || p[1] != ' ' || !isupper((unsigned char)p[2]))
+    return false;
+  char *op = p + 2, *e = p + len;
+  char *q = op;
+  while (q < e && *q != ' ')
+    q++;
+  int oplen = q - op;
+
+  // オペランド（「, 」で区切る）
+  char *arg[5];
+  int alen[5], na = 0;
+  while (q < e && *q == ' ')
+    q++;
+  while (q < e) {
+    if (na == 5)
+      return false;
+    char *a = q;
+    while (q < e && *q != ',')
+      q++;
+    arg[na] = a;
+    alen[na++] = q - a;
+    if (q < e)
+      q++;
+    while (q < e && *q == ' ')
+      q++;
+  }
+
+  // 分岐・呼び出し・戻る・システム（BR32 も「R32」で終わるので先に）
+  static char *ctl[] = {"BR", "JMP", "CALL", "RET", "SWAP", "SYSCALL", "HLT", "ERET", "WFI", "NOP", NULL};
+  for (char **c = ctl; *c; c++)
+    if (!strncmp(op, *c, strlen(*c)))
+      return false;
+
+  bool first_def;
+  if (!strncmp(op, "LOAD", 4)) {
+    first_def = true;
+    in->mem = in->load = true;
+  } else if (!strncmp(op, "STORE", 5)) {
+    first_def = false;
+    in->mem = true;
+  } else if (ends_with(op, oplen, "R32") || ends_with(op, oplen, "I32") || !strncmp(op, "CMP", 3) ||
+             (oplen == 5 && !strncmp(op, "SEL32", 5))) {
+    first_def = true;
+  } else if (ends_with(op, oplen, "32") && na == 4) {
+    first_def = true;                  // M 形式「op rd, rs1, rB, off」
+    in->mem = true;
+  } else {
+    return false;
+  }
+  if (na == 0)
+    return false;
+  for (int i = 0; i < na; i++) {
+    int r = sched_reg(arg[i], alen[i]);
+    if (i == 0 && first_def) {
+      if (alen[0] == 2 && !strncmp(arg[0], "r0", 2))
+        continue;
+      if (r < 0)
+        return false;
+      in->def = r;
+    } else if (r >= 0) {
+      in->use[in->nuse++] = r;
+    }
+  }
+  return true;
+}
+
+static bool sched_uses(SchedInsn *in, int r) {
+  for (int i = 0; i < in->nuse; i++)
+    if (in->use[i] == r)
+      return true;
+  return false;
+}
+
+// b（後ろ）を a（前）より前に置けないか
+static bool sched_dep(SchedInsn *a, SchedInsn *b) {
+  if (a->mem && b->mem)
+    return true;
+  if (a->def >= 0 && (sched_uses(b, a->def) || a->def == b->def))
+    return true;
+  if (b->def >= 0 && sched_uses(a, b->def))
+    return true;
+  return false;
+}
+
+static void sched_block(SchedInsn *in, int n, FILE *out) {
+  uint64_t pred[SC_MAX], done = 0;
+  for (int j = 0; j < n; j++) {
+    pred[j] = 0;
+    for (int i = 0; i < j; i++)
+      if (sched_dep(&in[i], &in[j]))
+        pred[j] |= (uint64_t)1 << i;
+  }
+  int last_load = -1;
+  for (int k = 0; k < n; k++) {
+    int pick = -1;
+    for (int j = 0; j < n; j++) {
+      uint64_t bit = (uint64_t)1 << j;
+      if ((done & bit) || (pred[j] & ~done))
+        continue;
+      if (pick < 0)
+        pick = j;
+      if (last_load < 0 || !sched_uses(&in[j], last_load)) {
+        pick = j;
+        break;
+      }
+    }
+    done |= (uint64_t)1 << pick;
+    last_load = in[pick].load ? in[pick].def : -1;
+    fwrite(in[pick].p, 1, in[pick].len, out);
+    fputc('\n', out);
+  }
+}
+
+static void sched_emit(char *buf, FILE *out) {
+  SchedInsn in[SC_MAX];
+  int n = 0;
+  char *next;
+  for (char *p = buf; *p; p = next) {
+    int len = line_len(p, &next);
+    if (n < SC_MAX && sched_parse(p, len, &in[n])) {
+      n++;
+      continue;
+    }
+    sched_block(in, n, out);
+    n = 0;
+    if (sched_parse(p, len, &in[0])) {   // 長すぎて区切ったとき
+      n = 1;
+      continue;
+    }
+    fwrite(p, 1, next - p, out);
+  }
+  sched_block(in, n, out);
+}
+
 // 関数の本体を写す。そのとき
 //   ・飛び先がまた JMP32 なら、その先へ直接飛ぶ
 //   ・すぐ後ろのラベルへの JMP32 を消し、JMP32・RET32 の後ろの届かない命令を消す
@@ -2891,6 +3073,12 @@ static void emit_body(char *buf, bool keep_all) {
     fputs(buf, output_file);
     return;
   }
+
+  // 下の書き換えをした結果を buf2 に作り、最後に並べ替えて書く
+  FILE *real_out = output_file;
+  char *buf2;
+  size_t buf2len;
+  output_file = open_memstream(&buf2, &buf2len);
 
   HashMap labels = {};
   char *next;
@@ -2966,6 +3154,11 @@ static void emit_body(char *buf, bool keep_all) {
       prev = NULL;
   }
   free(labels.buckets);
+
+  fclose(output_file);
+  output_file = real_out;
+  sched_emit(buf2, output_file);
+  free(buf2);
 }
 
 static void emit_text(Obj *prog) {
