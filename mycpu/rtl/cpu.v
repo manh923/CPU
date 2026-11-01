@@ -268,16 +268,22 @@ module mycpu_cpu (
     for (k = 7; k >= 0; k = k - 1) if (irq_m[k]) irq_n = k[2:0];
   end
 
-  // ---- 除算（1 クロック 1bit、32 クロック。5.3） ----
+  wire        div_signed = num == 6'd5 || num == 6'd7;
+  // ---- 除算（1 クロック 2bit、16 クロック。割られる数が 16bit・8bit に収まれば 8・4 クロック。5.3） ----
+  // 引き戻し法の 1 段（余りを 1bit ずらして商の次の bit を入れ、割る数以上なら引く）を、1 クロックに 2 段つなぐ
   reg [31:0] div_q, div_b;
   reg [32:0] div_r;
   reg [5:0]  div_cnt;
   reg        div_negq, div_negr, div_rem;
-  wire [32:0] div_try = {div_r[31:0], div_q[31]};
-  wire        div_ge  = div_try >= {1'b0, div_b};
+  wire [32:0] div_try  = {div_r[31:0], div_q[31]};
+  wire        div_ge   = div_try >= {1'b0, div_b};
+  wire [31:0] div_r1   = div_ge ? div_try[31:0] - div_b : div_try[31:0];
+  wire [31:0] div_q1   = {div_q[30:0], div_ge};
+  wire [32:0] div_try2 = {div_r1, div_q1[31]};
+  wire        div_ge2  = div_try2 >= {1'b0, div_b};
+  wire [31:0] div_ua   = div_signed && a[31] ? -a : a;   // 割られる数の絶対値
   wire [31:0] div_qres = div_negq ? -div_q : div_q;
   wire [31:0] div_rres = div_negr ? -div_r[31:0] : div_r[31:0];
-  wire        div_signed = num == 6'd5 || num == 6'd7;
 
   // ---- 待つ条件（ハザード） ----
   // M の読み出しが終わっていないとき：その結果のレジスタを読む・書く命令（特殊レジスタなら全部）は待つ。
@@ -500,16 +506,17 @@ module mycpu_cpu (
       end
       if (x_eret) status <= (status & ~32'h3) | {30'd0, status[3:2]};
       if (x_div) begin
-        div_q <= div_signed && a[31] ? -a : a;
+        // 上の bit が 0 なら、その分は商も 0、余りも 0 のままなので飛ばす
+        div_q <= div_ua[31:8] == 24'd0 ? {div_ua[7:0], 24'd0} : div_ua[31:16] == 16'd0 ? {div_ua[15:0], 16'd0} : div_ua;
         div_b <= div_signed && b[31] ? -b : b;
         div_r <= 33'd0;
-        div_cnt <= 6'd32;
+        div_cnt <= div_ua[31:8] == 24'd0 ? 6'd4 : div_ua[31:16] == 16'd0 ? 6'd8 : 6'd16;
         div_negq <= div_signed && (a[31] ^ b[31]);
         div_negr <= div_signed && a[31];
         div_rem <= num >= 6'd7;
       end else if (es == E_DIV && div_cnt != 6'd0) begin
-        div_r <= div_ge ? div_try - {1'b0, div_b} : div_try;
-        div_q <= {div_q[30:0], div_ge};
+        div_r <= {1'b0, div_ge2 ? div_try2[31:0] - div_b : div_try2[31:0]};
+        div_q <= {div_q1[30:0], div_ge2};
         div_cnt <= div_cnt - 6'd1;
       end
 

@@ -275,6 +275,7 @@ const cases = [];
     { name: 'sdram', file: 'sdram.asm', sdram: true, trace: true },
     { name: 'pipeline', file: 'pipeline.asm', trace: true },
     { name: 'selftest32', file: 'selftest32.asm' },
+    { name: 'divrand', file: '../test/divrand.asm' },   // 割り算の回路（ランダムな 2000 組）
     { name: 'trap', file: 'trap.asm', regs: false },
     { name: 'fib', file: 'fib.asm', max: 60_000_000 },
     { name: 'console', file: 'console.asm', input },
