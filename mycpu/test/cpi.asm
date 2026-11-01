@@ -321,6 +321,45 @@ l15:
         CALL32 putdec
         ADDI32 r16, r0, s15
         CALL32 puts
+        ; 前へ飛ぶ BR（毎回飛ぶ）：履歴の表で「飛ぶ」と予測するようになる
+        ADDI32 r16, r0, n16
+        CALL32 puts
+        CMPEQI32 p4, r0, 0
+        ADDI32 r25, r0, 20
+        LOAD32_32 r24, r0, TIMER_COUNT
+l16:
+        BR32 p4, l16_0
+        ADDI32 r20, r20, 1
+l16_0:
+        BR32 p4, l16_1
+        ADDI32 r20, r20, 1
+l16_1:
+        BR32 p4, l16_2
+        ADDI32 r20, r20, 1
+l16_2:
+        BR32 p4, l16_3
+        ADDI32 r20, r20, 1
+l16_3:
+        BR32 p4, l16_4
+        ADDI32 r20, r20, 1
+l16_4:
+        BR32 p4, l16_5
+        ADDI32 r20, r20, 1
+l16_5:
+        BR32 p4, l16_6
+        ADDI32 r20, r20, 1
+l16_6:
+        BR32 p4, l16_7
+        ADDI32 r20, r20, 1
+l16_7:
+        ADDI32 r25, r25, -1
+        CMPNEI32 p1, r25, 0
+        BR32 p1, l16
+        LOAD32_32 r16, r0, TIMER_COUNT
+        SUBR32 r16, r16, r24
+        CALL32 putdec
+        ADDI32 r16, r0, s16
+        CALL32 puts
         ; SDRAM に置いたコード（命令キャッシュ）：ADDR32 × 8 のループを SDRAM に写して呼ぶ。最初のライン読み込みも込み
         ADDI32 r16, r0, n13
         CALL32 puts
@@ -421,7 +460,7 @@ s3: .asciz " [1.0]\n"
 n4: .asciz "MULR32: "
 s4: .asciz " [1.0]\n"
 n5: .asciz "BR (not taken): "
-s5: .asciz " [1.0]\n"
+s5: .asciz " [1.05]\n"
 n6: .asciz "LOAD32 RAM: "
 s6: .asciz " [2.0]\n"
 n7: .asciz "LOAD32 RAM (other reg): "
@@ -442,3 +481,5 @@ n14: .asciz "JMP32: "
 s14: .asciz " [1.0]\n"
 n15: .asciz "CALL32 + RET32 (pair): "
 s15: .asciz " [2.0]\n"
+n16: .asciz "BR forward (taken): "
+s16: .asciz " [1.1]\n"
