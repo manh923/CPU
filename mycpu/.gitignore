@@ -6,3 +6,6 @@ examples/*.hex
 # cc/ のビルドでできるもの（tools/cc.js が make で作る）
 cc/*.o
 cc/chibicc
+
+# tools/build-oss.sh の出力
+build-oss/

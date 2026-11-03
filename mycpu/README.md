@@ -257,6 +257,14 @@ Gowin EDA での手順：
 5. 合成・配置配線して書き込む。PC 側は 115200bps の端末ソフトでつなぐ
 6. SD カード：PC で FAT32（2GB 以下なら FAT16 も可）にフォーマットし、`node tools/mkdisk.js --files sdcard/` で作ったファイル（`MYDOS.SYS` も）をルートに写して挿す
 
+オープンソースのツールで作る（Gowin EDA の代わり）：
+
+1. `pip install yowasp-yosys yowasp-nextpnr-himbaechel-gowin apycula`
+2. `sh tools/build-oss.sh` で `build-oss/mycpu_tn20k.fs` ができる（合成・配置配線で 20〜30 分）
+3. `openFPGALoader -b tangnano20k build-oss/mycpu_tn20k.fs`（または Gowin Programmer）で書き込む
+
+ピンは `rtl/gowin/tangnano20k_oss.cst`（内蔵 SDRAM の 55 本と HDMI の n 側も書いてある。SDRAM のピンは Apicula の doc/sdram.md の表）。HDMI の出力は Apicula の例に合わせて `TLVDS_OBUF` に置き換えて合成する。nextpnr の結果は LUT 17,710 / 20,736（85%）・BSRAM 46 / 46・DSP 1。**CPU のクロックは見積もりで約 22MHz で、27MHz に届いていない**（データの口のキャッシュの当たり判定から、次に読む命令の番地・命令キャッシュ・分岐予測までが 1 クロックにつながっている経路）。
+
 **まだ実機で確かめていない。** ここ（クラウドの環境）では Gowin のツールを動かせないので、確かめたのは Icarus Verilog でのシミュレーションまで：
 
 - CPU：例題をシミュレータと同時に動かし、UART の出力と止まったときのレジスタが全部一致。`examples/pipeline.asm`（衝突をわざと起こすテスト）と `examples/sdram.asm` は、実行した命令の順番も 1 命令ずつ一致
