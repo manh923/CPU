@@ -244,6 +244,7 @@ module mycpu_soc #(
   reg  [16:0] fb_base;           // FB_BASE（SDRAM の中の番地の [22:6]）
   wire [22:0] vf_addr = {fb_base, 6'd0} + {7'd0, vf_y, 8'd0} + {9'd0, vf_y, 6'd0} + {14'd0, vf_n, 6'd0};
   wire vf_go = vf_pend && !sdr_busy && !dc_wb_go && !dc_fill_go && !uc_go;
+  (* ram_style = "distributed", syn_ramstyle = "distributed_ram" *)
   reg  [31:0] lbuf [0:255];      // 行バッファ（LUT の RAM。BSRAM は使い切っている）
 `ifdef MYCPU_SIM
   integer li;
@@ -411,6 +412,7 @@ module mycpu_soc #(
   // グラフィック（7.3）：モード・フレームバッファの番地・パレット（256 色 × 24bit。PAL_DATA に書くと番号が 1 進む。
   // 電源を入れたときは黒、リセットでは変わらない。LUT の RAM で、読むのは表示回路だけ）
   reg  [7:0]  pal_idx;
+  (* ram_style = "distributed", syn_ramstyle = "distributed_ram" *)   // LUT の RAM（BSRAM は使い切っている）
   reg  [23:0] pal [0:255];
 `ifdef MYCPU_SIM
   integer pi;
@@ -511,15 +513,20 @@ module mycpu_tdpram #(parameter integer AW = 13, parameter integer DEPTH = 1 << 
   input  wire [7:0]    dinb,
   output reg  [7:0]    doutb
 );
+  // 命令の口（A）が、データの口（B）が書いているのと同じ番地を同じクロックに読むことはあっても、その値は使わない
+  // （CPU は読んである命令に重なる書き込みを見つけたら読み直す）。no_rw_check がないと、合成ツールが古い値を返すために
+  // メモリを 2 重に持ち、BSRAM を倍使う
+  (* no_rw_check *)
   reg [7:0] mem [0:DEPTH - 1];
 `ifdef MYCPU_SIM
   integer i;   // シミュレーションでは 0 にしておく（実機の BSRAM も 0 から始まる）
   initial for (i = 0; i < DEPTH; i = i + 1) mem[i] = 8'd0;
 `endif
   always @(posedge clk) douta <= mem[addra];
+  // 書き込むクロックは読み出さない（mycpu_dpram と同じ理由。書き込みの返事の値は使わない）
   always @(posedge clk) begin
     if (web) mem[addrb] <= dinb;
-    doutb <= mem[addrb];
+    else doutb <= mem[addrb];
   end
 endmodule
 
@@ -588,9 +595,11 @@ module mycpu_dpram #(parameter integer AW = 12) (
   integer i;   // シミュレーションでは 0 にしておく（実機の BSRAM も 0 から始まる）
   initial for (i = 0; i < (1 << AW); i = i + 1) mem[i] = 8'd0;
 `endif
+  // 書き込むクロックは読み出さない（douta はそのまま）。書き込みの返事の値は誰も使わない（SWAP も読みと書きは別のクロック）。
+  // 書いたクロックに古い値を読む形（read-first）だと、合成ツールによっては 2 クロックの BSRAM にできず LUT に展開される
   always @(posedge clka) begin
     if (wea) mem[addra] <= dina;
-    douta <= mem[addra];
+    else douta <= mem[addra];
   end
   always @(posedge clkb) doutb <= mem[addrb];
 endmodule
