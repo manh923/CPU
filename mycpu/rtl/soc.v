@@ -516,7 +516,7 @@ module mycpu_tdpram #(parameter integer AW = 13, parameter integer DEPTH = 1 << 
   // 命令の口（A）が、データの口（B）が書いているのと同じ番地を同じクロックに読むことはあっても、その値は使わない
   // （CPU は読んである命令に重なる書き込みを見つけたら読み直す）。no_rw_check がないと、合成ツールが古い値を返すために
   // メモリを 2 重に持ち、BSRAM を倍使う
-  (* no_rw_check *)
+  (* no_rw_check, syn_ramstyle = "block_ram" *)
   reg [7:0] mem [0:DEPTH - 1];
 `ifdef MYCPU_SIM
   integer i;   // シミュレーションでは 0 にしておく（実機の BSRAM も 0 から始まる）
@@ -538,14 +538,17 @@ module mycpu_spram #(parameter integer AW = 11) (
   input  wire [7:0]    din,
   output reg  [7:0]    dout
 );
+  (* syn_ramstyle = "block_ram" *)
   reg [7:0] mem [0:(1 << AW) - 1];
 `ifdef MYCPU_SIM
   integer i;   // シミュレーションでは 0 にしておく（実機の BSRAM も 0 から始まる）
   initial for (i = 0; i < (1 << AW); i = i + 1) mem[i] = 8'd0;
 `endif
+  // 書き込むクロックは読み出さない（データ専用の RAM もデータキャッシュも、書き込みのクロックの読み出し値は使わない）。
+  // 書いたクロックに古い値を読む形だと、Gowin の合成が BSRAM にできず FF で組もうとする
   always @(posedge clk) begin
     if (we) mem[addr] <= din;
-    dout <= mem[addr];
+    else dout <= mem[addr];
   end
 endmodule
 
@@ -558,6 +561,7 @@ module mycpu_icram (
   input  wire [9:0]  addrb,
   input  wire [31:0] dinb
 );
+  (* syn_ramstyle = "block_ram" *)
   reg [31:0] mem [0:1023];
   always @(posedge clk) douta <= mem[addra];
   always @(posedge clk) if (web) mem[addrb] <= dinb;
@@ -590,6 +594,7 @@ module mycpu_dpram #(parameter integer AW = 12) (
   input  wire [AW-1:0] addrb,
   output reg  [7:0]    doutb
 );
+  (* syn_ramstyle = "block_ram" *)
   reg [7:0] mem [0:(1 << AW) - 1];
 `ifdef MYCPU_SIM
   integer i;   // シミュレーションでは 0 にしておく（実機の BSRAM も 0 から始まる）
