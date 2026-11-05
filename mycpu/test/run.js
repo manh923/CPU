@@ -275,6 +275,7 @@ const cases = [];
     { name: 'sdram', file: 'sdram.asm', sdram: true, trace: true },
     { name: 'pipeline', file: 'pipeline.asm', trace: true },
     { name: 'selftest32', file: 'selftest32.asm' },
+    { name: 'divrand', file: '../test/divrand.asm' },   // 割り算の回路（ランダムな 2000 組）
     { name: 'trap', file: 'trap.asm', regs: false },
     { name: 'fib', file: 'fib.asm', max: 60_000_000 },
     { name: 'console', file: 'console.asm', input },
@@ -311,6 +312,14 @@ if (spawnSync('gcc', ['--version']).error) {
   const fa = require('./cctest.js').runC([path.join(ROOT, 'test/fasmtest.c')], { max: 5_000_000_000 });
   check('浮動小数点のアセンブリ版（libc/softfloat.s）：この CPU で C 版とビット単位で同じ（double・float 2 万組ずつ）',
     fa.ok, fa.why + '\n' + fa.out.slice(0, 1000));
+  // 定数で割る式（コンパイラが掛け算の上位とシフトに変える）
+  const dv = require('./cctest.js').runC([path.join(ROOT, 'test/divtest.c')], { max: 3_000_000_000 });
+  check('定数で割る式（MULH・MULHU とシフトに変えたもの）：割り算の命令と同じ答え（定数 70 種・符号付き／なし・/ と %）',
+    dv.ok, dv.why + '\n' + dv.out.slice(0, 1000));
+  // タイマーの一周（約 71 分）をまたいでも、ゲームの 1 フレームの待ち方が止まらない
+  const ct = require('./cctest.js').runC([path.join(ROOT, 'test/clocktest.c')], { max: 100_000_000 });
+  check('clock() の一周をまたいでも、1 秒に 60 回の待ちが止まらない（BLOCKS・SNAKE・LIFE が 35 分で止まった不具合）',
+    ct.ok, ct.why + '\n' + ct.out.slice(0, 500));
 
   gcc('fltiotest', ['-Dstrtod=my_strtod', '-Dstrtof=my_strtof', '-Dstrtold=my_strtold', '-Datof=my_atof', 'test/fltiotest.c', 'libc/fltio.c']);
   r = runExe('fltiotest', ['20000']);

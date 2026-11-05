@@ -4,7 +4,8 @@
 //   E（実行）：解読・レジスタの読み出し・演算・分岐。演算の結果はこのクロックの終わりにレジスタへ書く。
 //              分岐はここで決まる。飛ぶときは、先に読んでいた命令を捨てて飛び先から読み直す（1 クロックの損）
 // 分岐予測：命令が届いたとき（F）に中身を見て、飛びそうなら次は飛び先から読む。JMP・CALL は必ず、
-//   BR は後ろへ飛ぶもの（ループ）だけ、RET は LR の値へ。E で答え合わせをし、外れたら読み直す（当たれば損なし）
+//   BR は履歴の表（番地で引く 2bit の数 64 個）で。まだ決まらない数のときは後ろへ飛ぶもの（ループ）だけ。RET は LR の値へ。
+//   E で答え合わせをし、外れたら読み直す（当たれば損なし）
 //   M（メモリ）：E で出した読み出しの返事を受け取り、レジスタに書く。そのレジスタを使う命令は 1 クロック待つ
 // 掛け算は 1 クロック、割り算は 32 クロック。M 形式（メモリの値で演算）と SWAP は返事が来るまで E で待つ。
 // 動作の基準は lib/cpu.js（シミュレータ）。食い違いはテストで見つける（UART・レジスタ・実行した命令の順番）。
@@ -268,16 +269,22 @@ module mycpu_cpu (
     for (k = 7; k >= 0; k = k - 1) if (irq_m[k]) irq_n = k[2:0];
   end
 
-  // ---- 除算（1 クロック 1bit、32 クロック。5.3） ----
+  wire        div_signed = num == 6'd5 || num == 6'd7;
+  // ---- 除算（1 クロック 2bit、16 クロック。割られる数が 16bit・8bit に収まれば 8・4 クロック。5.3） ----
+  // 引き戻し法の 1 段（余りを 1bit ずらして商の次の bit を入れ、割る数以上なら引く）を、1 クロックに 2 段つなぐ
   reg [31:0] div_q, div_b;
   reg [32:0] div_r;
   reg [5:0]  div_cnt;
   reg        div_negq, div_negr, div_rem;
-  wire [32:0] div_try = {div_r[31:0], div_q[31]};
-  wire        div_ge  = div_try >= {1'b0, div_b};
+  wire [32:0] div_try  = {div_r[31:0], div_q[31]};
+  wire        div_ge   = div_try >= {1'b0, div_b};
+  wire [31:0] div_r1   = div_ge ? div_try[31:0] - div_b : div_try[31:0];
+  wire [31:0] div_q1   = {div_q[30:0], div_ge};
+  wire [32:0] div_try2 = {div_r1, div_q1[31]};
+  wire        div_ge2  = div_try2 >= {1'b0, div_b};
+  wire [31:0] div_ua   = div_signed && a[31] ? -a : a;   // 割られる数の絶対値
   wire [31:0] div_qres = div_negq ? -div_q : div_q;
   wire [31:0] div_rres = div_negr ? -div_r[31:0] : div_r[31:0];
-  wire        div_signed = num == 6'd5 || num == 6'd7;
 
   // ---- 待つ条件（ハザード） ----
   // M の読み出しが終わっていないとき：その結果のレジスタを読む・書く命令（特殊レジスタなら全部）は待つ。
@@ -312,6 +319,7 @@ module mycpu_cpu (
   reg        x_exc;              // 例外・割り込みに入る
   reg [31:0] x_cause;
   reg        x_eret, x_halt, x_div, x_mload, x_mstore, x_latch, x_trace;
+  reg        x_bru, x_brt;       // 条件分岐を実行した（履歴を直す）・飛んだ
   reg [1:0]  x_hc;
   reg [2:0]  x_es;
 
@@ -321,12 +329,17 @@ module mycpu_cpu (
     hit8 = a[31:2] == w || a[31:2] + 30'd1 == w;
   endfunction
   wire arr = i_rvalid && f_out && !f_kill;                         // 読んだ命令が届いた
-  // 分岐予測：届いた命令が JMP・CALL・後ろへの BR（即値 32bit）か RET なら、次は飛び先から読む
+  // 条件分岐（BR）の履歴：番地の bit 7〜2 で引く 2bit の数。飛んだら +1、飛ばなかったら −1（0〜3 で止める）。
+  // 2・3 なら飛ぶと予測、0 なら飛ばない、1（最初の値）なら後ろへ飛ぶもの（ループの戻り）だけ飛ぶと予測
+  reg  [1:0]  bht [0:63];
+  wire [1:0]  p_bc  = bht[f_aout[7:2]];
+  // 分岐予測：届いた命令が JMP・CALL・飛びそうな BR（即値 32bit）か RET なら、次は飛び先から読む
   wire [3:0]  p_grp = i_rdata[5:2];
   wire [7:0]  p_op  = i_rdata[13:6];
   wire [31:0] p_imm = i_rdata[63:32];
   wire p_jmp = p_grp == 4'd5 && i_rdata[1:0] == 2'd1 && !i_err[1] && p_imm[1:0] == 2'd0 &&
-               (p_op == 8'h00 || p_op == 8'h02 || (p_op == 8'h01 && i_rdata[25:20] != 6'd0 && p_imm < f_aout));
+               (p_op == 8'h00 || p_op == 8'h02 ||
+                (p_op == 8'h01 && i_rdata[25:20] != 6'd0 && (p_bc[1] || (p_bc == 2'd1 && p_imm < f_aout))));
   // RET：LR の値。E の命令が LR に書くならその値、LR への読み出しの返事がこのクロックに来たならその値
   // （関数の終わりの「LOAD32 lr → ADDI32 sp → RET32」）。返事を待っているときは予測しない
   wire m_lr = m_load && m_rd == 6'd50;
@@ -355,7 +368,7 @@ module mycpu_cpu (
   always @* begin
     x_adv = 1'b0; x_redir = 1'b0; x_rpc = 32'd0; x_rhold = 1'b0; x_wr = 1'b0; x_wi = 6'd0; x_wv = 32'd0;
     x_exc = 1'b0; x_cause = 32'd0; x_eret = 1'b0; x_halt = 1'b0; x_hc = 2'd0; x_div = 1'b0;
-    x_mload = 1'b0; x_mstore = 1'b0; x_latch = 1'b0; x_trace = 1'b0; x_es = es;
+    x_mload = 1'b0; x_mstore = 1'b0; x_latch = 1'b0; x_trace = 1'b0; x_es = es; x_bru = 1'b0; x_brt = 1'b0;
     case (es)
       E_RUN:
         if (!e_valid) x_adv = 1'b1;
@@ -407,8 +420,12 @@ module mycpu_cpu (
               case (op)
                 // 予測が当たっていれば、次の命令はもう飛び先から読んである
                 8'h00: if (e_pred) t_fin; else t_jump(imm);
-                8'h01: if (pr[rs1[2:0]] && rs1 != 6'd0) begin if (e_pred) t_fin; else t_jump(imm); end
-                       else begin if (e_pred) t_jump(next_pc); else t_fin; end
+                8'h01: begin
+                  x_bru = rs1 != 6'd0;
+                  x_brt = pr[rs1[2:0]] && rs1 != 6'd0;
+                  if (pr[rs1[2:0]] && rs1 != 6'd0) begin if (e_pred) t_fin; else t_jump(imm); end
+                  else begin if (e_pred) t_jump(next_pc); else t_fin; end
+                end
                 8'h02: begin t_wr(6'd50, next_pc); if (e_pred) t_fin; else t_jump(imm); end
                 8'h03: if (e_pred && e_ptgt == lr) t_fin; else t_jump(lr);
                 8'h04: t_jump(a);
@@ -472,6 +489,7 @@ module mycpu_cpu (
       cause <= CAUSE_RESET; evec <= 32'd0; status <= 32'd0;
       pr <= 7'd0;
       for (i = 0; i < 16; i = i + 1) gpr[i] <= 32'd0;
+      for (i = 0; i < 64; i = i + 1) bht[i] <= 2'd1;
       halt_code <= 2'd0;
       e_valid <= 1'b0; e_badpc <= 1'b0; e_seen <= 1'b0; pc <= 32'd0; ir <= 32'd0; imm <= 32'd0; e_ferr <= 2'b00;
       e_pred <= 1'b0; e_ptgt <= 32'd0;
@@ -491,6 +509,8 @@ module mycpu_cpu (
       es <= x_es;
       if (x_trace) e_seen <= 1'b1;
       if (x_wr) write_reg(x_wi, x_wv);
+      if (x_bru) bht[pc[7:2]] <= x_brt ? (bht[pc[7:2]] == 2'd3 ? 2'd3 : bht[pc[7:2]] + 2'd1)
+                                       : (bht[pc[7:2]] == 2'd0 ? 2'd0 : bht[pc[7:2]] - 2'd1);
       if (x_latch) mem_data <= d_rdata;
       if (x_halt) halt_code <= x_hc;
       if (x_exc) begin
@@ -500,16 +520,17 @@ module mycpu_cpu (
       end
       if (x_eret) status <= (status & ~32'h3) | {30'd0, status[3:2]};
       if (x_div) begin
-        div_q <= div_signed && a[31] ? -a : a;
+        // 上の bit が 0 なら、その分は商も 0、余りも 0 のままなので飛ばす
+        div_q <= div_ua[31:8] == 24'd0 ? {div_ua[7:0], 24'd0} : div_ua[31:16] == 16'd0 ? {div_ua[15:0], 16'd0} : div_ua;
         div_b <= div_signed && b[31] ? -b : b;
         div_r <= 33'd0;
-        div_cnt <= 6'd32;
+        div_cnt <= div_ua[31:8] == 24'd0 ? 6'd4 : div_ua[31:16] == 16'd0 ? 6'd8 : 6'd16;
         div_negq <= div_signed && (a[31] ^ b[31]);
         div_negr <= div_signed && a[31];
         div_rem <= num >= 6'd7;
       end else if (es == E_DIV && div_cnt != 6'd0) begin
-        div_r <= div_ge ? div_try - {1'b0, div_b} : div_try;
-        div_q <= {div_q[30:0], div_ge};
+        div_r <= {1'b0, div_ge2 ? div_try2[31:0] - div_b : div_try2[31:0]};
+        div_q <= {div_q1[30:0], div_ge2};
         div_cnt <= div_cnt - 6'd1;
       end
 

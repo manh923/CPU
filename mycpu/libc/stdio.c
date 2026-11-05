@@ -503,10 +503,23 @@ static int utoa_rev(unsigned long long v, int base, int upper, char *tmp) {
   char *digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
   unsigned u = (unsigned)v;
   int n = 0;
-  do {
-    tmp[n++] = digits[u % base];
-    u /= base;
-  } while (u);
+  // 割る数が定数なら、コンパイラが割り算の命令（34 クロック）を掛け算とシフトに変える
+  if (base == 10) {
+    do {
+      tmp[n++] = '0' + u % 10;
+      u /= 10;
+    } while (u);
+  } else if (base == 16) {
+    do {
+      tmp[n++] = digits[u & 15];
+      u >>= 4;
+    } while (u);
+  } else {
+    do {
+      tmp[n++] = digits[u % base];
+      u /= base;
+    } while (u);
+  }
   return n;
 }
 

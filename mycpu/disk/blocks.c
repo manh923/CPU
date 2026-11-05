@@ -168,10 +168,13 @@ static void step(void) {
   }
 }
 
+// clock() からの経過（µs）。タイマーは 32bit で一周する（約 71 分）ので、時刻どうしは大小でなく差で比べる
+static long since(unsigned long t) { return (long)((unsigned long)clock() - t); }
+
 int main(void) {
   gfx_mode(1);
   new_level();
-  clock_t next = clock();
+  unsigned long next = clock();
   for (;;) {
     // キー：← → A D でパドル、スペースで玉を出す、ESC で終わり。押したら見せるモードは終わり
     while (kbhit()) {
@@ -211,9 +214,9 @@ int main(void) {
     gfx_present(buf);
     // 1 秒に 60 回まで
     next += CLOCKS_PER_SEC / 60;
-    while (clock() < next)
+    while (since(next) < 0)
       ;
-    if (clock() > next + CLOCKS_PER_SEC)
+    if (since(next) > CLOCKS_PER_SEC)   // 遅れすぎたら追いつくのをやめる
       next = clock();
   }
 }

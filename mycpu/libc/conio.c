@@ -16,8 +16,8 @@ static int rawgetc(void) { return __syscall(SYS_GETC, 0, 0, 0) & 0xff; }
 
 // 次のキーが 30ms 以内に来るか（ESC 1 つと、ESC で始まる並びを見分ける）
 static int soon(void) {
-  clock_t t0 = clock();
-  while (clock() - t0 < 30000)
+  unsigned long t0 = clock();
+  while ((unsigned long)clock() - t0 < 30000)
     if (kbhit())
       return 1;
   return 0;

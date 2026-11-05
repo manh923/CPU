@@ -989,12 +989,184 @@ static bool imm_ok(Node *node, int32_t v) {
   return true;
 }
 
-// dst ← lr op r。r が即値なら imm_ok であること、レジスタ・メモリならそのまま
-static void emit_arith(Node *node, int dst, int lr, Opnd *r) {
+// ---- 定数で割る：割り算の命令（34 クロック）の代わりに、掛け算の上位（MULH・MULHU）とシフトで ----
+// （Hacker's Delight 10 章。GCC なども同じことをする）
+
+// 符号なしの d（2 以上、2 の累乗でない）：x / d = MULHU(x, m) >> s となる m（32bit に収まるもの）を探す。なければ false
+static bool udiv_magic(uint32_t d, uint32_t *m, int *s) {
+  for (int k = 0; k < 32; k++) {
+    uint64_t p = (uint64_t)1 << (32 + k);
+    uint64_t mm = (p + d - 1) / d;               // 切り上げ
+    if (mm >> 32)
+      return false;
+    if (mm * d - p <= ((uint64_t)1 << k)) {      // 誤差が小さければ、どの x でも合う
+      *m = (uint32_t)mm;
+      *s = k;
+      return true;
+    }
+  }
+  return false;
+}
+
+// 符号付きの d（|d| が 2 以上で 2 の累乗でない）：x / d = MULH(x, M)（± x）>> s に、負なら 1 を足したもの
+static void sdiv_magic(int32_t d, int32_t *mag, int *sh) {
+  uint32_t two31 = 0x80000000u;
+  uint32_t ad = d < 0 ? 0u - (uint32_t)d : (uint32_t)d;
+  uint32_t t = two31 + ((uint32_t)d >> 31);
+  uint32_t anc = t - 1 - t % ad;
+  int p = 31;
+  uint32_t q1 = two31 / anc, r1 = two31 - q1 * anc;
+  uint32_t q2 = two31 / ad, r2 = two31 - q2 * ad, delta;
+  do {
+    p++;
+    q1 *= 2; r1 *= 2;
+    if (r1 >= anc) { q1++; r1 -= anc; }
+    q2 *= 2; r2 *= 2;
+    if (r2 >= ad) { q2++; r2 -= ad; }
+    delta = ad - r2;
+  } while (q1 < delta || (q1 == delta && r1 == 0));
+  *mag = (int32_t)(q2 + 1);
+  if (d < 0)
+    *mag = (int32_t)(0u - (uint32_t)*mag);
+  *sh = p - 32;
+}
+
+static int log2_exact(uint32_t v) {
+  if (v == 0 || (v & (v - 1)))
+    return -1;
+  int k = 0;
+  while (v > 1) { v >>= 1; k++; }
+  return k;
+}
+
+// node（定数 v で割る ND_DIV・ND_MOD）を掛け算でやるのに要る、lr 以外の作業用レジスタの数（dst が lr でなければ dst も数に入る）。
+// やらない（割り算の命令を使う）なら -1
+static int divc_regs(Node *node, int32_t v) {
+  if (node->kind != ND_DIV && node->kind != ND_MOD)
+    return -1;
+  bool mod = node->kind == ND_MOD;
+  uint32_t m;
+  int s;
+  if (node->ty->is_unsigned) {
+    uint32_t d = v;
+    if (d < 2)
+      return -1;
+    if (log2_exact(d) >= 0)
+      return 0;
+    if (udiv_magic(d, &m, &s))
+      return mod ? 1 : 0;
+    return 2;
+  }
+  if (v == 0 || v == 1 || v == -1 || v == INT32_MIN)
+    return -1;
+  uint32_t ad = v < 0 ? 0u - (uint32_t)v : (uint32_t)v;
+  if (log2_exact(ad) >= 0)
+    return 1;
+  return 2;
+}
+
+// dst ← lr / v か lr % v。w・u は lr と違う作業用レジスタ（divc_regs の数だけ。dst でもよい）
+static void emit_divc(Node *node, int dst, int lr, int32_t v, int w, int u) {
+  bool mod = node->kind == ND_MOD;
+  uint32_t m;
+  int s;
+  if (node->ty->is_unsigned) {
+    uint32_t d = v;
+    int k = log2_exact(d);
+    if (k >= 0) {
+      if (mod)
+        println("  ANDI32 r%d, r%d, %d", dst, lr, (int32_t)(d - 1));
+      else
+        println("  SHRI32 r%d, r%d, %d", dst, lr, k);
+      return;
+    }
+    int q = mod ? w : dst;                       // 商を置くところ
+    if (udiv_magic(d, &m, &s)) {
+      println("  MULHUI32 r%d, r%d, %d", q, lr, (int32_t)m);
+      if (s)
+        println("  SHRI32 r%d, r%d, %d", q, q, s);
+    } else {
+      // 33bit 要る m：t = MULHU(x, m')、商 = (t + ((x - t) >> 1)) >> (l - 1)
+      int l = 0;
+      while (l < 32 && ((uint64_t)1 << l) < d)
+        l++;
+      uint32_t mm = (uint32_t)((((uint64_t)1 << 32) * (((uint64_t)1 << l) - d)) / d + 1);
+      println("  MULHUI32 r%d, r%d, %d", w, lr, (int32_t)mm);
+      println("  SUBR32 r%d, r%d, r%d", u, lr, w);
+      println("  SHRI32 r%d, r%d, 1", u, u);
+      println("  ADDR32 r%d, r%d, r%d", u, u, w);
+      println("  SHRI32 r%d, r%d, %d", q, u, l - 1);
+    }
+    if (mod) {
+      println("  MULI32 r%d, r%d, %d", w, w, (int32_t)d);
+      println("  SUBR32 r%d, r%d, r%d", dst, lr, w);
+    }
+    return;
+  }
+
+  uint32_t ad = v < 0 ? 0u - (uint32_t)v : (uint32_t)v;
+  int k = log2_exact(ad);
+  if (k >= 0) {
+    // 負の数は 0 の方へ切り捨てるので、先に 2^k - 1 を足す
+    if (k == 1) {
+      println("  SHRI32 r%d, r%d, 31", w, lr);
+    } else {
+      println("  SARI32 r%d, r%d, 31", w, lr);
+      println("  SHRI32 r%d, r%d, %d", w, w, 32 - k);
+    }
+    println("  ADDR32 r%d, r%d, r%d", w, w, lr);
+    if (mod) {                                   // 余りの符号は割られる数と同じ（割る数の符号は関係ない）
+      println("  ANDI32 r%d, r%d, %d", w, w, (int32_t)(0u - ad));
+      println("  SUBR32 r%d, r%d, r%d", dst, lr, w);
+    } else {
+      println("  SARI32 r%d, r%d, %d", dst, w, k);
+      if (v < 0)
+        println("  SUBR32 r%d, r0, r%d", dst, dst);
+    }
+    return;
+  }
+  int32_t mag;
+  sdiv_magic(v, &mag, &s);
+  println("  MULHI32 r%d, r%d, %d", w, lr, mag);
+  if (v > 0 && mag < 0)
+    println("  ADDR32 r%d, r%d, r%d", w, w, lr);
+  else if (v < 0 && mag > 0)
+    println("  SUBR32 r%d, r%d, r%d", w, w, lr);
+  if (s)
+    println("  SARI32 r%d, r%d, %d", w, w, s);
+  println("  SHRI32 r%d, r%d, 31", u, w);        // 負なら 1 足す（0 の方へ切り捨て）
+  if (mod) {
+    println("  ADDR32 r%d, r%d, r%d", w, w, u);
+    println("  MULI32 r%d, r%d, %d", w, w, v);
+    println("  SUBR32 r%d, r%d, r%d", dst, lr, w);
+  } else {
+    println("  ADDR32 r%d, r%d, r%d", dst, w, u);
+  }
+}
+
+// dst ← lr op r。r が即値なら imm_ok であること、レジスタ・メモリならそのまま。
+// scratch なら r17・r18 のうち lr・dst でないものを作業用に使ってよい（定数で割るとき）
+static void emit_arith(Node *node, int dst, int lr, Opnd *r, bool scratch) {
   char *op = arith_name(node);
   if (r->kind == O_IMM) {
     int32_t v = r->imm;
     NodeKind k = node->kind;
+    int need = divc_regs(node, v);
+    if (need >= 0) {
+      int pool[3], n = 0;
+      if (dst != lr)
+        pool[n++] = dst;
+      if (scratch) {
+        if (lr != 17 && dst != 17)
+          pool[n++] = 17;
+        if (lr != 18 && dst != 18)
+          pool[n++] = 18;
+      }
+      if (n >= need) {
+        emit_divc(node, dst, lr, v, n > 0 ? pool[0] : 0, n > 1 ? pool[1] : 0);
+        return;
+      }
+    }
     if ((v == 0 && (k == ND_ADD || k == ND_SUB || k == ND_BITOR || k == ND_BITXOR || k == ND_SHL || k == ND_SHR)) ||
         (v == 1 && (k == ND_MUL || k == ND_DIV)))
       move(dst, lr);
@@ -1027,7 +1199,7 @@ static void gen_arith(Node *node, int dst) {
     r.reg = opnd_reg(&r, lr == 17 ? 18 : 17);
     r.kind = O_REG;
   }
-  emit_arith(node, dst, lr, &r);
+  emit_arith(node, dst, lr, &r, true);
 }
 
 // 整数を読む式（メモリの変数・*p・p->x。ビットフィールドでないもの）か
@@ -1085,7 +1257,7 @@ static bool is_cheap(Node *node) {
     return is_int32(node->ty) && is_cheap(node->lhs);
   }
   if (arith_name(node) && is_int32(node->lhs->ty) && is_int32(node->rhs->ty))
-    return is_cheap(node->lhs) && leaf(node->rhs, &r) && (r.kind != O_IMM || imm_ok(node, r.imm));
+    return is_cheap(node->lhs) && leaf(node->rhs, &r) && (r.kind != O_IMM || (imm_ok(node, r.imm) && divc_regs(node, r.imm) <= 0));
   return false;
 }
 
@@ -1150,7 +1322,7 @@ static void gen_cheap(Node *node, int dst) {
   }
   int lr = gen_cheap_val(node->lhs, dst);
   leaf(node->rhs, &r);
-  emit_arith(node, dst, lr, &r);
+  emit_arith(node, dst, lr, &r, false);
 }
 
 // 比べ方
@@ -2710,6 +2882,188 @@ static void jump_target(HashMap *labels, char **t, int *tlen) {
   }
 }
 
+
+// ---- 命令の並べ替え：読み出した値をすぐ次の命令で使うと 1 クロック待つので、間にほかの命令を挟む ----
+// ラベル・分岐・呼び出し・知らない命令で区切った並び（基本ブロック）の中だけで、依存関係を守って並べ直す。
+// レジスタの読み書きの順（書く→読む・読む→書く・書く→書く）と、メモリを読み書きする命令どうしの順（I/O もあるので読み出しどうしも）は変えない。
+// 並べ方：まだ置いていない命令のうち、前に置くべきものが全部置いてあるものを、元の順に見て、
+// 直前に置いた読み出しの値を使わない最初のもの（なければ最初のもの）を置く
+
+enum { SC_MAX = 64 };                  // 一度に並べ直す命令の数（長いブロックは区切る）
+
+typedef struct {
+  char *p;                             // 行（改行まで）
+  int len;
+  int def;                             // 書くレジスタ（なければ -1）
+  int use[4], nuse;                    // 読むレジスタ
+  bool mem, load;                      // メモリを読み書きする・LOAD（値は次の命令で待つ）
+} SchedInsn;
+
+// レジスタの名前の番号：r0〜r63 は 0〜63、sp 64、lr 65、p1〜p7 は 71〜77。レジスタでなければ -1。r0 も -1（いつも 0）
+static int sched_reg(char *s, int len) {
+  if (len == 2 && !strncmp(s, "sp", 2))
+    return 64;
+  if (len == 2 && !strncmp(s, "lr", 2))
+    return 65;
+  if (len == 2 && s[0] == 'p' && s[1] >= '1' && s[1] <= '7')
+    return 70 + s[1] - '0';
+  if (len < 2 || len > 3 || s[0] != 'r')
+    return -1;
+  int n = 0;
+  for (int i = 1; i < len; i++) {
+    if (!isdigit((unsigned char)s[i]))
+      return -1;
+    n = n * 10 + s[i] - '0';
+  }
+  return n == 0 || n > 63 ? -1 : n;
+}
+
+static bool ends_with(char *s, int len, char *suf) {
+  int n = strlen(suf);
+  return len >= n && !strncmp(s + len - n, suf, n);
+}
+
+// 行を調べる。並べ替えてよい命令なら true
+static bool sched_parse(char *p, int len, SchedInsn *in) {
+  in->p = p;
+  in->len = len;
+  in->def = -1;
+  in->nuse = 0;
+  in->mem = in->load = false;
+  if (len < 3 || p[0] != ' ' || p[1] != ' ' || !isupper((unsigned char)p[2]))
+    return false;
+  char *op = p + 2, *e = p + len;
+  char *q = op;
+  while (q < e && *q != ' ')
+    q++;
+  int oplen = q - op;
+
+  // オペランド（「, 」で区切る）
+  char *arg[5];
+  int alen[5], na = 0;
+  while (q < e && *q == ' ')
+    q++;
+  while (q < e) {
+    if (na == 5)
+      return false;
+    char *a = q;
+    while (q < e && *q != ',')
+      q++;
+    arg[na] = a;
+    alen[na++] = q - a;
+    if (q < e)
+      q++;
+    while (q < e && *q == ' ')
+      q++;
+  }
+
+  // 分岐・呼び出し・戻る・システム（BR32 も「R32」で終わるので先に）
+  static char *ctl[] = {"BR", "JMP", "CALL", "RET", "SWAP", "SYSCALL", "HLT", "ERET", "WFI", "NOP", NULL};
+  for (char **c = ctl; *c; c++)
+    if (!strncmp(op, *c, strlen(*c)))
+      return false;
+
+  bool first_def;
+  if (!strncmp(op, "LOAD", 4)) {
+    first_def = true;
+    in->mem = in->load = true;
+  } else if (!strncmp(op, "STORE", 5)) {
+    first_def = false;
+    in->mem = true;
+  } else if (ends_with(op, oplen, "R32") || ends_with(op, oplen, "I32") || !strncmp(op, "CMP", 3) ||
+             (oplen == 5 && !strncmp(op, "SEL32", 5))) {
+    first_def = true;
+  } else if (ends_with(op, oplen, "32") && na == 4) {
+    first_def = true;                  // M 形式「op rd, rs1, rB, off」
+    in->mem = true;
+  } else {
+    return false;
+  }
+  if (na == 0)
+    return false;
+  for (int i = 0; i < na; i++) {
+    int r = sched_reg(arg[i], alen[i]);
+    if (i == 0 && first_def) {
+      if (alen[0] == 2 && !strncmp(arg[0], "r0", 2))
+        continue;
+      if (r < 0)
+        return false;
+      in->def = r;
+    } else if (r >= 0) {
+      in->use[in->nuse++] = r;
+    }
+  }
+  return true;
+}
+
+static bool sched_uses(SchedInsn *in, int r) {
+  for (int i = 0; i < in->nuse; i++)
+    if (in->use[i] == r)
+      return true;
+  return false;
+}
+
+// b（後ろ）を a（前）より前に置けないか
+static bool sched_dep(SchedInsn *a, SchedInsn *b) {
+  if (a->mem && b->mem)
+    return true;
+  if (a->def >= 0 && (sched_uses(b, a->def) || a->def == b->def))
+    return true;
+  if (b->def >= 0 && sched_uses(a, b->def))
+    return true;
+  return false;
+}
+
+static void sched_block(SchedInsn *in, int n, FILE *out) {
+  uint64_t pred[SC_MAX], done = 0;
+  for (int j = 0; j < n; j++) {
+    pred[j] = 0;
+    for (int i = 0; i < j; i++)
+      if (sched_dep(&in[i], &in[j]))
+        pred[j] |= (uint64_t)1 << i;
+  }
+  int last_load = -1;
+  for (int k = 0; k < n; k++) {
+    int pick = -1;
+    for (int j = 0; j < n; j++) {
+      uint64_t bit = (uint64_t)1 << j;
+      if ((done & bit) || (pred[j] & ~done))
+        continue;
+      if (pick < 0)
+        pick = j;
+      if (last_load < 0 || !sched_uses(&in[j], last_load)) {
+        pick = j;
+        break;
+      }
+    }
+    done |= (uint64_t)1 << pick;
+    last_load = in[pick].load ? in[pick].def : -1;
+    fwrite(in[pick].p, 1, in[pick].len, out);
+    fputc('\n', out);
+  }
+}
+
+static void sched_emit(char *buf, FILE *out) {
+  SchedInsn in[SC_MAX];
+  int n = 0;
+  char *next;
+  for (char *p = buf; *p; p = next) {
+    int len = line_len(p, &next);
+    if (n < SC_MAX && sched_parse(p, len, &in[n])) {
+      n++;
+      continue;
+    }
+    sched_block(in, n, out);
+    n = 0;
+    if (sched_parse(p, len, &in[0])) {   // 長すぎて区切ったとき
+      n = 1;
+      continue;
+    }
+    fwrite(p, 1, next - p, out);
+  }
+  sched_block(in, n, out);
+}
+
 // 関数の本体を写す。そのとき
 //   ・飛び先がまた JMP32 なら、その先へ直接飛ぶ
 //   ・すぐ後ろのラベルへの JMP32 を消し、JMP32・RET32 の後ろの届かない命令を消す
@@ -2719,6 +3073,12 @@ static void emit_body(char *buf, bool keep_all) {
     fputs(buf, output_file);
     return;
   }
+
+  // 下の書き換えをした結果を buf2 に作り、最後に並べ替えて書く
+  FILE *real_out = output_file;
+  char *buf2;
+  size_t buf2len;
+  output_file = open_memstream(&buf2, &buf2len);
 
   HashMap labels = {};
   char *next;
@@ -2794,6 +3154,11 @@ static void emit_body(char *buf, bool keep_all) {
       prev = NULL;
   }
   free(labels.buckets);
+
+  fclose(output_file);
+  output_file = real_out;
+  sched_emit(buf2, output_file);
+  free(buf2);
 }
 
 static void emit_text(Obj *prog) {
