@@ -17,6 +17,7 @@ module mycpu_uart #(
   input  wire       rxd
 );
   // ---- 送信 ----
+  (* ram_style = "distributed", syn_ramstyle = "distributed_ram" *)   // 小さいので LUT の RAM（BSRAM は使い切っている）
   reg [7:0] tq [0:15];
   reg [4:0] tw, tr;   // 書き込み・読み出し位置（5bit 目で満杯と空を見分ける）
   assign tx_ready = (tw - tr) != 5'd16;
@@ -49,6 +50,7 @@ module mycpu_uart #(
   end
 
   // ---- 受信 ----
+  (* ram_style = "distributed", syn_ramstyle = "distributed_ram" *)   // 小さいので LUT の RAM（BSRAM は使い切っている）
   reg [7:0] rq [0:15];
   reg [4:0] rw, rr;
   assign rx_valid = rw != rr;

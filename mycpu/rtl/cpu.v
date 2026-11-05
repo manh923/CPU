@@ -331,6 +331,7 @@ module mycpu_cpu (
   wire arr = i_rvalid && f_out && !f_kill;                         // 読んだ命令が届いた
   // 条件分岐（BR）の履歴：番地の bit 7〜2 で引く 2bit の数。飛んだら +1、飛ばなかったら −1（0〜3 で止める）。
   // 2・3 なら飛ぶと予測、0 なら飛ばない、1（最初の値）なら後ろへ飛ぶもの（ループの戻り）だけ飛ぶと予測
+  (* ram_style = "distributed", syn_ramstyle = "distributed_ram" *)   // 小さいので LUT の RAM（BSRAM は使い切っている）
   reg  [1:0]  bht [0:63];
   wire [1:0]  p_bc  = bht[f_aout[7:2]];
   // 分岐予測：届いた命令が JMP・CALL・飛びそうな BR（即値 32bit）か RET なら、次は飛び先から読む

@@ -143,6 +143,7 @@ module mycpu_soc #(
   //   外れたら SDRAM からライン 1 本（16 語）をバーストで読む。そのラインがデータキャッシュで書き換えられて
   //   いれば、先に SDRAM へ書き戻させる。データの口で SDRAM の番地に書いたら、そのラインを無効にする
   //   （読み込んだプログラム・自分を書き換えるコードでも正しく動く）
+  (* ram_style = "distributed", syn_ramstyle = "distributed_ram" *)   // 小さいので LUT の RAM（BSRAM は使い切っている）
   reg  [9:0]  ic_tag [0:127];
   reg  [127:0] ic_valid;
   // あるかどうか（関数にすると、タグが変わってもシミュレーションで計算し直されないので、式で書く）
@@ -180,6 +181,7 @@ module mycpu_soc #(
   //   外れたら d_gnt を 0 にしたまま：今のラインが書き換えられていれば（汚れ）16 語を wbuf に写して SDRAM に
   //   バーストで書き戻し、それから新しいラインを 16 語バーストで読む。読み終えると、待っていた要求が当たる。
   //   書き込みも、ラインを読んでから書く（ライトアロケート）
+  (* ram_style = "distributed", syn_ramstyle = "distributed_ram" *)   // 小さいので LUT の RAM（BSRAM は使い切っている）
   reg  [9:0]   dc_tag [0:127];
   reg  [127:0] dc_valid, dc_dirty;
   wire [6:0]   d_idx = d_addr[12:6];
@@ -191,6 +193,7 @@ module mycpu_soc #(
   reg        dc_fill_after;      // 書き戻した後に読み込む（0 = 命令キャッシュのための書き戻しだけ）
   reg [4:0]  dc_cnt;             // wbuf に写した語の数（読み出しは 1 クロック遅れて届く）
   reg [3:0]  dc_n;               // ライン読み込みで届いた語の数
+  (* ram_style = "distributed", syn_ramstyle = "distributed_ram" *)   // 小さいので LUT の RAM（BSRAM は使い切っている）
   reg [31:0] wbuf [0:15];        // 書き戻す 16 語
   wire [3:0] sdr_bidx;
   // データ（4 バイト × 2048、1 ポート）：ふだんはデータの口、外れの処理中は写す・読み込む場所
