@@ -102,10 +102,16 @@ module mycpu_soc #(
   wire [11:0] i_rw  = i_addr[13:2];
   wire [11:0] i_rw1 = i_rw + 12'd1;
   wire [31:0] rom_ie, rom_io, rom_de, rom_do;
+  // ROM の書き込み口：ROM への書き込みは d_err になって d_go が立たないので、この信号は 1 にならない。
+  // それでも書き込み口があると、Gowin の合成は 2 ポートの BSRAM（DPB）にする（ROM のままだと読み出し口ごとに
+  // 1 ポートの ROM を丸ごと写して BSRAM を倍使い、46 個に入らない）。合成ツールが 0 と見抜いて消さないよう残させる
+  (* syn_keep = 1, keep *) wire rom_we = d_go && sel_rom && wr;
   mycpu_rom2 #(.HEX(ROM_EVEN_HEX), .AW(11)) rom_e (
-    .clk(clk), .addra(i_rw1[11:1]), .douta(rom_ie), .addrb(d_addr[13:3]), .doutb(rom_de));
+    .clk(clk), .addra(i_rw1[11:1]), .douta(rom_ie), .addrb(d_addr[13:3]), .doutb(rom_de),
+    .web(rom_we && !d_odd), .dinb(d_wdata));
   mycpu_rom2 #(.HEX(ROM_ODD_HEX), .AW(11)) rom_o (
-    .clk(clk), .addra(i_rw[11:1]), .douta(rom_io), .addrb(d_addr[13:3]), .doutb(rom_do));
+    .clk(clk), .addra(i_rw[11:1]), .douta(rom_io), .addrb(d_addr[13:3]), .doutb(rom_do),
+    .web(rom_we && d_odd), .dinb(d_wdata));
 
   // ---- 内蔵 RAM の前の 32KB（偶数・奇数 × 4 バイト。どれも 2 ポート：A は命令の口が読むだけ、B はデータの口） ----
   //   命令の口：奇数側は i_addr の 8 バイト、偶数側は i_addr+4 の 8 バイト（i_addr が偶数番目なら同じところ）
@@ -576,15 +582,19 @@ module mycpu_rom2 #(parameter HEX = "", parameter integer AW = 11) (
   input  wire [AW-1:0] addra,
   output reg  [31:0]   douta,
   input  wire [AW-1:0] addrb,
-  output reg  [31:0]   doutb
+  output reg  [31:0]   doutb,
+  input  wire          web,              // 実際には 1 にならない（上の rom_we）
+  input  wire [31:0]   dinb
 );
-  // 読み出し口が 2 つの ROM。指示しないと Gowin の合成は BSRAM にせず LUT で組もうとする（65536 LUT で入らない）
+  // 読み出し口が 2 つの ROM。2 ポートの BSRAM（DPB）にさせるため、書き込み口も付けた RAM の形で書く（書き込みは起きない）。
+  // block_ram の指示がないと、Gowin の合成は LUT で組もうとする（65536 LUT で入らない）
   (* syn_ramstyle = "block_ram", syn_romstyle = "block_rom" *)
   reg [31:0] mem [0:(1 << AW) - 1];
   initial $readmemh(HEX, mem);
+  always @(posedge clk) douta <= mem[addra];
   always @(posedge clk) begin
-    douta <= mem[addra];
-    doutb <= mem[addrb];
+    if (web) mem[addrb] <= dinb;
+    else doutb <= mem[addrb];
   end
 endmodule
 
