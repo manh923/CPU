@@ -575,6 +575,8 @@ module mycpu_rom2 #(parameter HEX = "", parameter integer AW = 11) (
   input  wire [AW-1:0] addrb,
   output reg  [31:0]   doutb
 );
+  // 読み出し口が 2 つの ROM。指示しないと Gowin の合成は BSRAM にせず LUT で組もうとする（65536 LUT で入らない）
+  (* syn_ramstyle = "block_ram", syn_romstyle = "block_rom" *)
   reg [31:0] mem [0:(1 << AW) - 1];
   initial $readmemh(HEX, mem);
   always @(posedge clk) begin
