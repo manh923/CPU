@@ -82,13 +82,15 @@ module mycpu_video #(
   assign paddr = gdata[{gb1, 3'b000} +: 8];
   wire [15:0] cw = half1 ? vdata[31:16] : vdata[15:0];
 
+  // フォントの ROM（BSRAM 2 個）。指示しないと Gowin の合成は LUT で組もうとする（32768 LUT で入らない）
+  (* syn_ramstyle = "block_ram", syn_romstyle = "block_rom" *)
   reg [7:0] font [0:4095];
   initial $readmemh(FONT_HEX, font);
   reg [7:0] bits2, attr2;
   reg [2:0] x2;
   reg       act2, hs2, vs2, gact2;
+  always @(posedge pclk) bits2 <= font[{cw[7:0], y1}];   // ROM の読み出しだけの always（BSRAM にしやすい形）
   always @(posedge pclk) begin
-    bits2 <= font[{cw[7:0], y1}];
     attr2 <= cw[15:8];
     x2 <= x1; act2 <= act1; hs2 <= hs1; vs2 <= vs1; gact2 <= gact1;
   end
