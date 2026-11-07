@@ -29,20 +29,23 @@ module tb_tmds;
 
   localparam [39:0] CTRL = {10'b1010101011, 10'b0101010100, 10'b0010101011, 10'b1101010100};
   integer n, errors, bal, worst;
-  reg [7:0] pd;
-  reg       pde;
-  reg [1:0] pc;
+  reg [7:0] pd, nd;
+  reg       pde, nde;
+  reg [1:0] pc, nc;
   initial begin
-    errors = 0; bal = 0; worst = 0;
+    errors = 0; bal = 0; worst = 0; nde = 1'b0; nd = 8'd0; nc = 2'd0;
     for (n = 0; n < 50000; n = n + 1) begin
       @(negedge clk);
       // 表示期間は長めに、たまに表示期間外（制御信号）を挟む
       de = ($random & 63) != 0;
       d = (n % 3 == 0) ? 8'hFF : (n % 7 == 0) ? 8'h00 : $random;
       c = $random;
-      pd = d; pde = de; pc = c;
+      // 符号器の出力は入力の 2 クロック後：この後の posedge で出てくるのは 1 つ前に入れたもの
+      pd = nd; pde = nde; pc = nc;
+      nd = d; nde = de; nc = c;
       @(posedge clk); #0.5;
-      if (pde) begin
+      if (n == 0) ;   // まだ何も出てこない
+      else if (pde) begin
         if (decode(q) !== pd) begin
           errors = errors + 1;
           if (errors < 5) $display("NG: %02x → %b → %02x", pd, q, decode(q));
