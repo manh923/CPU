@@ -1,9 +1,8 @@
 // Tang Nano 20K（GW2AR-LV18QN88C8/I7）のトップ
-//   CPU は 27MHz の水晶をそのまま使う。画面は PLL で 371.25MHz を作り、5 分周した 74.25MHz を画素クロックにする。
+//   CPU は 27MHz の水晶から PLL で作った 18MHz で動かす。画面は別の PLL で 371.25MHz を作り、5 分周した 74.25MHz を画素クロックにする。
 //   HDMI 端子からは DVI 信号（音声なし）を出す。HDMI モニタにそのまま映る。
 // Gowin 専用の部品（rPLL・CLKDIV・OSER10・ELVDS_OBUF）を使うのはこのファイルだけ。
-// SDRAM（チップの中の 64Mbit）は CPU と同じ 27MHz で動かす（rtl/sdram.v）。
-// ※ボードでの動作確認はまだ。PLL の設定値とピンは Sipeed の HDMI 例と同じ値にしてある。
+// SDRAM（チップの中の 64Mbit）は CPU と同じ 18MHz で動かす（rtl/sdram.v）。
 module top_tangnano20k (
   input  wire       clk27,       // 27MHz
   input  wire       btn_rst,     // S1：押すとリセット
@@ -49,11 +48,29 @@ module top_tangnano20k (
     .CLKOUT(clk_pix), .HCLKIN(clk_ser), .RESETN(pll_lock), .CALIB(1'b0)
   );
 
-  // ---- リセット（電源投入時とボタン） ----
+  // CPU と SDRAM のクロック：18MHz（27 ÷ 3 × 2、VCO 576MHz）。
+  // 27MHz では配置配線後の見積もりが 18.1MHz で間に合わない（CPU の 1 クロックの経路が長い）
+  localparam integer CPU_HZ = 18_000_000;
+  wire clk_cpu, cpu_lock;
+  rPLL #(
+    .FCLKIN("27"), .DEVICE("GW2AR-18C"),
+    .IDIV_SEL(2), .FBDIV_SEL(1), .ODIV_SEL(32),
+    .DYN_IDIV_SEL("false"), .DYN_FBDIV_SEL("false"), .DYN_ODIV_SEL("false"),
+    .PSDA_SEL("0000"), .DYN_DA_EN("true"), .DUTYDA_SEL("1000"),
+    .CLKOUT_FT_DIR(1'b1), .CLKOUTP_FT_DIR(1'b1), .CLKOUT_DLY_STEP(0), .CLKOUTP_DLY_STEP(0),
+    .CLKFB_SEL("internal"), .CLKOUT_BYPASS("false"), .CLKOUTP_BYPASS("false"), .CLKOUTD_BYPASS("false"),
+    .DYN_SDIV_SEL(2), .CLKOUTD_SRC("CLKOUT"), .CLKOUTD3_SRC("CLKOUT")
+  ) cpu_pll (
+    .CLKOUT(clk_cpu), .LOCK(cpu_lock), .CLKOUTP(), .CLKOUTD(), .CLKOUTD3(),
+    .RESET(1'b0), .RESET_P(1'b0), .CLKIN(clk27), .CLKFB(1'b0),
+    .FBDSEL(6'd0), .IDSEL(6'd0), .ODSEL(6'd0), .PSDA(4'd0), .DUTYDA(4'd0), .FDLY(4'd0)
+  );
+
+  // ---- リセット（電源投入時とボタン。CPU の PLL が揃うまでも） ----
   reg [15:0] por = 16'd0;
   reg        rst = 1'b1;
-  always @(posedge clk27) begin
-    if (btn_rst) begin por <= 16'd0; rst <= 1'b1; end
+  always @(posedge clk_cpu) begin
+    if (btn_rst || !cpu_lock) begin por <= 16'd0; rst <= 1'b1; end
     else if (por != 16'hFFFF) por <= por + 16'd1;
     else rst <= 1'b0;
   end
@@ -70,8 +87,8 @@ module top_tangnano20k (
   wire [5:0]  led;
   wire        halted;
   wire [1:0]  halt_code;
-  mycpu_soc #(.CLK_HZ(27_000_000), .BAUD(115_200), .ROM_EVEN_HEX("rom_even.hex"), .ROM_ODD_HEX("rom_odd.hex")) soc (
-    .clk(clk27), .rst(rst), .uart_rxd(uart_rx), .uart_txd(uart_tx),
+  mycpu_soc #(.CLK_HZ(CPU_HZ), .BAUD(115_200), .ROM_EVEN_HEX("rom_even.hex"), .ROM_ODD_HEX("rom_odd.hex")) soc (
+    .clk(clk_cpu), .rst(rst), .uart_rxd(uart_rx), .uart_txd(uart_tx),
     .sd_sclk(sd_clk), .sd_mosi(sd_cmd), .sd_miso(sd_dat0), .sd_cs_n(sd_dat3),
     .sdram_clk(O_sdram_clk), .sdram_cke(O_sdram_cke), .sdram_cs_n(O_sdram_cs_n), .sdram_ras_n(O_sdram_ras_n),
     .sdram_cas_n(O_sdram_cas_n), .sdram_we_n(O_sdram_wen_n), .sdram_a(O_sdram_addr), .sdram_ba(O_sdram_ba),
